@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">wifi密码工具</string>
+    <string name="wifi_name">wifi名称：</string>
+    <string name="one_try_time_ms">单个尝试时间(ms)：</string>
+    <string name="try_time">5000</string>
+    <string name="dictionary_file">字典文件：</string>
+    <string name="input_tip">---请选择---</string>
+    <string name="start_line">开始行数：</string>
+    <string name="_1">1</string>
+    <string name="startbtn">开始运行</string>
+    <string name="run_output">运行输出</string>
+    <string name="auto_scroll">自动滚动</string>
+    <string name="copy">复制</string>
+    <string name="clear_output">清空</string>
+    <string name="choose_wifi">选择</string>
+    <string name="progress_tip">等待开始运行</string>
+</resources>

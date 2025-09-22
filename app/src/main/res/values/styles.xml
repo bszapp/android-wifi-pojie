@@ -1,0 +1,8 @@
+<resources>
+    <!-- 弹窗式Activity主题 -->
+    <style name="Theme.AppCompat.Dialog.Custom" parent="Theme.AppCompat.Dialog">
+        <item name="android:windowMinWidthMajor">0dp</item>
+        <item name="android:windowMinWidthMinor">0dp</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>
