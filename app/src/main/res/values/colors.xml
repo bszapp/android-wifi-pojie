@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="light_grey">#EEEEEE</color>
+    <color name="main_color">#009A99</color>
+    <color name="main_color_transparent_2">#66009A99</color>
+    <color name="main_color_transparent_1">#44009A99</color>
+    <color name="main_color_transparent_0">#30009A99</color>
+    <color name="icon_circle_bg">#11009A99</color>
+    <color name="appname_color">@color/main_color</color>
+    <color name="grey">#666666</color>
+    <color name="dark_grey">#333333</color>
+
+    <color name="switch_circle_normal">@color/grey</color>
+    <color name="switch_circle_checked">#FFFFFF</color>
+    <color name="switch_track_normal">#33888888</color>
+    <color name="switch_track_checked">#009A99</color>
+
+    <color name="button_text_color">#FFFFFF</color>
+    <color name="background">#FFFFFF</color>
+</resources>

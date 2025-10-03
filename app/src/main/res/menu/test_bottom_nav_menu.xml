@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_wifi_list"
+        android:title="wifi列表"
+        android:icon="@drawable/ic_list" />
+
+    <item
+        android:id="@+id/nav_command_test"
+        android:title="命令运行"
+        android:icon="@drawable/ic_send" />
+
+    <item
+        android:id="@+id/nav_api_test"
+        android:title="API测试"
+        android:icon="@drawable/ic_api" />
+
+    <item
+        android:id="@+id/nav_logcat_test"
+        android:title="Wifi日志"
+        android:icon="@drawable/ic_logcat" />
+</menu>

@@ -1,0 +1,808 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="0dp">
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardBackgroundColor="#11888888"
+            android:foreground="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            app:strokeWidth="0dp"
+            app:strokeColor="@android:color/transparent">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <FrameLayout
+                        android:layout_width="36dp"
+                        android:layout_height="36dp">
+                        <ImageView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_icon_circle" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_info"
+                            app:tint="@color/main_color" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="读取网络连接状态"
+                        android:textColor="@color/black"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:fontFamily="sans-serif-medium"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="0dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于读取wifi打开状态以及监听连接结果事件"
+                    android:paddingTop="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="实现方式"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <View.SegmentedButtonGroup
+                    android:id="@+id/read_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_margin="8dp" />
+                <LinearLayout
+                    android:id="@+id/read_mode_api_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="实现方式类似幻影wifi" />
+
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/read_mode_cmd_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="使用logcat以及cmd wifi实现" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="top"
+                        android:orientation="horizontal">
+
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:padding="4dp"
+                            android:src="@drawable/ic_info"
+                            app:tint="@color/grey" />
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="由于不同设备之间的命令行格式不同，本选项可能有部分设备不支持" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="授权器"
+                        android:textStyle="bold"
+                        android:textColor="@color/main_color"
+                        android:paddingTop="12dp" />
+                    <View.SegmentedButtonGroup
+                        android:id="@+id/read_mode_cmd"
+                        android:layout_width="match_parent"
+                        android:layout_height="36dp"
+                        android:layout_margin="8dp" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardBackgroundColor="#11888888"
+            android:foreground="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            app:strokeWidth="0dp"
+            app:strokeColor="@android:color/transparent">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <FrameLayout
+                        android:layout_width="36dp"
+                        android:layout_height="36dp">
+                        <ImageView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_icon_circle" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_scan"
+                            app:tint="@color/main_color" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="扫描wifi"
+                        android:textColor="@color/black"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:fontFamily="sans-serif-medium"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="0dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于扫描附近wifi列表"
+                    android:paddingTop="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="实现方式"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <View.SegmentedButtonGroup
+                    android:id="@+id/scan_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_margin="8dp" />
+                <LinearLayout
+                    android:id="@+id/scan_mode_api_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="需要开启位置信息并获取定位权限" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/scan_mode_cmd_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="使用cmd wifi实现" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="top"
+                        android:orientation="horizontal">
+
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:padding="4dp"
+                            android:src="@drawable/ic_info"
+                            app:tint="@color/grey" />
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="由于不同设备之间的命令行格式不同，本选项仅部分设备支持" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="授权器"
+                        android:textStyle="bold"
+                        android:textColor="@color/main_color"
+                        android:paddingTop="12dp" />
+                    <View.SegmentedButtonGroup
+                        android:id="@+id/scan_mode_cmd"
+                        android:layout_width="match_parent"
+                        android:layout_height="36dp"
+                        android:layout_margin="8dp" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardBackgroundColor="#11888888"
+            android:foreground="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            app:strokeWidth="0dp"
+            app:strokeColor="@android:color/transparent">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <FrameLayout
+                        android:layout_width="36dp"
+                        android:layout_height="36dp">
+                        <ImageView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_icon_circle" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_tools"
+                            app:tint="@color/main_color" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="调整wifi状态"
+                        android:textColor="@color/black"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:fontFamily="sans-serif-medium"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="0dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于在wifi关闭时自动打开wifi"
+                    android:paddingTop="8dp" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="实现方式"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <View.SegmentedButtonGroup
+                    android:id="@+id/turnon_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_margin="8dp" />
+                <LinearLayout
+                    android:id="@+id/turnon_mode_api_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="需要每次手动点击确定" />
+
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/turnon_mode_cmd_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="使用cmd wifi实现" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="授权器"
+                        android:textStyle="bold"
+                        android:textColor="@color/main_color"
+                        android:paddingTop="12dp" />
+                    <View.SegmentedButtonGroup
+                        android:id="@+id/turnon_mode_cmd"
+                        android:layout_width="match_parent"
+                        android:layout_height="36dp"
+                        android:layout_margin="8dp" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardBackgroundColor="#11888888"
+            android:foreground="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            app:strokeWidth="0dp"
+            app:strokeColor="@android:color/transparent">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <FrameLayout
+                        android:layout_width="36dp"
+                        android:layout_height="36dp">
+                        <ImageView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_icon_circle" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_api"
+                            app:tint="@color/main_color" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="连接到wifi"
+                        android:textColor="@color/black"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:fontFamily="sans-serif-medium"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="0dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于尝试连接指定wifi指定密码"
+                    android:paddingTop="8dp" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="实现方式"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <View.SegmentedButtonGroup
+                    android:id="@+id/connect_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_margin="8dp" />
+                <LinearLayout
+                    android:id="@+id/connect_mode_apiold_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="已经弃用的连接API，使用targetSdk28实现，类似幻影wifi" />
+
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/connect_mode_apinew_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Android10新推出的API，每个网络名称需要手动同意一次，并且只能临时连接" />
+
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/connect_mode_cmd_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="使用cmd wifi实现，必须有root权限" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="授权器"
+                        android:textStyle="bold"
+                        android:textColor="@color/main_color"
+                        android:paddingTop="12dp" />
+                    <View.SegmentedButtonGroup
+                        android:id="@+id/connect_mode_cmd"
+                        android:layout_width="match_parent"
+                        android:layout_height="36dp"
+                        android:layout_margin="8dp" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardBackgroundColor="#11888888"
+            android:foreground="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            app:strokeWidth="0dp"
+            app:strokeColor="@android:color/transparent">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <FrameLayout
+                        android:layout_width="36dp"
+                        android:layout_height="36dp">
+                        <ImageView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_icon_circle" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_server"
+                            app:tint="@color/main_color" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="管理已保存的网络"
+                        android:textColor="@color/black"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:fontFamily="sans-serif-medium"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="0dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于在连接前检查是否保存过以及自动忘记wifi"
+                    android:paddingTop="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="实现方式"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <View.SegmentedButtonGroup
+                    android:id="@+id/manage_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_margin="8dp" />
+                <LinearLayout
+                    android:id="@+id/manage_mode_api_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="需要开启位置信息并获取定位权限" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/manage_mode_cmd_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="使用cmd wifi实现" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="top"
+                        android:orientation="horizontal">
+
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:padding="4dp"
+                            android:src="@drawable/ic_info"
+                            app:tint="@color/grey" />
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="由于不同设备之间的命令行格式不同，本选项仅部分设备支持" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="授权器"
+                        android:textStyle="bold"
+                        android:textColor="@color/main_color"
+                        android:paddingTop="12dp" />
+                    <View.SegmentedButtonGroup
+                        android:id="@+id/manage_mode_cmd"
+                        android:layout_width="match_parent"
+                        android:layout_height="36dp"
+                        android:layout_margin="8dp" />
+                    <Button
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="点击授权"
+                        style="@style/App.button"
+                        android:drawableStart="@drawable/ic_send"
+                        android:layout_gravity="end" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            app:cardCornerRadius="16dp"
+            app:cardBackgroundColor="#11888888"
+            android:foreground="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            app:strokeWidth="0dp"
+            app:strokeColor="@android:color/transparent">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <FrameLayout
+                        android:layout_width="36dp"
+                        android:layout_height="36dp">
+                        <ImageView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_icon_circle" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_widgets"
+                            app:tint="@color/main_color" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="后台运行"
+                        android:textColor="@color/black"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:fontFamily="sans-serif-medium"
+                        android:paddingStart="8dp"
+                        android:paddingEnd="0dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于在后台运行任务"
+                    android:paddingTop="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="省电策略"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="为了避免系统误杀后台，请将省电策略改为无限制"
+                    android:paddingTop="8dp" />
+                <Button
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="去设置"
+                    style="@style/App.button"
+                    android:drawableStart="@drawable/ic_send"
+                    android:layout_gravity="end" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="top"
+                    android:orientation="horizontal"
+                    tools:ignore="UseCompoundDrawables">
+
+                    <ImageView
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:padding="4dp"
+                        android:src="@drawable/ic_info"
+                        app:tint="@color/grey" />
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="由于各厂商会对应用后台运行进行不同的限制，可能还需要进行额外设置，请自行查阅相应资料" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="后台通知"
+                    android:textStyle="bold"
+                    android:textColor="@color/main_color"
+                    android:paddingTop="12dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="用于显示运行进度以及连接成功等通知"
+                    android:paddingTop="8dp" />
+                <Button
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="点击授权"
+                    style="@style/App.button"
+                    android:drawableStart="@drawable/ic_send"
+                    android:layout_gravity="end" />
+
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="20dp"
+            tools:ignore="TooManyViews" />
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<settings>
+    <item
+        key="show_notification"
+        name="显示通知"
+        desc="显示破解进度通知以及连接成功通知"
+        type="switch"
+        defaultValue="true"
+        icon="@drawable/ic_bell"
+        show="true" />
+
+    <item
+        key="keep_screen_on"
+        name="不锁定屏幕"
+        desc="运行时保持屏幕常亮"
+        type="switch"
+        defaultValue="true"
+        icon="@drawable/ic_bright"
+        show="true" />
+
+    <item
+        key="read_mode"
+        type="int"
+        defaultValue="0"
+        show="false" />
+    <item
+        key="read_mode_cmd"
+        type="int"
+        defaultValue="0"
+        show="false" />
+
+    <item
+        key="scan_mode"
+        type="int"
+        defaultValue="0"
+        show="false" />
+    <item
+        key="scan_mode_cmd"
+        type="int"
+        defaultValue="0"
+        show="false" />
+
+    <item
+        key="turnon_mode"
+        type="int"
+        defaultValue="0"
+        show="false" />
+    <item
+        key="turnon_mode_cmd"
+        type="int"
+        defaultValue="0"
+        show="false" />
+
+    <item
+        key="connect_mode"
+        type="int"
+        defaultValue="0"
+        show="false" />
+    <item
+        key="connect_mode_cmd"
+        type="int"
+        defaultValue="0"
+        show="false" />
+    <item
+        key="manage_mode"
+        type="int"
+        defaultValue="0"
+        show="false" />
+    <item
+        key="manage_mode_cmd"
+        type="int"
+        defaultValue="0"
+        show="false" />
+</settings>

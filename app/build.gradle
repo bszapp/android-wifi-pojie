@@ -1,0 +1,58 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+android {
+    namespace 'wifi.pojie'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "wifi.pojie"
+        minSdk 24
+        targetSdk 28
+        versionCode 11
+        versionName "1.1"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    buildFeatures {
+        aidl = true
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation libs.material.v1110
+    implementation libs.androidx.preference.v120
+    implementation libs.appcompat
+    implementation libs.material
+    implementation libs.recyclerview
+    implementation libs.androidx.recyclerview
+    implementation libs.androidx.constraintlayout
+    implementation libs.swiperefreshlayout
+    implementation libs.material.icons
+    implementation libs.androidx.preference
+    testImplementation libs.junit
+    androidTestImplementation libs.ext.junit
+    androidTestImplementation libs.espresso.core
+    implementation libs.shizuku.provider
+    implementation libs.shizuku.api
+    implementation libs.gson
+
+    implementation libs.markwon.core
+    implementation libs.material
+}

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FFFFFF</color>
+    <color name="white">#000000</color>
+    <color name="light_grey">#333333</color>
+    <color name="main_color">#FF018786</color>
+    <color name="main_color_transparent_2">#66018786</color>
+    <color name="main_color_transparent_1">#44018786</color>
+    <color name="main_color_transparent_0">#30018786</color>
+    <color name="icon_circle_bg">#11018786</color>
+    <color name="appname_color">#FFFFFF</color>
+    <color name="grey">#AAAAAA</color>
+    <color name="dark_grey">#CCCCCC</color>
+    <color name="switch_circle_checked">#002828</color>
+    <color name="button_text_color">#FFFFFF</color>
+    <color name="background">#181818</color>
+</resources>

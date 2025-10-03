@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CopilotDiffPersistence">
+    <option name="pendingDiffs">
+      <map>
+        <entry key="$PROJECT_DIR$/app/src/main/res/color/switch_track_red.xml">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/app/src/main/res/color/switch_track_red.xml" />
+              <option name="originalContent" value="&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&#10;&lt;selector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;&gt;&#10;    &lt;item android:color=&quot;#ff0000&quot; android:state_checked=&quot;true&quot;/&gt;&#10;    &lt;item android:color=&quot;#ff0000&quot; android:state_checked=&quot;false&quot;/&gt;&#10;&lt;/selector&gt;&#10;" />
+              <option name="updatedContent" value="&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&#10;&lt;selector xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;&gt;&#10;    &lt;item android:color=&quot;#ff0000&quot; android:state_checked=&quot;true&quot;/&gt;&#10;    &lt;item android:color=&quot;#ff0000&quot; android:state_checked=&quot;false&quot;/&gt;&#10;&lt;/selector&gt;&#10;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>
