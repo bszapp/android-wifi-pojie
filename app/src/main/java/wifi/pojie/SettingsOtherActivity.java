@@ -9,18 +9,21 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+
 import com.google.android.material.materialswitch.MaterialSwitch;
+
 import org.xmlpull.v1.XmlPullParser;
 
-public class SettingsZaxiangActivity extends AppCompatActivity {
+public class SettingsOtherActivity extends AppCompatActivity {
     private SettingsManager settingsManager;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_settings_zaxiang);
+        setContentView(R.layout.activity_settings_other);
 
         ImageButton backButton = findViewById(R.id.back_button);
         if (backButton != null) {

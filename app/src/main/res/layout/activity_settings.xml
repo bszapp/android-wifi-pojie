@@ -258,7 +258,7 @@
                 android:gravity="center"
                 android:textColor="#888888"
                 android:textSize="14sp"
-                android:text="本应用为开源免费软件\n仅供研究连接原理使用，严禁用于非法用途" />
+                android:text="仅供研究连接原理使用，严禁用于非法用途" />
         </LinearLayout>
 
 

@@ -52,7 +52,9 @@ public class WorkmodePageFragment extends Fragment {
 
     private SettingsManager settingsManager;
     private PermissionManager pm;
-    @Override public void onCreate(Bundle savedInstanceState) {
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         settingsManager = new SettingsManager(requireContext());
         pm = ((GuideActivity) requireActivity()).pm;
@@ -232,49 +234,50 @@ public class WorkmodePageFragment extends Fragment {
         manageModeApiButton.setEnabled(!locationStatus);
         manageModeApiButton.setText(locationStatus ? "已授权" : "点击授权");
 
-        int r=pm.checkRootStatus();
-        boolean rootStatus = r == 1;
+        int rootStatusType = pm.checkRootStatus();
+        boolean rootStatus = rootStatusType == 1;
         if (settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD) == 0) {
             readModeCmdButton.setEnabled(!rootStatus);
-            readModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+            readModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[rootStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD) == 0) {
             scanModeCmdButton.setEnabled(!rootStatus);
-            scanModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+            scanModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[rootStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD) == 0) {
             turnonModeCmdButton.setEnabled(!rootStatus);
-            turnonModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+            turnonModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[rootStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD) == 0) {
             connectModeCmdButton.setEnabled(!rootStatus);
-            connectModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+            connectModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[rootStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD) == 0) {
             manageModeCmdButton.setEnabled(!rootStatus);
-            manageModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+            manageModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[rootStatusType + 1]);
         }
 
-        boolean shizukuStatus = pm.getShizukuStatus() == 1;
+        int shizukuStatusType = pm.getShizukuStatus();
+        boolean shizukuStatus = shizukuStatusType == 1;
         if (settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD) == 1) {
             readModeCmdButton.setEnabled(!shizukuStatus);
-            readModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+            readModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[shizukuStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD) == 1) {
             scanModeCmdButton.setEnabled(!shizukuStatus);
-            scanModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+            scanModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[shizukuStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD) == 1) {
             turnonModeCmdButton.setEnabled(!shizukuStatus);
-            turnonModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+            turnonModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[shizukuStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD) == 1) {
             connectModeCmdButton.setEnabled(!shizukuStatus);
-            connectModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+            connectModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[shizukuStatusType + 1]);
         }
         if (settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD) == 1) {
             manageModeCmdButton.setEnabled(!shizukuStatus);
-            manageModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+            manageModeCmdButton.setText(new String[]{"无法获取", "点击授权", "已授权"}[shizukuStatusType + 1]);
         }
 
         boolean batteryStatus = pm.isBatteryOptimizationIgnored();

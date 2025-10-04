@@ -30,7 +30,7 @@
 
         <activity
             android:name=".WifiSelectionDialog"
-            android:theme="@style/Theme.AppCompat.DayNight.Dialog"
+            android:theme="@style/Theme.App.Dialog.Rounded"
             android:screenOrientation="portrait"
             android:exported="false" />
 
@@ -40,11 +40,11 @@
             android:exported="false" />
 
         <activity
-            android:name=".SettingsZaxiangActivity"
+            android:name=".SettingsOtherActivity"
             android:screenOrientation="portrait"
             android:exported="false"/>
 
-        <activity 
+        <activity
             android:name=".TestActivity"
             android:screenOrientation="portrait"
             android:exported="true" />

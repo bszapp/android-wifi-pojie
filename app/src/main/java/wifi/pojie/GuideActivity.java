@@ -1,17 +1,24 @@
 package wifi.pojie;
 
 import android.annotation.SuppressLint;
+import android.content.DialogInterface;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.widget.Button;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog; // 导入 AlertDialog
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder; // 建议使用 Material 对话框
+
+import java.util.List; // 导入 List
+import java.util.Objects;
 
 import View.StepsView;
 
@@ -24,7 +31,7 @@ public class GuideActivity extends AppCompatActivity {
     public PermissionManager pm;
 
     String[] titles = {"引导", "工作模式", "帮助文档"};
-    
+
     @SuppressLint("ResourceAsColor")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -60,16 +67,30 @@ public class GuideActivity extends AppCompatActivity {
         });
 
         nextButton = findViewById(R.id.button);
+        // --- 主要修改点在这里 ---
         nextButton.setOnClickListener(v -> {
             int currentItem = viewPager.getCurrentItem();
-            if (currentItem < adapter.getItemCount() - 1) {
-                viewPager.setCurrentItem(currentItem + 1, true); // 使用动画切换
+
+            // 如果当前是工作模式页面 (position == 1)，则检查权限
+            if (currentItem == 1) {
+                List<String> missingPermissions = pm.getMissingPermissionsSummary(true);
+                if (!missingPermissions.isEmpty()) {
+                    // 如果有缺失的权限，显示弹窗
+                    showPermissionWarningDialog(missingPermissions);
+                } else {
+                    // 如果没有缺失的权限，直接进入下一步
+                    navigateToNextPage();
+                }
+            } else if (currentItem < adapter.getItemCount() - 1) {
+                // 如果不是工作模式页面，且不是最后一页，直接进入下一步
+                navigateToNextPage();
             } else {
+                // 如果是最后一页，点击“完成”
                 //TODO:记录状态
                 finish();
             }
         });
-        
+
         String[] steps = {"欢迎", "设置模式", "查看说明"};
         stepsView = findViewById(R.id.step);
         stepsView.setSteps(steps)
@@ -85,11 +106,46 @@ public class GuideActivity extends AppCompatActivity {
                 .setAnimationCircleRadius(13)
                 .drawSteps();
     }
-    
+
+    /**
+     * 导航到下一个页面
+     */
+    private void navigateToNextPage() {
+        int currentItem = viewPager.getCurrentItem();
+        if (currentItem < Objects.requireNonNull(viewPager.getAdapter()).getItemCount() - 1) {
+            viewPager.setCurrentItem(currentItem + 1, true);
+        }
+    }
+
+    /**
+     * 显示权限缺失警告对话框
+     * @param missingPermissions 缺失的权限列表
+     */
+    private void showPermissionWarningDialog(List<String> missingPermissions) {
+        StringBuilder messageBuilder = new StringBuilder("检测到以下权限或设置尚未完成，可能会影响应用核心功能：\n\n");
+        for (String permission : missingPermissions) {
+            messageBuilder.append("• ").append(permission).append("\n");
+        }
+        messageBuilder.append("\n确定要跳过吗？");
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("确认跳过")
+                .setMessage(messageBuilder.toString())
+                .setCancelable(false)
+                .setNegativeButton("返回", (dialog, which) -> {
+                    dialog.dismiss();
+                })
+                .setPositiveButton("仍然跳过", (dialog, which) -> {
+                    navigateToNextPage();
+                })
+                .show();
+    }
+
+
     private void updateStepsView(int currentPosition) {
         stepsView.setCurrentPosition(currentPosition);
     }
-    
+
     private static class ViewPagerAdapter extends FragmentStateAdapter {
         public ViewPagerAdapter(@NonNull FragmentActivity fragmentActivity) {
             super(fragmentActivity);

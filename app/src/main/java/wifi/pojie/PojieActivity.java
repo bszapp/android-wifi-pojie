@@ -2,7 +2,6 @@ package wifi.pojie;
 
 import static wifi.pojie.MainActivity.getVersionName;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -10,7 +9,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.drawable.Drawable;
@@ -43,7 +41,6 @@ import androidx.fragment.app.Fragment;
 import com.google.gson.Gson;
 
 import java.io.BufferedReader;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -51,9 +48,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Consumer;
-
-import rikka.shizuku.Shizuku;
 
 public class PojieActivity extends Fragment {
     private static final String TAG = "PojieActivity";
@@ -93,7 +87,7 @@ public class PojieActivity extends Fragment {
                 int progress = intent.getIntExtra(WifiPojieService.EXTRA_PROGRESS, 0);
                 int total = intent.getIntExtra(WifiPojieService.EXTRA_TOTAL, 0);
                 String text = intent.getStringExtra(WifiPojieService.EXTRA_PROGRESS_TEXT);
-                
+
                 if (getActivity() != null) {
                     getActivity().runOnUiThread(() -> {
                         if (text != null) {
@@ -110,20 +104,6 @@ public class PojieActivity extends Fragment {
             }
         }
     };
-
-    private final Shizuku.OnRequestPermissionResultListener permissionResultListener = (requestCode, grantResult) -> {
-        boolean granted = grantResult == PackageManager.PERMISSION_GRANTED;
-        if (!granted && getActivity() != null) {
-            getActivity().runOnUiThread(() -> {
-                commandOutput.setText("");
-                addLog("Shizuku权限被拒绝\n" +
-                        "本应用需要使用adb权限控制wifi连接，否则无法正常运行");
-            });
-        }
-    };
-
-    private final Shizuku.OnBinderReceivedListener binderReceivedListener = this::onBinderReceivedCallback;
-    private final Shizuku.OnBinderDeadListener binderDeadListener = this::onBinderDeadCallback;
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
@@ -145,7 +125,7 @@ public class PojieActivity extends Fragment {
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
                 if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
-                    Toast t = Toast.makeText(getActivity(),"正在加载",Toast.LENGTH_SHORT);
+                    Toast t = Toast.makeText(getActivity(), "正在加载", Toast.LENGTH_SHORT);
                     t.show();
                     dictionarySelect.postDelayed(() -> {
                         Uri uri = result.getData().getData();
@@ -167,7 +147,7 @@ public class PojieActivity extends Fragment {
                                 }
                             }
                         }
-                    },0);
+                    }, 0);
                 }
             });
 
@@ -191,12 +171,11 @@ public class PojieActivity extends Fragment {
     @Override
     public void onViewCreated(@NonNull View view, Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
-        
+
         // 处理状态栏边距
         handleStatusBarInset(view);
 
         settingsManager = new SettingsManager(requireContext());
-        createNotificationChannel();
         initViews(view);
         logSettings();
         setupClickListeners();
@@ -215,17 +194,17 @@ public class PojieActivity extends Fragment {
             getActivity().bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
         }
     }
-    
+
     /**
      * 处理状态栏边距，确保内容不会被状态栏遮挡
      */
     private void handleStatusBarInset(View view) {
         ViewCompat.setOnApplyWindowInsetsListener(view, (v, windowInsets) -> {
             int statusBarHeight = windowInsets.getSystemWindowInsetTop();
-            
+
             // 只应用状态栏高度作为顶部边距
             v.setPadding(v.getPaddingLeft(), statusBarHeight, v.getPaddingRight(), v.getPaddingBottom());
-            
+
             return windowInsets;
         });
     }
@@ -237,11 +216,11 @@ public class PojieActivity extends Fragment {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && getActivity() != null) {
             android.app.NotificationChannel channel = new android.app.NotificationChannel(
                     CHANNEL_ID,
-                    "WiFi破解进度通知",
+                    "进度通知",
                     android.app.NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("显示WiFi密码破解工具运行进度的通知");
-            
+            channel.setDescription("用于显示任务进度");
+
             android.app.NotificationManager notificationManager = getActivity().getSystemService(android.app.NotificationManager.class);
             notificationManager.createNotificationChannel(channel);
         }
@@ -252,8 +231,8 @@ public class PojieActivity extends Fragment {
      */
     private void hideProgressNotification() {
         if (getActivity() != null) {
-            android.app.NotificationManager notificationManager = 
-                (android.app.NotificationManager) getActivity().getSystemService(Context.NOTIFICATION_SERVICE);
+            android.app.NotificationManager notificationManager =
+                    (android.app.NotificationManager) getActivity().getSystemService(Context.NOTIFICATION_SERVICE);
             notificationManager.cancel(NOTIFICATION_ID);
         }
     }
@@ -278,20 +257,7 @@ public class PojieActivity extends Fragment {
         scrollView = (ScrollView) commandOutput.getParent().getParent();
         horizontalScrollView = (HorizontalScrollView) commandOutput.getParent();
 
-        if (ShizukuHelper.isShizukuAvailable()) {
-            ShizukuHelper.addPermissionListener(permissionResultListener);
-            ShizukuHelper.addBinderListener(binderReceivedListener, binderDeadListener);
-
-            if (ShizukuHelper.checkPermission()) {
-                Log.d(TAG, "Requesting Shizuku permission");
-                Shizuku.requestPermission(REQUEST_CODE_PERMISSION);
-            }
-            addLog("wifi密码工具"+ appVersion);
-        } else {
-            addLog("Shizuku服务未启动");
-        }
-            addLog("当前Shizuku权限：" + ShizukuHelper.executeCommandSync("whoami"));
-
+        addLog("wifi密码工具" + appVersion);
     }
 
     private void logSettings() {
@@ -307,9 +273,9 @@ public class PojieActivity extends Fragment {
         addLog(settingsLog.toString());
     }
 
-    private void addLog(String output){
-        if(commandOutput.getText().length()==0)commandOutput.append(output);
-        else commandOutput.append("\n"+output);
+    private void addLog(String output) {
+        if (commandOutput.getText().length() == 0) commandOutput.append(output);
+        else commandOutput.append("\n" + output);
 
         if (autoscroll.isChecked()) {
             scrollView.postDelayed(() -> {
@@ -344,6 +310,9 @@ public class PojieActivity extends Fragment {
                     });
                 }
 
+                if (settingsManager.getBoolean(SettingsManager.KEY_SHOW_NOTIFICATION))
+                    createNotificationChannel();
+
                 // 启动前台服务执行WiFi破解任务
                 if (getActivity() != null) {
                     Map<String, Object> config = new HashMap<>();
@@ -367,20 +336,6 @@ public class PojieActivity extends Fragment {
                     } else {
                         getActivity().startService(serviceIntent);
                     }
-                }
-
-
-                if (!ShizukuHelper.isShizukuAvailable()) {
-                    if (getActivity() != null) {
-                        Toast.makeText(getActivity(), "Shizuku服务未启动", Toast.LENGTH_LONG).show();
-                    }
-                    return;
-                }
-
-                if (ShizukuHelper.checkPermission()) {
-                    Shizuku.requestPermission(REQUEST_CODE_PERMISSION);
-                } else {
-                    //TODO
                 }
             }
         });
@@ -419,28 +374,19 @@ public class PojieActivity extends Fragment {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        // 移除监听器
-        if (ShizukuHelper.isShizukuAvailable()) {
-            ShizukuHelper.removePermissionListener(permissionResultListener);
-            ShizukuHelper.removeBinderListener(binderReceivedListener, binderDeadListener);
-        }
 
         stopRunningCommand();
-        
-        // 解绑服务
+
         if (isServiceBound && getActivity() != null) {
             getActivity().unbindService(serviceConnection);
             isServiceBound = false;
         }
-        
-        // 注销广播接收器
+
         try {
             if (getActivity() != null) {
                 getActivity().unregisterReceiver(serviceBroadcastReceiver);
             }
-        } catch (IllegalArgumentException e) {
-            // 接收器未注册，忽略异常
-        }
+        } catch (IllegalArgumentException ignored) { }
     }
 
     /**
@@ -488,21 +434,17 @@ public class PojieActivity extends Fragment {
                     cursor.close();
                 }
             }
-            
+
             if (fileName == null) {
                 fileName = uri.getLastPathSegment();
             }
-            
+
             return fileName;
         } catch (Exception e) {
             Log.e(TAG, "获取文件名失败", e);
             return null;
         }
     }
-
-    private void onBinderReceivedCallback() { }
-
-    private void onBinderDeadCallback() { }
 
     private void stopRunningCommand() {
         if (wifiPojieService != null) {

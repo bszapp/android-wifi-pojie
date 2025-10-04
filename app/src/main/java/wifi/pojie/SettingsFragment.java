@@ -42,7 +42,7 @@ public class SettingsFragment extends Fragment {
 
         view.findViewById(R.id.btn_help).setOnClickListener(v -> startActivity(new Intent(getActivity(), HelpActivity.class)));
         view.findViewById(R.id.btn_setwork).setOnClickListener(v -> startActivity(new Intent(getActivity(), GuideActivity.class)));
-        view.findViewById(R.id.btn_zaxiang).setOnClickListener(v -> startActivity(new Intent(getActivity(), SettingsZaxiangActivity.class)));
+        view.findViewById(R.id.btn_zaxiang).setOnClickListener(v -> startActivity(new Intent(getActivity(), SettingsOtherActivity.class)));
         view.findViewById(R.id.btn_test).setOnClickListener(v -> startActivity(new Intent(getActivity(), TestActivity.class)));
 
         ((TextView)view.findViewById(R.id.version_text)).setText("v"+getVersionName(requireActivity()));

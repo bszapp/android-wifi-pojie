@@ -1,26 +1,31 @@
 package wifi.pojie;
 
-import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
+import android.widget.Button;
 import android.widget.ListView;
+import android.widget.TextView;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
 
 public class WifiSelectionDialog extends AppCompatActivity {
     private static final String TAG = "WifiSelectionDialog";
-    private ArrayAdapter<String> adapter;
-    private List<String> wifiList;
+    private WifiListAdapter adapter;
     private List<WifiInfo> wifiInfoList;
     private Handler handler;
     private Runnable addWifiRunnable;
@@ -48,7 +53,7 @@ public class WifiSelectionDialog extends AppCompatActivity {
         if (window != null) {
             WindowManager.LayoutParams params = window.getAttributes();
             params.width = getResources().getDisplayMetrics().widthPixels;
-            params.height = getResources().getDisplayMetrics().heightPixels * 2 / 3;
+            params.height = getResources().getDisplayMetrics().heightPixels * 3 / 4;
             window.setAttributes(params);
         }
 
@@ -59,8 +64,8 @@ public class WifiSelectionDialog extends AppCompatActivity {
     private void initViews() {
         swipeRefreshLayout = findViewById(R.id.swipe_refresh_layout);
         ListView wifiListView = findViewById(R.id.wifi_list);
-        wifiList = new ArrayList<>();
-        adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, wifiList);
+        wifiInfoList = new ArrayList<>();
+        adapter = new WifiListAdapter(this, wifiInfoList);
         wifiListView.setAdapter(adapter);
 
         swipeRefreshLayout.setOnRefreshListener(this::refreshWifiList);
@@ -76,11 +81,9 @@ public class WifiSelectionDialog extends AppCompatActivity {
             }
         });
 
-        wifiListView.setOnItemClickListener((parent, view, position, id) -> {
-            WifiInfo selectedWifi = wifiInfoList.get(position);
-            Intent resultIntent = new Intent();
-            resultIntent.putExtra("wifi_name", selectedWifi.name);
-            setResult(RESULT_OK, resultIntent);
+        Button cancelButton = findViewById(R.id.button_cancel);
+        cancelButton.setOnClickListener(v -> {
+            setResult(RESULT_CANCELED);
             finish();
         });
 
@@ -104,8 +107,8 @@ public class WifiSelectionDialog extends AppCompatActivity {
         result = ShizukuHelper.executeCommandSync("cmd wifi list-scan-results");
         String[] lines = result.split("\n");
 
-        // 初始化列表
-        wifiInfoList = new ArrayList<>();
+        // 清空并重新填充列表
+        wifiInfoList.clear();
 
         for (int i = 1; i < lines.length; i++) {
             try {
@@ -122,12 +125,6 @@ public class WifiSelectionDialog extends AppCompatActivity {
         // 按RSSI从大到小排序
         wifiInfoList.sort((wifi1, wifi2) -> Integer.compare(wifi2.rssi, wifi1.rssi));
 
-        // 将排序后的WiFi信息转换为显示字符串列表
-        wifiList.clear();
-        for (WifiInfo wifiInfo : wifiInfoList) {
-            wifiList.add(wifiInfo.name + " (" + wifiInfo.rssi + "dBm)");
-        }
-
         runOnUiThread(() -> {
             adapter.notifyDataSetChanged();
             swipeRefreshLayout.setRefreshing(false);
@@ -141,4 +138,40 @@ public class WifiSelectionDialog extends AppCompatActivity {
             handler.removeCallbacks(addWifiRunnable);
         }
     }
+
+    private class WifiListAdapter extends ArrayAdapter<WifiInfo> {
+
+        public WifiListAdapter(@NonNull Context context, @NonNull List<WifiInfo> objects) {
+            super(context, 0, objects);
+        }
+
+        @NonNull
+        @Override
+        public View getView(int position, @Nullable View convertView, @NonNull ViewGroup parent) {
+            View listItemView = convertView;
+            if (listItemView == null) {
+                listItemView = LayoutInflater.from(getContext()).inflate(
+                        R.layout.list_item_wifi, parent, false);
+            }
+
+            WifiInfo currentWifi = getItem(position);
+
+            TextView wifiNameTextView = listItemView.findViewById(R.id.text_wifi_name);
+            wifiNameTextView.setText(currentWifi.name);
+
+            TextView wifiInfoTextView = listItemView.findViewById(R.id.text_wifi_info);
+            wifiInfoTextView.setText("信号强度: " + currentWifi.rssi + "dBm"); // 可以添加更多信息
+
+            Button selectNetworkButton = listItemView.findViewById(R.id.button_select_network);
+            selectNetworkButton.setOnClickListener(v -> {
+                Intent resultIntent = new Intent();
+                resultIntent.putExtra("wifi_name", currentWifi.name);
+                setResult(RESULT_OK, resultIntent);
+                finish();
+            });
+
+            return listItemView;
+        }
+    }
 }
+

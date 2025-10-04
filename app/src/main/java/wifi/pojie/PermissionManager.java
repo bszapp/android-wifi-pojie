@@ -1,11 +1,13 @@
 package wifi.pojie;
 
+import static androidx.activity.result.ActivityResultCallerKt.registerForActivityResult;
 import static androidx.core.app.ActivityCompat.requestPermissions;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.location.LocationManager;
 import android.net.Uri;
@@ -13,6 +15,7 @@ import android.os.Build;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
+import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -20,7 +23,11 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import rikka.shizuku.Shizuku;
@@ -41,15 +48,17 @@ public class PermissionManager {
     private final ActivityResultLauncher<Intent> locationServicesLauncher;
     private final ActivityResultLauncher<String> notificationPermissionLauncher;
     private final ActivityResultLauncher<Intent> batteryOptimizationLauncher;
+    private final ActivityResultLauncher<Intent> appNotificationSettingsLauncher;
 
     private Shizuku.OnRequestPermissionResultListener shizukuPermissionResultListener;
-    private static final int REQUEST_CODE_NOTIFICATION_PERMISSION = 1002;
+    private final SettingsManager settingsManager;
 
     private boolean allowRoot = false;
 
     public PermissionManager(AppCompatActivity activity) {
         this.activity = activity;
 
+        settingsManager = new SettingsManager(activity);
         // 初始化位置权限请求启动器
         locationPermissionLauncher = activity.registerForActivityResult(
                 new ActivityResultContracts.RequestMultiplePermissions(),
@@ -84,19 +93,49 @@ public class PermissionManager {
                     if (notificationPermissionCallback != null) {
                         notificationPermissionCallback.accept(isGranted);
                     }
+                    settingsManager.setBoolean(SettingsManager.KEY_SHOW_NOTIFICATION, isGranted);
+                });
+        appNotificationSettingsLauncher = activity.registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    boolean isGranted = hasNotificationPermission();
+                    if (notificationPermissionCallback != null) {
+                        notificationPermissionCallback.accept(isGranted);
+                    }
+                    settingsManager.setBoolean(SettingsManager.KEY_SHOW_NOTIFICATION, isGranted);
                 });
 
-        // 初始化电池优化设置启动器
         batteryOptimizationLauncher = activity.registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 result -> {
-                    // 用户从设置页面返回后，重新检查状态并回调
-                    if (isBatteryOptimizationIgnored()) {
-                        if (batteryOptimizationSetCallback != null) {
-                            batteryOptimizationSetCallback.accept(isBatteryOptimizationIgnored());
+
+                    final android.os.Handler handler = new android.os.Handler(activity.getMainLooper());
+                    final int maxAttempts = 10;
+                    final int interval = 100;
+                    final int[] currentAttempt = {0};
+
+                    final Runnable checkRunnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            currentAttempt[0]++;
+                            boolean isIgnored = isBatteryOptimizationIgnored();
+
+                            if (isIgnored) {
+                                if (batteryOptimizationSetCallback != null) {
+                                    batteryOptimizationSetCallback.accept(true);
+                                }
+                            } else if (currentAttempt[0] < maxAttempts) {
+                                handler.postDelayed(this, interval);
+                            } else {
+                                if (batteryOptimizationSetCallback != null) {
+                                    batteryOptimizationSetCallback.accept(false);
+                                }
+                            }
                         }
-                    }
+                    };
+                    handler.post(checkRunnable);
                 });
+
     }
 
     // --- 检查方法 ---
@@ -210,16 +249,32 @@ public class PermissionManager {
      */
     public void requestNotificationPermission(Consumer<Boolean> callback) {
         this.notificationPermissionCallback = callback;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
-            } else {
+        if (getTargetSdkVersion() >= Build.VERSION_CODES.TIRAMISU && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            //系统33+且应用33+
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            //系统33-
+            if (callback != null) {
                 callback.accept(true);
             }
-        } else {
-            callback.accept(true);
+        } else if (getTargetSdkVersion() < Build.VERSION_CODES.TIRAMISU) {
+            //系统33+但应用33-
+            Intent intent = new Intent();
+            intent.setAction(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, activity.getPackageName());
+            appNotificationSettingsLauncher.launch(intent);
+        }
+
+    }
+
+    public int getTargetSdkVersion() {
+        try {
+            ApplicationInfo applicationInfo = activity.getPackageManager().getApplicationInfo(
+                    activity.getPackageName(), 0
+            );
+            return applicationInfo.targetSdkVersion;
+        } catch (PackageManager.NameNotFoundException e) {
+            return Build.VERSION.SDK_INT;
         }
     }
 
@@ -230,10 +285,21 @@ public class PermissionManager {
      */
     public void requestToIgnoreBatteryOptimizations(Consumer<Boolean> callback) {
         this.batteryOptimizationSetCallback = callback;
-        @SuppressLint("BatteryLife") Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+
+        @SuppressLint("BatteryLife")
+        Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
         intent.setData(Uri.parse("package:" + activity.getPackageName()));
-        batteryOptimizationLauncher.launch(intent);
+
+        if (intent.resolveActivity(activity.getPackageManager()) != null) {
+            batteryOptimizationLauncher.launch(intent);
+        } else {
+            Intent appDetailsIntent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            Uri uri = Uri.fromParts("package", activity.getPackageName(), null);
+            appDetailsIntent.setData(uri);
+            batteryOptimizationLauncher.launch(appDetailsIntent);
+        }
     }
+
 
     public void requestRootPermission(Consumer<Boolean> callback) {
         CommandRunner.executeCommand("su -c whoami", true, null, t -> {
@@ -253,14 +319,98 @@ public class PermissionManager {
      * @param callback    用户授权或拒绝后的回调 (true: 授权, false: 拒绝)。
      */
     public void requestShizukuPermission(final int requestCode, Consumer<Boolean> callback) {
-        this.shizukuPermissionResultListener = (reqCode, grantResult) -> {
-            if (reqCode == requestCode) {
-                callback.accept(grantResult == PackageManager.PERMISSION_GRANTED);
-                Shizuku.removeRequestPermissionResultListener(shizukuPermissionResultListener);
-            }
-        };
+        try {
+            this.shizukuPermissionResultListener = (reqCode, grantResult) -> {
+                if (reqCode == requestCode) {
+                    if (grantResult != PackageManager.PERMISSION_GRANTED) toast("用户拒绝请求");
+                    callback.accept(grantResult == PackageManager.PERMISSION_GRANTED);
+                    Shizuku.removeRequestPermissionResultListener(shizukuPermissionResultListener);
+                }
+            };
 
-        Shizuku.addRequestPermissionResultListener(shizukuPermissionResultListener);
-        Shizuku.requestPermission(requestCode);
+            Shizuku.addRequestPermissionResultListener(shizukuPermissionResultListener);
+            Shizuku.requestPermission(requestCode);
+        } catch (RuntimeException e) {
+            toast("服务未启动");
+        }
     }
+
+    public void toast(String s) {
+        Toast.makeText(activity, s, Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * 检查并汇总当前缺失的权限。
+     * 此方法基于 refreshStatus 中的逻辑，检查哪些权限相关的按钮会处于“可点击”（即未授权）状态。
+     *
+     * @return 返回一个包含所有当前缺失权限描述的字符串列表。如果所有权限都已授予，则返回空列表。
+     */
+    public List<String> getMissingPermissionsSummary(boolean checkRoot) {
+        Set<String> missingPermissions = new HashSet<>(); // 使用 Set 避免重复项
+
+        // --- 读取所有相关的工作模式设置 ---
+        int readMode = settingsManager.getInt(SettingsManager.KEY_READ_MODE);
+        int readModeCmd = settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD);
+
+        int scanMode = settingsManager.getInt(SettingsManager.KEY_SCAN_MODE);
+        int scanModeCmd = settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD);
+
+        int turnonMode = settingsManager.getInt(SettingsManager.KEY_TURNON_MODE);
+        int turnonModeCmd = settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD);
+
+        int connectMode = settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE);
+        int connectModeCmd = settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD);
+
+        int manageMode = settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE);
+        int manageModeCmd = settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD);
+
+        // --- 1. 检查通用权限（电池和通知），这些按钮总是可见的 ---
+        if (!isBatteryOptimizationIgnored()) {
+            missingPermissions.add("电池优化“无限制”设置");
+        }
+        if (!hasNotificationPermission()) {
+            missingPermissions.add("通知权限");
+        }
+
+        // --- 2. 检查位置权限 ---
+        // `scanModeApiButton` 和 `manageModeApiButton` 需要位置权限
+        boolean locationNeeded = (scanMode == 0) || (manageMode == 0);
+        if (locationNeeded && !hasLocationPermission()) {
+            missingPermissions.add("位置信息权限");
+        }
+
+        // --- 3. 检查 Root/Shizuku 权限 ---
+        // 只有当至少有一个命令行模式被激活时，才检查这两种权限
+        boolean cmdModeActive = (readMode == 1) || (scanMode == 1) || (turnonMode == 1) || (connectMode == 2) || (manageMode == 1);
+
+        if (cmdModeActive) {
+            // 检查是否需要Root权限
+            boolean rootNeeded = (readMode == 1 && readModeCmd == 0) ||
+                    (scanMode == 1 && scanModeCmd == 0) ||
+                    (turnonMode == 1 && turnonModeCmd == 0) ||
+                    (connectMode == 2 && connectModeCmd == 0) ||
+                    (manageMode == 1 && manageModeCmd == 0);
+            int rootStatus = checkRootStatus();
+            if (rootNeeded) {
+                if (checkRoot && rootStatus != 1 || !checkRoot && rootStatus == -1) {
+                    missingPermissions.add("Root权限");
+                }
+            }
+
+            // 检查是否需要Shizuku权限
+            boolean shizukuNeeded = (readMode == 1 && readModeCmd == 1) ||
+                    (scanMode == 1 && scanModeCmd == 1) ||
+                    (turnonMode == 1 && turnonModeCmd == 1) ||
+                    (connectMode == 2 && connectModeCmd == 1) ||
+                    (manageMode == 1 && manageModeCmd == 1);
+
+            if (shizukuNeeded && getShizukuStatus() != 1) {
+                missingPermissions.add("Shizuku权限");
+            }
+        }
+
+        return new ArrayList<>(missingPermissions);
+    }
+
+
 }
