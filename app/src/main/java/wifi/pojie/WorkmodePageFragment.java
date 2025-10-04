@@ -4,46 +4,63 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.Fragment;
+
+import java.util.Objects;
 
 import View.SegmentedButtonGroup;
 
 public class WorkmodePageFragment extends Fragment {
 
+    private static final int REQUEST_CODE_PERMISSION = 1001;
+
     SegmentedButtonGroup readModeGroup;
     SegmentedButtonGroup readModeCmdGroup;
     View readModeApiContainer;
     View readModeCmdContainer;
-
     SegmentedButtonGroup turnonMode;
+    SegmentedButtonGroup turnonModeCmdGroup;
     View turnonModeApiContainer;
     View turnonModeCmdContainer;
-    SegmentedButtonGroup turnonModeCmdGroup;
-
     SegmentedButtonGroup connectModeGroup;
+    SegmentedButtonGroup connectModeCmdGroup;
     View connectModeApiOldContainer;
     View connectModeApiNewContainer;
     View connectModeCmdContainer;
-    SegmentedButtonGroup connectModeCmdGroup;
-
     SegmentedButtonGroup scanModeGroup;
+    SegmentedButtonGroup scanModeCmdGroup;
     View scanModeApiContainer;
     View scanModeCmdContainer;
-    SegmentedButtonGroup scanModeCmdGroup;
-
     SegmentedButtonGroup manageModeGroup;
+    SegmentedButtonGroup manageModeCmdGroup;
     View manageModeApiContainer;
     View manageModeCmdContainer;
-    SegmentedButtonGroup manageModeCmdGroup;
+
+    Button readModeCmdButton;
+    Button scanModeApiButton;
+    Button scanModeCmdButton;
+    Button turnonModeCmdButton;
+    Button connectModeCmdButton;
+    Button manageModeApiButton;
+    Button manageModeCmdButton;
+    Button batteryButton;
+    Button notificationButton;
 
     private SettingsManager settingsManager;
+    private PermissionManager pm;
+    @Override public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        settingsManager = new SettingsManager(requireContext());
+        pm = ((GuideActivity) requireActivity()).pm;
+    }
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         View view = inflater.inflate(R.layout.page_workmode, container, false);
-        settingsManager = new SettingsManager(requireContext());
 
         readModeGroup = view.findViewById(R.id.read_mode);
         readModeCmdGroup = view.findViewById(R.id.read_mode_cmd);
@@ -67,7 +84,17 @@ public class WorkmodePageFragment extends Fragment {
         manageModeCmdContainer = view.findViewById(R.id.manage_mode_cmd_container);
         manageModeCmdGroup = view.findViewById(R.id.manage_mode_cmd);
 
-        readModeGroup.listener=selectedId->{
+        readModeCmdButton = view.findViewById(R.id.read_mode_cmd_button);
+        scanModeApiButton = view.findViewById(R.id.scan_mode_api_button);
+        scanModeCmdButton = view.findViewById(R.id.scan_mode_cmd_button);
+        turnonModeCmdButton = view.findViewById(R.id.turnon_mode_cmd_button);
+        connectModeCmdButton = view.findViewById(R.id.connect_mode_cmd_button);
+        manageModeApiButton = view.findViewById(R.id.manage_mode_api_button);
+        manageModeCmdButton = view.findViewById(R.id.manage_mode_cmd_button);
+        batteryButton = view.findViewById(R.id.battery_button);
+        notificationButton = view.findViewById(R.id.notification_button);
+
+        readModeGroup.listener = selectedId -> {
             readModeApiContainer.setVisibility(selectedId == 0 ? View.VISIBLE : View.GONE);
             readModeCmdContainer.setVisibility(selectedId == 1 ? View.VISIBLE : View.GONE);
             settingsManager.setInt(SettingsManager.KEY_READ_MODE, selectedId);
@@ -76,14 +103,15 @@ public class WorkmodePageFragment extends Fragment {
         readModeGroup.addOption("命令行", 1);
         readModeGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_READ_MODE));
 
-        readModeCmdGroup.listener=selectedId->{
+        readModeCmdGroup.listener = selectedId -> {
             settingsManager.setInt(SettingsManager.KEY_READ_MODE_CMD, selectedId);
+            refreshStatus();
         };
         readModeCmdGroup.addOption("Root", 0);
         readModeCmdGroup.addOption("Shizuku", 1);
         readModeCmdGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD));
 
-        scanModeGroup.listener=selectedId->{
+        scanModeGroup.listener = selectedId -> {
             scanModeApiContainer.setVisibility(selectedId == 0 ? View.VISIBLE : View.GONE);
             scanModeCmdContainer.setVisibility(selectedId == 1 ? View.VISIBLE : View.GONE);
             settingsManager.setInt(SettingsManager.KEY_SCAN_MODE, selectedId);
@@ -92,14 +120,15 @@ public class WorkmodePageFragment extends Fragment {
         scanModeGroup.addOption("命令行", 1);
         scanModeGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_SCAN_MODE));
 
-        scanModeCmdGroup.listener=selectedId->{
+        scanModeCmdGroup.listener = selectedId -> {
             settingsManager.setInt(SettingsManager.KEY_SCAN_MODE_CMD, selectedId);
+            refreshStatus();
         };
         scanModeCmdGroup.addOption("Root", 0);
         scanModeCmdGroup.addOption("Shizuku", 1);
         scanModeCmdGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD));
 
-        turnonMode.listener=selectedId->{
+        turnonMode.listener = selectedId -> {
             turnonModeApiContainer.setVisibility(selectedId == 0 ? View.VISIBLE : View.GONE);
             turnonModeCmdContainer.setVisibility(selectedId == 1 ? View.VISIBLE : View.GONE);
             settingsManager.setInt(SettingsManager.KEY_TURNON_MODE, selectedId);
@@ -108,14 +137,15 @@ public class WorkmodePageFragment extends Fragment {
         turnonMode.addOption("命令行", 1);
         turnonMode.setSelectedId(settingsManager.getInt(SettingsManager.KEY_TURNON_MODE));
 
-        turnonModeCmdGroup.listener=selectedId->{
+        turnonModeCmdGroup.listener = selectedId -> {
             settingsManager.setInt(SettingsManager.KEY_TURNON_MODE_CMD, selectedId);
+            refreshStatus();
         };
         turnonModeCmdGroup.addOption("Root", 0);
         turnonModeCmdGroup.addOption("Shizuku", 1);
         turnonModeCmdGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD));
 
-        connectModeGroup.listener=selectedId->{
+        connectModeGroup.listener = selectedId -> {
             connectModeApiOldContainer.setVisibility(selectedId == 0 ? View.VISIBLE : View.GONE);
             connectModeApiNewContainer.setVisibility(selectedId == 1 ? View.VISIBLE : View.GONE);
             connectModeCmdContainer.setVisibility(selectedId == 2 ? View.VISIBLE : View.GONE);
@@ -126,14 +156,15 @@ public class WorkmodePageFragment extends Fragment {
         connectModeGroup.addOption("命令行", 2);
         connectModeGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE));
 
-        connectModeCmdGroup.listener=selectedId->{
+        connectModeCmdGroup.listener = selectedId -> {
             settingsManager.setInt(SettingsManager.KEY_CONNECT_MODE_CMD, selectedId);
+            refreshStatus();
         };
         connectModeCmdGroup.addOption("Root", 0);
         connectModeCmdGroup.addOption("Shizuku", 1);
         connectModeCmdGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD));
 
-        manageModeGroup.listener=selectedId->{
+        manageModeGroup.listener = selectedId -> {
             manageModeApiContainer.setVisibility(selectedId == 0 ? View.VISIBLE : View.GONE);
             manageModeCmdContainer.setVisibility(selectedId == 1 ? View.VISIBLE : View.GONE);
             settingsManager.setInt(SettingsManager.KEY_MANAGE_MODE, selectedId);
@@ -142,14 +173,117 @@ public class WorkmodePageFragment extends Fragment {
         manageModeGroup.addOption("命令行", 1);
         manageModeGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE));
 
-        manageModeCmdGroup.listener=selectedId->{
+        manageModeCmdGroup.listener = selectedId -> {
             settingsManager.setInt(SettingsManager.KEY_MANAGE_MODE_CMD, selectedId);
+            refreshStatus();
         };
         manageModeCmdGroup.addOption("Root", 0);
         manageModeCmdGroup.addOption("Shizuku", 1);
         manageModeCmdGroup.setSelectedId(settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD));
 
+        readModeCmdButton.setOnClickListener(v -> {
+            int mode = settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD);
+            if (mode == 0) pm.requestRootPermission(this::onRequestCallback);
+            else if (mode == 1)
+                pm.requestShizukuPermission(REQUEST_CODE_PERMISSION, this::onRequestCallback);
+        });
+        scanModeApiButton.setOnClickListener(v -> pm.requestLocationPermission(this::onRequestCallback));
+        scanModeCmdButton.setOnClickListener(v -> {
+            int mode = settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD);
+            if (mode == 0) pm.requestRootPermission(this::onRequestCallback);
+            else if (mode == 1)
+                pm.requestShizukuPermission(REQUEST_CODE_PERMISSION, this::onRequestCallback);
+        });
+        turnonModeCmdButton.setOnClickListener(v -> {
+            int mode = settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD);
+            if (mode == 0) pm.requestRootPermission(this::onRequestCallback);
+            else if (mode == 1)
+                pm.requestShizukuPermission(REQUEST_CODE_PERMISSION, this::onRequestCallback);
+        });
+        connectModeCmdButton.setOnClickListener(v -> {
+            int mode = settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD);
+            if (mode == 0) pm.requestRootPermission(this::onRequestCallback);
+            else if (mode == 1)
+                pm.requestShizukuPermission(REQUEST_CODE_PERMISSION, this::onRequestCallback);
+        });
+        manageModeApiButton.setOnClickListener(v -> pm.requestLocationPermission(this::onRequestCallback));
+        manageModeCmdButton.setOnClickListener(v -> {
+            int mode = settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD);
+            if (mode == 0) pm.requestRootPermission(this::onRequestCallback);
+            else if (mode == 1)
+                pm.requestShizukuPermission(REQUEST_CODE_PERMISSION, this::onRequestCallback);
+        });
+        batteryButton.setOnClickListener(v -> pm.requestToIgnoreBatteryOptimizations(this::onRequestCallback));
+        notificationButton.setOnClickListener(v -> pm.requestNotificationPermission(this::onRequestCallback));
+
+        refreshStatus();
+
         return view;
+    }
+
+    private void onRequestCallback(boolean v) {
+        requireActivity().runOnUiThread(this::refreshStatus);
+    }
+
+    private void refreshStatus() {
+        boolean locationStatus = pm.hasLocationPermission();
+        scanModeApiButton.setEnabled(!locationStatus);
+        scanModeApiButton.setText(locationStatus ? "已授权" : "点击授权");
+        manageModeApiButton.setEnabled(!locationStatus);
+        manageModeApiButton.setText(locationStatus ? "已授权" : "点击授权");
+
+        int r=pm.checkRootStatus();
+        boolean rootStatus = r == 1;
+        if (settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD) == 0) {
+            readModeCmdButton.setEnabled(!rootStatus);
+            readModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD) == 0) {
+            scanModeCmdButton.setEnabled(!rootStatus);
+            scanModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD) == 0) {
+            turnonModeCmdButton.setEnabled(!rootStatus);
+            turnonModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD) == 0) {
+            connectModeCmdButton.setEnabled(!rootStatus);
+            connectModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD) == 0) {
+            manageModeCmdButton.setEnabled(!rootStatus);
+            manageModeCmdButton.setText(rootStatus ? "已授权" : "点击授权");
+        }
+
+        boolean shizukuStatus = pm.getShizukuStatus() == 1;
+        if (settingsManager.getInt(SettingsManager.KEY_READ_MODE_CMD) == 1) {
+            readModeCmdButton.setEnabled(!shizukuStatus);
+            readModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_SCAN_MODE_CMD) == 1) {
+            scanModeCmdButton.setEnabled(!shizukuStatus);
+            scanModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_TURNON_MODE_CMD) == 1) {
+            turnonModeCmdButton.setEnabled(!shizukuStatus);
+            turnonModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_CONNECT_MODE_CMD) == 1) {
+            connectModeCmdButton.setEnabled(!shizukuStatus);
+            connectModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+        }
+        if (settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD) == 1) {
+            manageModeCmdButton.setEnabled(!shizukuStatus);
+            manageModeCmdButton.setText(shizukuStatus ? "已授权" : "点击授权");
+        }
+
+        boolean batteryStatus = pm.isBatteryOptimizationIgnored();
+        batteryButton.setEnabled(!batteryStatus);
+        batteryButton.setText(batteryStatus ? "已设置" : "去设置");
+
+        boolean notificationStatus = pm.hasNotificationPermission();
+        notificationButton.setEnabled(!notificationStatus);
+        notificationButton.setText(notificationStatus ? "已授权" : "点击授权");
     }
 
 }

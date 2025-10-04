@@ -21,6 +21,8 @@ public class GuideActivity extends AppCompatActivity {
     private StepsView stepsView;
     private TextView titleView;
 
+    public PermissionManager pm;
+
     String[] titles = {"引导", "工作模式", "帮助文档"};
     
     @SuppressLint("ResourceAsColor")
@@ -30,6 +32,8 @@ public class GuideActivity extends AppCompatActivity {
         setContentView(R.layout.activity_guide);
 
         getWindow().setNavigationBarColor(getColor(R.color.light_grey));
+
+        pm = new PermissionManager(this);
 
         titleView = findViewById(R.id.title);
 

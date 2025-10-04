@@ -137,6 +137,7 @@
                         android:layout_height="36dp"
                         android:layout_margin="8dp" />
                     <Button
+                        android:id="@+id/read_mode_cmd_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -227,6 +228,7 @@
                         android:layout_height="wrap_content"
                         android:text="需要开启位置信息并获取定位权限" />
                     <Button
+                        android:id="@+id/scan_mode_api_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -281,6 +283,7 @@
                         android:layout_height="36dp"
                         android:layout_margin="8dp" />
                     <Button
+                        android:id="@+id/scan_mode_cmd_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -395,6 +398,7 @@
                         android:layout_height="36dp"
                         android:layout_margin="8dp" />
                     <Button
+                        android:id="@+id/turnon_mode_cmd_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -522,6 +526,7 @@
                         android:layout_height="36dp"
                         android:layout_margin="8dp" />
                     <Button
+                        android:id="@+id/connect_mode_cmd_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -612,6 +617,7 @@
                         android:layout_height="wrap_content"
                         android:text="需要开启位置信息并获取定位权限" />
                     <Button
+                        android:id="@+id/manage_mode_api_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -666,6 +672,7 @@
                         android:layout_height="36dp"
                         android:layout_margin="8dp" />
                     <Button
+                        android:id="@+id/manage_mode_cmd_button"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -746,6 +753,7 @@
                     android:text="为了避免系统误杀后台，请将省电策略改为无限制"
                     android:paddingTop="8dp" />
                 <Button
+                    android:id="@+id/battery_button"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
@@ -789,6 +797,7 @@
                     android:text="用于显示运行进度以及连接成功等通知"
                     android:paddingTop="8dp" />
                 <Button
+                    android:id="@+id/notification_button"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"

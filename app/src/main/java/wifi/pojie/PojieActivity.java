@@ -51,6 +51,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import rikka.shizuku.Shizuku;
 
@@ -59,7 +60,6 @@ public class PojieActivity extends Fragment {
     private static final int REQUEST_CODE_PERMISSION = 1001;
     private static final int NOTIFICATION_ID = 1;
     private static final String CHANNEL_ID = "wifi_pojie_channel";
-    private static final int REQUEST_CODE_NOTIFICATION_PERMISSION = 1002;
 
     private TextView commandOutput;
     private Button executeButton;
@@ -197,7 +197,6 @@ public class PojieActivity extends Fragment {
 
         settingsManager = new SettingsManager(requireContext());
         createNotificationChannel();
-        requestNotificationPermission();
         initViews(view);
         logSettings();
         setupClickListeners();
@@ -258,19 +257,6 @@ public class PojieActivity extends Fragment {
             notificationManager.cancel(NOTIFICATION_ID);
         }
     }
-    
-    /**
-     * 请求通知权限（仅在Android 13及以上版本需要）
-     */
-    private void requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && getActivity() != null) {
-            if (ContextCompat.checkSelfPermission(getActivity(), Manifest.permission.POST_NOTIFICATIONS) 
-                != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 
-                                   REQUEST_CODE_NOTIFICATION_PERMISSION);
-            }
-        }
-    }
 
     /**
      * 初始化所有视图组件
@@ -306,10 +292,6 @@ public class PojieActivity extends Fragment {
         }
             addLog("当前Shizuku权限：" + ShizukuHelper.executeCommandSync("whoami"));
 
-        String rootReason = checkRoot();
-        if (rootReason != null) {
-            addLog("当前已获取到root权限");
-        }
     }
 
     private void logSettings() {
@@ -338,26 +320,6 @@ public class PojieActivity extends Fragment {
         }
     }
 
-    private String checkRoot() {
-        // Check for build tags
-        String buildTags = android.os.Build.TAGS;
-        if (buildTags != null && buildTags.contains("test-keys")) {
-            Log.d("RootCheck", "Build tags indicate test-keys");
-            return "处于调试环境";
-        }
-
-        // Check for su binary in PATH. This is the most common method.
-        String pathEnv = System.getenv("PATH");
-        if (pathEnv != null) {
-            for (String path : pathEnv.split(":")) {
-                if (new File(path, "su").exists()) {
-                    Log.d("RootCheck", "Found su binary in PATH: " + path);
-                    return "发现可执行文件\"su\"";
-                }
-            }
-        }
-        return null;
-    }
 
     /**
      * 设置所有按钮的点击监听器
