@@ -49,7 +49,6 @@ public class WifiPojie {
         this.endFunc = endFunc;
         this.currentTryIndex = (int) config.get("startLine") - 1;
 
-
         // 在后台线程启动破解过程
         logOutputFunction.accept("      _      __                 _        \n" +
                 "     | |___ / _|_ __ ___  _   _| |_ __ _ \n" +
@@ -79,7 +78,7 @@ public class WifiPojie {
 
             int netId = connectWifi.getWifiId(ssid);
             if (netId != -1) {
-                connectWifi.forgetWifiId(netId);
+                connectWifi.forgetWifiName(ssid);
                 logOutputFunction.accept("当前wifi已经保存，已自动忘记该网络");
             }
 
@@ -130,6 +129,7 @@ public class WifiPojie {
                     logOutputFunction.accept("成功连接到WiFi网络: " + ssid + " 密码: " + dictionary[currentTryIndex]);
                     destroy();
                 } else {
+                    connectWifi.forgetWifiName(ssid);
                     currentTryIndex++;
                     executorService.submit(this::startCrackingProcess);
                 }

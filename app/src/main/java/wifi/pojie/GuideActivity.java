@@ -73,7 +73,7 @@ public class GuideActivity extends AppCompatActivity {
 
             // 如果当前是工作模式页面 (position == 1)，则检查权限
             if (currentItem == 1) {
-                List<String> missingPermissions = pm.getMissingPermissionsSummary(true);
+                List<String> missingPermissions = pm.getMissingPermissionsSummary(false);
                 if (!missingPermissions.isEmpty()) {
                     // 如果有缺失的权限，显示弹窗
                     showPermissionWarningDialog(missingPermissions);
@@ -131,7 +131,6 @@ public class GuideActivity extends AppCompatActivity {
         new MaterialAlertDialogBuilder(this)
                 .setTitle("确认跳过")
                 .setMessage(messageBuilder.toString())
-                .setCancelable(false)
                 .setNegativeButton("返回", (dialog, which) -> {
                     dialog.dismiss();
                 })

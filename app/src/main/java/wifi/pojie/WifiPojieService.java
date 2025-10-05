@@ -27,17 +27,19 @@ public class WifiPojieService extends Service {
     public static final String EXTRA_PROGRESS = "progress";
     public static final String EXTRA_TOTAL = "total";
     public static final String EXTRA_PROGRESS_TEXT = "progress_text";
-    
+
     private final IBinder binder = new LocalBinder();
     private WifiPojie wifiPojie;
     private boolean isRunning = false;
-    
+
+    private boolean showNotification = false;
+
     public class LocalBinder extends Binder {
         WifiPojieService getService() {
             return WifiPojieService.this;
         }
     }
-    
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -49,7 +51,8 @@ public class WifiPojieService extends Service {
             return new HashMap<>();
         }
         Gson gson = new Gson();
-        java.lang.reflect.Type type = new com.google.gson.reflect.TypeToken<HashMap<String, Object>>(){}.getType();
+        java.lang.reflect.Type type = new com.google.gson.reflect.TypeToken<HashMap<String, Object>>() {
+        }.getType();
         Map<String, Object> config = gson.fromJson(jsonConfig, type);
         if (config.containsKey("dictionary")) {
             Object dictionaryObj = config.get("dictionary");
@@ -72,7 +75,7 @@ public class WifiPojieService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.d(TAG, "WifiPojieService started");
 
-        showForegroundNotification();
+        if (showNotification) showForegroundNotification();
 
         if (intent != null) {
             String jsonConfig = intent.getStringExtra("config");
@@ -92,13 +95,14 @@ public class WifiPojieService extends Service {
     public IBinder onBind(Intent intent) {
         return binder;
     }
-    
-    private void startWifiPojie(Map<String, Object> config,Map<String, Object> settings) {
+
+    private void startWifiPojie(Map<String, Object> config, Map<String, Object> settings) {
         if (isRunning) {
             Log.w(TAG, "WifiPojie is already running");
             return;
         }
-        
+        showNotification = (boolean) settings.get(SettingsManager.KEY_SHOW_NOTIFICATION);
+
         isRunning = true;
         try {
             wifiPojie = new WifiPojie(
@@ -116,7 +120,7 @@ public class WifiPojieService extends Service {
             stopSelf();
         }
     }
-    
+
     private void onLogOutput(String output) {
         Log.d(TAG, "WifiPojie output: " + output);
         // 通过广播将日志信息传递给Activity
@@ -124,11 +128,11 @@ public class WifiPojieService extends Service {
         intent.putExtra(EXTRA_LOG_MESSAGE, output);
         sendBroadcast(intent);
     }
-    
+
     private void onProgressUpdate(Integer progress, Integer total, String text) {
         Log.d(TAG, "WifiPojie progress: " + text);
-        showForegroundNotification("WiFi破解运行中", text, progress, total);
-        
+        if (showNotification) showForegroundNotification("WiFi破解运行中", text, progress, total);
+
         // 通过广播将进度信息传递给Activity
         Intent intent = new Intent(ACTION_PROGRESS_UPDATE);
         intent.putExtra(EXTRA_PROGRESS, progress);
@@ -136,26 +140,26 @@ public class WifiPojieService extends Service {
         intent.putExtra(EXTRA_PROGRESS_TEXT, text);
         sendBroadcast(intent);
     }
-    
+
     private void onFinished() {
         Log.d(TAG, "WifiPojie finished");
         isRunning = false;
-        
+
         // 发送任务完成的通知
-        showFinishedNotification();
-        
+        if (showNotification) showFinishedNotification();
+
         // 通过广播通知Activity任务已完成
         Intent intent = new Intent(ACTION_FINISHED);
         sendBroadcast(intent);
-        
+
         stopForeground(true);
         stopSelf();
     }
-    
+
     private void showForegroundNotification() {
         showForegroundNotification("WiFi破解工具启动中", "正在初始化...", 0, 0);
     }
-    
+
     private void showForegroundNotification(String title, String content, int progress, int max) {
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -166,24 +170,24 @@ public class WifiPojieService extends Service {
 
         Intent notificationIntent = new Intent(this, PojieActivity.class);
         notificationIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        android.app.PendingIntent pendingIntent = android.app.PendingIntent.getActivity(this, 0, notificationIntent, 
+        android.app.PendingIntent pendingIntent = android.app.PendingIntent.getActivity(this, 0, notificationIntent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
-        
+
         builder.setContentTitle(title)
-               .setContentText(content)
-               .setSmallIcon(android.R.drawable.ic_dialog_info)
-               .setOngoing(true)
-               .setAutoCancel(false)
-               .setContentIntent(pendingIntent);
-        
+                .setContentText(content)
+                .setSmallIcon(R.drawable.app_icon)
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setContentIntent(pendingIntent);
+
         if (max > 0) {
             builder.setProgress(max, progress, false);
         }
-        
+
         Notification notification = builder.build();
         startForeground(NOTIFICATION_ID, notification);
     }
-    
+
     private void showFinishedNotification() {
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -191,26 +195,26 @@ public class WifiPojieService extends Service {
         } else {
             builder = new Notification.Builder(this);
         }
-        
+
         // 创建点击通知时跳转到主页面的意图
         Intent notificationIntent = new Intent(this, PojieActivity.class);
         notificationIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        android.app.PendingIntent pendingIntent = android.app.PendingIntent.getActivity(this, 0, notificationIntent, 
+        android.app.PendingIntent pendingIntent = android.app.PendingIntent.getActivity(this, 0, notificationIntent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
-        
+
         builder.setContentTitle("任务已结束")
-               .setContentText("WiFi密码工具运行结束")
-               .setSmallIcon(android.R.drawable.ic_dialog_info)
-               .setOngoing(false)
-               .setAutoCancel(true)
-               .setPriority(Notification.PRIORITY_HIGH)
-               .setContentIntent(pendingIntent);
-        
+                .setContentText("WiFi密码工具运行结束")
+                .setSmallIcon(R.drawable.app_icon)
+                .setOngoing(false)
+                .setAutoCancel(true)
+                .setPriority(Notification.PRIORITY_HIGH)
+                .setContentIntent(pendingIntent);
+
         Notification notification = builder.build();
         NotificationManager notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         notificationManager.notify(FINISHED_NOTIFICATION_ID, notification);
     }
-    
+
     public void stopWifiPojie() {
         if (wifiPojie != null) {
             wifiPojie.destroy();
@@ -220,7 +224,7 @@ public class WifiPojieService extends Service {
         stopForeground(true);
         stopSelf();
     }
-    
+
     @Override
     public void onDestroy() {
         super.onDestroy();

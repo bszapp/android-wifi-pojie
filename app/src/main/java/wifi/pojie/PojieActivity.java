@@ -73,6 +73,7 @@ public class PojieActivity extends Fragment {
     private WifiPojieService wifiPojieService;
     private boolean isServiceBound = false;
     private SettingsManager settingsManager;
+    private PermissionManager pm;
 
     private final BroadcastReceiver serviceBroadcastReceiver = new BroadcastReceiver() {
         @Override
@@ -163,6 +164,13 @@ public class PojieActivity extends Fragment {
             });
 
     @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        settingsManager = new SettingsManager(requireContext());
+        pm = ((MainActivity) requireActivity()).pm;
+    }
+
+    @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         return inflater.inflate(R.layout.activity_pojie, container, false);
     }
@@ -175,7 +183,6 @@ public class PojieActivity extends Fragment {
         // 处理状态栏边距
         handleStatusBarInset(view);
 
-        settingsManager = new SettingsManager(requireContext());
         initViews(view);
         logSettings();
         setupClickListeners();
@@ -297,6 +304,17 @@ public class PojieActivity extends Fragment {
                 stopRunningCommand();
             } else {
                 commandOutput.setText("");
+
+                List<String> missingPermissions=pm.getMissingPermissionsSummary(true);
+                if (!missingPermissions.isEmpty()) {
+                    StringBuilder output = new StringBuilder("缺失必要权限：\n");
+                    for (String permission : missingPermissions) {
+                        output.append("• ").append(permission).append("\n");
+                    }
+                    addLog(output.toString());
+                    return;
+                }
+
                 isRunning = true;
                 if (getActivity() != null) {
                     getActivity().runOnUiThread(() -> {
@@ -386,7 +404,8 @@ public class PojieActivity extends Fragment {
             if (getActivity() != null) {
                 getActivity().unregisterReceiver(serviceBroadcastReceiver);
             }
-        } catch (IllegalArgumentException ignored) { }
+        } catch (IllegalArgumentException ignored) {
+        }
     }
 
     /**

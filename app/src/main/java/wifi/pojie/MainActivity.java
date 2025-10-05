@@ -24,12 +24,16 @@ public class MainActivity extends AppCompatActivity {
     private ViewPager2 viewPager;
     private BottomNavigationView bottomNavigation;
 
+    public PermissionManager pm;
+
     static Fragment[] fragments = new Fragment[]{new PojieActivity(), new HistoryActivity(), new SettingsFragment()};
     static int[] navIds = new int[]{R.id.nav_home, R.id.nav_history, R.id.nav_settings};
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        
+
+        pm = new PermissionManager(this);
+
         // 设置状态栏透明
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // Android 11及以上

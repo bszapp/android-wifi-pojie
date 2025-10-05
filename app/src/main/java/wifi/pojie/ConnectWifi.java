@@ -11,6 +11,7 @@ import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Build;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
@@ -40,7 +41,6 @@ public class ConnectWifi {
     private final int manageMode;
     Map<String, ?> settings;
 
-    private int lastNetId;
     private String lastSsid;
     private final Context context;
 
@@ -56,7 +56,7 @@ public class ConnectWifi {
         if (connectType == 1)
             this.connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
 
-        this.connectWIfiListener = new ConnectWIfiListener(context, this.listenType);
+        this.connectWIfiListener = new ConnectWIfiListener(context, this.listenType, (int) this.settings.get(SettingsManager.KEY_READ_MODE_CMD));
     }
 
     private void clearListener() {
@@ -81,8 +81,6 @@ public class ConnectWifi {
                 timeoutTask.cancel(false);
             }
             onConnectionResult.accept(data);
-            if (!Objects.equals(data, "success"))
-                forgetLastWifi();
             clearListener();
         };
 
@@ -93,7 +91,6 @@ public class ConnectWifi {
         timeoutTask = scheduler.schedule(() -> {
             if (isDestroyed) return;
             onConnectionResult.accept("timeout");
-            forgetLastWifi();
             clearListener();
 
         }, timeout, TimeUnit.MILLISECONDS);
@@ -104,7 +101,7 @@ public class ConnectWifi {
         if (listenType == 0)
             return wifiManager.getWifiState() == WifiManager.WIFI_STATE_ENABLED;
         else if (listenType == 1)
-            return !runCommand("cmd wifi status",(int)settings.get(SettingsManager.KEY_READ_MODE_CMD)).startsWith("Wifi is disabled");
+            return !runCommand("cmd wifi status", (int) settings.get(SettingsManager.KEY_READ_MODE_CMD)).startsWith("Wifi is disabled");
         return false;
     }
 
@@ -115,10 +112,11 @@ public class ConnectWifi {
             WifiConfiguration wifiConfig = new WifiConfiguration();
             wifiConfig.SSID = "\"" + ssid + "\"";
             wifiConfig.preSharedKey = "\"" + password + "\"";
-            lastNetId = wifiManager.addNetwork(wifiConfig);
+            int netId = wifiManager.addNetwork(wifiConfig);
 
-            if (lastNetId != -1) {
-                wifiManager.enableNetwork(lastNetId, true);
+            if (netId != -1) {
+                Log.d(TAG, "使用wifiManager添加网络" + netId);
+                wifiManager.enableNetwork(netId, true);
             } else {
                 throw new RuntimeException("connect fail");
             }
@@ -154,6 +152,7 @@ public class ConnectWifi {
             } else throw new RuntimeException("系统不支持，请使用API28模式");
         } else if (connectType == 2) {
             //2:命令行
+            Log.d(TAG, "执行cmd连接wifi" + password);
             String connectResult = runCommand("cmd wifi connect-network \"" + ssid + "\" wpa2 \"" + password + "\"", 0);
             if (connectResult.contains("does not have access to connect-network wifi command")) {
                 throw new RuntimeException(connectResult);
@@ -172,16 +171,14 @@ public class ConnectWifi {
     }
 
     public void forgetWifiName(String ssid) {
-        forgetWifiId(getWifiId(ssid));
-    }
-
-    private void forgetLastWifi() {
-        if (connectType == 0) {
-            forgetWifiId(lastNetId);
-        } else if (connectType == 2) {
-            forgetWifiName(lastSsid);
+        if (manageMode == 0) {
+            Log.d(TAG,"使用wifiManager忘记网络"+ssid);
+            if (wifiManager.removeNetwork(getWifiId(ssid))) wifiManager.saveConfiguration();
+        } else if (manageMode == 2) {
+            runCommand("cmd wifi forget-network " + getWifiId(ssid), (int) settings.get(SettingsManager.KEY_MANAGE_MODE_CMD));
         }
     }
+
 
     public int getWifiId(String ssid) {
         if (manageMode == 0) {
@@ -196,7 +193,7 @@ public class ConnectWifi {
                 }
             }
         } else if (manageMode == 1) {
-            String result = runCommand("cmd wifi list-networks",(int)settings.get(SettingsManager.KEY_MANAGE_MODE_CMD));
+            String result = runCommand("cmd wifi list-networks", (int) settings.get(SettingsManager.KEY_MANAGE_MODE_CMD));
             String[] lines = result.split("\n");
 
             for (int i = 1; i < lines.length; i++) {
@@ -208,14 +205,6 @@ public class ConnectWifi {
             }
         }
         return -1;
-    }
-
-    public void forgetWifiId(int netId) {
-        if (manageMode == 0) {
-            if (wifiManager.removeNetwork(netId)) wifiManager.saveConfiguration();
-        } else if (manageMode == 1) {
-            runCommand("cmd wifi forget-network " + netId,(int)settings.get(SettingsManager.KEY_MANAGE_MODE_CMD));
-        }
     }
 
     public void destroy() {

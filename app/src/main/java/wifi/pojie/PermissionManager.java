@@ -345,7 +345,7 @@ public class PermissionManager {
      *
      * @return 返回一个包含所有当前缺失权限描述的字符串列表。如果所有权限都已授予，则返回空列表。
      */
-    public List<String> getMissingPermissionsSummary(boolean checkRoot) {
+    public List<String> getMissingPermissionsSummary(boolean isRun) {
         Set<String> missingPermissions = new HashSet<>(); // 使用 Set 避免重复项
 
         // --- 读取所有相关的工作模式设置 ---
@@ -365,18 +365,25 @@ public class PermissionManager {
         int manageModeCmd = settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD);
 
         // --- 1. 检查通用权限（电池和通知），这些按钮总是可见的 ---
-        if (!isBatteryOptimizationIgnored()) {
-            missingPermissions.add("电池优化“无限制”设置");
-        }
-        if (!hasNotificationPermission()) {
-            missingPermissions.add("通知权限");
+        if(!isRun) {
+            if (!isBatteryOptimizationIgnored()) {
+                missingPermissions.add("电池优化“无限制”设置");
+            }
+            if (!hasNotificationPermission()) {
+                missingPermissions.add("通知权限");
+            }
         }
 
         // --- 2. 检查位置权限 ---
         // `scanModeApiButton` 和 `manageModeApiButton` 需要位置权限
         boolean locationNeeded = (scanMode == 0) || (manageMode == 0);
-        if (locationNeeded && !hasLocationPermission()) {
-            missingPermissions.add("位置信息权限");
+        if (locationNeeded) {
+            if (!hasLocationPermission()) {
+                missingPermissions.add("位置信息权限");
+            }
+            if (isRun&&!isLocationServicesEnabled()) {
+                missingPermissions.add("系统定位服务处于关闭状态");
+            }
         }
 
         // --- 3. 检查 Root/Shizuku 权限 ---
@@ -392,7 +399,7 @@ public class PermissionManager {
                     (manageMode == 1 && manageModeCmd == 0);
             int rootStatus = checkRootStatus();
             if (rootNeeded) {
-                if (checkRoot && rootStatus != 1 || !checkRoot && rootStatus == -1) {
+                if (!isRun && rootStatus != 1 || isRun && rootStatus == -1) {
                     missingPermissions.add("Root权限");
                 }
             }
