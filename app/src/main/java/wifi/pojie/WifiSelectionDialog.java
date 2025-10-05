@@ -16,6 +16,7 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.ListView;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -59,30 +60,30 @@ public class WifiSelectionDialog extends AppCompatActivity {
         @Override
         public void onReceive(Context context, Intent intent) {
             boolean success = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false);
-            if (success) {
-                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                    finish();
-                    return;
-                }
-                List<ScanResult> scanResults = wifiManager.getScanResults();
-                wifiInfoList.clear();
-                List<String> savedNetworks = getSavedNetworks();
-                for (ScanResult scanResult : scanResults) {
-                    String name = scanResult.SSID;
-                    int rssi = scanResult.level;
-                    boolean isSaved = savedNetworks.contains(name);
-                    if (!name.isEmpty()) {
-                        wifiInfoList.add(new WifiInfo(name, rssi, isSaved));
-                    }
-                }
-                wifiInfoList.sort((wifi1, wifi2) -> Integer.compare(wifi2.rssi, wifi1.rssi));
-                runOnUiThread(() -> {
-                    adapter.notifyDataSetChanged();
-                    swipeRefreshLayout.setRefreshing(false);
-                });
-            } else {
-                runOnUiThread(() -> swipeRefreshLayout.setRefreshing(false));
+            if (!success) {
+                Toast.makeText(context, "刷新失败", Toast.LENGTH_SHORT).show();
             }
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                finish();
+                return;
+            }
+            List<ScanResult> scanResults = wifiManager.getScanResults();
+            wifiInfoList.clear();
+            List<String> savedNetworks = getSavedNetworks();
+            for (ScanResult scanResult : scanResults) {
+                String name = scanResult.SSID;
+                int rssi = scanResult.level;
+                boolean isSaved = savedNetworks.contains(name);
+                if (!name.isEmpty()) {
+                    wifiInfoList.add(new WifiInfo(name, rssi, isSaved));
+                }
+            }
+            wifiInfoList.sort((wifi1, wifi2) -> Integer.compare(wifi2.rssi, wifi1.rssi));
+            runOnUiThread(() -> {
+                adapter.notifyDataSetChanged();
+                swipeRefreshLayout.setRefreshing(false);
+            });
+            runOnUiThread(() -> swipeRefreshLayout.setRefreshing(false));
         }
     }
 
@@ -260,34 +261,6 @@ public class WifiSelectionDialog extends AppCompatActivity {
             return ShizukuHelper.executeCommandSync(command);
         }
         return "";
-    }
-
-    public int getWifiId(String ssid) {
-        int manageMode = settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE);
-        if (manageMode == 0) {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                throw new RuntimeException("定位权限获取失败");
-            }
-            List<WifiConfiguration> configuredNetworks = wifiManager.getConfiguredNetworks();
-
-            for (WifiConfiguration config : configuredNetworks) {
-                if (config.SSID != null && config.SSID.replace("\"", "").equals(ssid)) {
-                    return config.networkId;
-                }
-            }
-        } else if (manageMode == 1) {
-            String result = runCommand("cmd wifi list-networks", settingsManager.getInt(SettingsManager.KEY_MANAGE_MODE_CMD));
-            String[] lines = result.split("\n");
-
-            for (int i = 1; i < lines.length; i++) {
-                String name = lines[i].substring(13, 46).split(" ")[0];
-                int id = Integer.parseInt(lines[i].substring(0, 13).split(" ")[0]);
-                if (Objects.equals(name, ssid)) {
-                    return id;
-                }
-            }
-        }
-        return -1;
     }
 
     @Override

@@ -1,5 +1,6 @@
 package wifi.pojie;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 
 import java.util.Map;
@@ -93,6 +94,7 @@ public class WifiPojie {
         }
     }
 
+    @SuppressLint("DefaultLocale")
     private void startCrackingProcess() {
         // 检查是否已被销毁
         if (isDestroyed || currentTryIndex >= dictionary.length) {
@@ -109,7 +111,7 @@ public class WifiPojie {
                 progressFunction.accept(
                         currentTryIndex + 1,
                         dictionary.length,
-                        (currentTryIndex * 100 / dictionary.length) + "% [" + currentTryIndex + "/" + dictionary.length + "] 正在尝试：" + dictionary[currentTryIndex]
+                        String.format("%.1f", ((double)currentTryIndex * 100 / dictionary.length))+ "% [" + (currentTryIndex + 1) + "/" + dictionary.length + "] 正在尝试：" + dictionary[currentTryIndex]
                 );
             }
 
@@ -143,7 +145,7 @@ public class WifiPojie {
     public void destroy() {
         if (isDestroyed) return;
         isDestroyed = true;
-        if(connectWifi!=null) connectWifi.destroy();
+        if (connectWifi != null) connectWifi.destroy();
         executorService.shutdownNow();
         if (logOutputFunction != null) {
             logOutputFunction.accept("==运行结束==");

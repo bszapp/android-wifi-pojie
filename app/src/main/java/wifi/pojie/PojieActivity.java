@@ -3,6 +3,9 @@ package wifi.pojie;
 import static wifi.pojie.MainActivity.getVersionName;
 
 import android.annotation.SuppressLint;
+import android.app.PendingIntent;
+import android.app.PictureInPictureParams;
+import android.app.RemoteAction;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -10,13 +13,14 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.res.ColorStateList;
-import android.content.res.Configuration;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.util.Log;
+import android.util.Rational;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -38,6 +42,7 @@ import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 import androidx.fragment.app.Fragment;
 
+import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.gson.Gson;
 
 import java.io.BufferedReader;
@@ -67,6 +72,7 @@ public class PojieActivity extends Fragment {
     private CheckBox autoscroll;
     private ScrollView scrollView;
     private HorizontalScrollView horizontalScrollView;
+    private FloatingActionButton fab;
 
     private volatile boolean isRunning = false;
     private String[] dictionary = new String[]{}; // 默认词典
@@ -74,6 +80,30 @@ public class PojieActivity extends Fragment {
     private boolean isServiceBound = false;
     private SettingsManager settingsManager;
     private PermissionManager pm;
+
+    private static final String ACTION_PIP_EXECUTE = "wifi.pojie.ACTION_PIP_EXECUTE";
+
+    private final BroadcastReceiver pipBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_PIP_EXECUTE.equals(intent.getAction())) {
+                if (executeButton != null) {
+                    executeButton.performClick();
+                }
+            }
+        }
+    };
+
+    private final BroadcastReceiver pipButtonClickReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if ("wifi.pojie.ACTION_PIP_BUTTON_CLICK".equals(intent.getAction())) {
+                if (executeButton != null) {
+                    executeButton.performClick();
+                }
+            }
+        }
+    };
 
     private final BroadcastReceiver serviceBroadcastReceiver = new BroadcastReceiver() {
         @Override
@@ -89,16 +119,17 @@ public class PojieActivity extends Fragment {
                 int total = intent.getIntExtra(WifiPojieService.EXTRA_TOTAL, 0);
                 String text = intent.getStringExtra(WifiPojieService.EXTRA_PROGRESS_TEXT);
 
-                if (getActivity() != null) {
-                    getActivity().runOnUiThread(() -> {
-                        if (text != null) {
-                            progressText.setText(text);
-                        }
-                        startLine.setText(String.valueOf(progress));
-                        progressBar.setProgress(progress - 1);
-                        progressBar.setMax(total);
-                    });
-                }
+                requireActivity().runOnUiThread(() -> {
+                    if (text != null) {
+                        progressText.setText(text);
+                    }
+                    startLine.setText(String.valueOf(progress));
+                    progressBar.setProgress(progress - 1);
+                    progressBar.setMax(total);
+
+                    ((MainActivity) requireActivity()).setPipProgress(progress - 1, total, text);
+                });
+
             } else if (WifiPojieService.ACTION_FINISHED.equals(action)) {
                 stopRunningCommand();
                 hideProgressNotification();
@@ -184,10 +215,18 @@ public class PojieActivity extends Fragment {
         handleStatusBarInset(view);
 
         initViews(view);
+        // 发送初始状态广播
+        Intent initialStateIntent = new Intent("ACTION_STATE_CHANGED");
+        initialStateIntent.putExtra("isRunning", isRunning);
+        if (getActivity() != null) {
+            getActivity().sendBroadcast(initialStateIntent);
+            ((MainActivity) getActivity()).setPipRunning(false);
+        }
+
         logSettings();
         setupClickListeners();
 
-        // 注册广播接收器 - 根据API级别决定是否传入receiverFlags
+        // 注册广播接收器
         IntentFilter filter = new IntentFilter();
         filter.addAction(WifiPojieService.ACTION_LOG_OUTPUT);
         filter.addAction(WifiPojieService.ACTION_PROGRESS_UPDATE);
@@ -195,6 +234,8 @@ public class PojieActivity extends Fragment {
 
         if (getActivity() != null) {
             getActivity().registerReceiver(serviceBroadcastReceiver, filter, Context.RECEIVER_EXPORTED);
+            getActivity().registerReceiver(pipBroadcastReceiver, new IntentFilter(ACTION_PIP_EXECUTE), Context.RECEIVER_EXPORTED);
+            getActivity().registerReceiver(pipButtonClickReceiver, new IntentFilter("wifi.pojie.ACTION_PIP_BUTTON_CLICK"), Context.RECEIVER_EXPORTED);
 
             // 绑定服务
             Intent intent = new Intent(getActivity(), WifiPojieService.class);
@@ -259,6 +300,7 @@ public class PojieActivity extends Fragment {
         progressBar = view.findViewById(R.id.progressBar);
         runningTip = view.findViewById(R.id.running_tip);
         autoscroll = view.findViewById(R.id.autoscroll);
+        fab = view.findViewById(R.id.fab);
         String appVersion = "v" + getVersionName(requireContext());
 
         scrollView = (ScrollView) commandOutput.getParent().getParent();
@@ -291,6 +333,13 @@ public class PojieActivity extends Fragment {
                 horizontalScrollView.smoothScrollTo(0, 0);
             }, 0);
         }
+
+        ((MainActivity) requireActivity()).addPipLog(output);
+    }
+
+    private void clearLog() {
+        commandOutput.setText("");
+        ((MainActivity) requireActivity()).clearPipLog();
     }
 
 
@@ -303,9 +352,9 @@ public class PojieActivity extends Fragment {
             if (isRunning) {
                 stopRunningCommand();
             } else {
-                commandOutput.setText("");
+                clearLog();
 
-                List<String> missingPermissions=pm.getMissingPermissionsSummary(true);
+                List<String> missingPermissions = pm.getMissingPermissionsSummary(true);
                 if (!missingPermissions.isEmpty()) {
                     StringBuilder output = new StringBuilder("缺失必要权限：\n");
                     for (String permission : missingPermissions) {
@@ -317,14 +366,22 @@ public class PojieActivity extends Fragment {
 
                 isRunning = true;
                 if (getActivity() != null) {
+                    Intent intent = new Intent("ACTION_STATE_CHANGED");
+                    intent.putExtra("isRunning", true);
+                    getActivity().sendBroadcast(intent);
+
                     getActivity().runOnUiThread(() -> {
                         executeButton.setText("结束运行");
                         runningTip.setVisibility(View.VISIBLE);
+                        progressText.setText("等待开始运行");
+
+                        ((MainActivity) getActivity()).setPipRunning(true);
 
                         int color = ContextCompat.getColor(requireContext(), android.R.color.holo_red_light);
                         Drawable background = executeButton.getBackground().mutate();
                         ColorStateList colorStateList = ColorStateList.valueOf(color);
                         background.setTintList(colorStateList);
+                        updatePictureInPictureParams();
                     });
                 }
 
@@ -373,7 +430,7 @@ public class PojieActivity extends Fragment {
 
         copyBtn.setOnClickListener(v -> copyTextToClipboard());
 
-        clearBtn.setOnClickListener(v -> commandOutput.setText(""));
+        clearBtn.setOnClickListener(v -> clearLog());
 
         chooseWifiBtn.setOnClickListener(v -> {
             if (getActivity() != null) {
@@ -381,12 +438,19 @@ public class PojieActivity extends Fragment {
                 wifiSelectionLauncher.launch(intent);
             }
         });
-    }
 
-    @Override
-    public void onConfigurationChanged(@NonNull Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        // 由于已禁用横屏，此方法不再需要处理屏幕方向变化
+        fab.setOnClickListener(v -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (getActivity() != null) {
+                    updatePictureInPictureParams();
+                    PictureInPictureParams.Builder paramsBuilder = new PictureInPictureParams.Builder();
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        paramsBuilder.setAspectRatio(new Rational(3, 2));
+                    }
+                    getActivity().enterPictureInPictureMode(paramsBuilder.build());
+                }
+            }
+        });
     }
 
     @Override
@@ -403,6 +467,8 @@ public class PojieActivity extends Fragment {
         try {
             if (getActivity() != null) {
                 getActivity().unregisterReceiver(serviceBroadcastReceiver);
+                getActivity().unregisterReceiver(pipBroadcastReceiver);
+                getActivity().unregisterReceiver(pipButtonClickReceiver);
             }
         } catch (IllegalArgumentException ignored) {
         }
@@ -471,16 +537,41 @@ public class PojieActivity extends Fragment {
         }
         isRunning = false;
         if (getActivity() != null) {
+            Intent intent = new Intent("ACTION_STATE_CHANGED");
+            intent.putExtra("isRunning", false);
+            getActivity().sendBroadcast(intent);
+
             getActivity().runOnUiThread(() -> {
                 executeButton.setText("开始运行");
-                progressText.setText("等待开始运行");
+
+                progressText.append("【已暂停】");
+
+                ((MainActivity) getActivity()).setPipProgressText(String.valueOf(progressText.getText()));
+                ((MainActivity) getActivity()).setPipRunning(false);
+
                 runningTip.setVisibility(View.GONE);
 
                 int color = ContextCompat.getColor(requireContext(), android.R.color.holo_blue_dark);
                 Drawable background = executeButton.getBackground().mutate();
                 ColorStateList colorStateList = ColorStateList.valueOf(color);
                 background.setTintList(colorStateList);
+                updatePictureInPictureParams();
             });
+        }
+    }
+
+    private void updatePictureInPictureParams() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && getActivity() != null) {
+            List<RemoteAction> actions = new ArrayList<>();
+            Icon icon = Icon.createWithResource(getContext(), isRunning ? R.drawable.ic_wifi : R.drawable.ic_send);
+            String title = isRunning ? "停止" : "开始";
+            Intent intent = new Intent(ACTION_PIP_EXECUTE);
+            PendingIntent pendingIntent = PendingIntent.getBroadcast(getContext(), 0, intent, PendingIntent.FLAG_IMMUTABLE);
+            actions.add(new RemoteAction(icon, title, title, pendingIntent));
+
+            PictureInPictureParams.Builder paramsBuilder = new PictureInPictureParams.Builder();
+            paramsBuilder.setActions(actions);
+            getActivity().setPictureInPictureParams(paramsBuilder.build());
         }
     }
 
