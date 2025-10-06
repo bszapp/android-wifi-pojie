@@ -217,7 +217,7 @@ public class WifiPojieService extends Service {
 
     public void stopWifiPojie() {
         if (wifiPojie != null) {
-            wifiPojie.destroy();
+            wifiPojie.destroy(true);
             wifiPojie = null;
         }
         isRunning = false;
@@ -230,7 +230,7 @@ public class WifiPojieService extends Service {
         super.onDestroy();
         Log.d(TAG, "WifiPojieService destroyed");
         if (wifiPojie != null) {
-            wifiPojie.destroy();
+            wifiPojie.destroy(false);
         }
         isRunning = false;
     }

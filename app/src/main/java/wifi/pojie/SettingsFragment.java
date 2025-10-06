@@ -16,8 +16,6 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.fragment.app.Fragment;
 
-import java.util.Objects;
-
 public class SettingsFragment extends Fragment {
 
     private View topPlaceholder;
@@ -41,9 +39,18 @@ public class SettingsFragment extends Fragment {
         });
 
         view.findViewById(R.id.btn_help).setOnClickListener(v -> startActivity(new Intent(getActivity(), HelpActivity.class)));
-        view.findViewById(R.id.btn_setwork).setOnClickListener(v -> startActivity(new Intent(getActivity(), GuideActivity.class)));
+        view.findViewById(R.id.btn_setwork).setOnClickListener(v -> startActivity(new Intent(getActivity(), WorkmodeActivity.class)));
         view.findViewById(R.id.btn_zaxiang).setOnClickListener(v -> startActivity(new Intent(getActivity(), SettingsOtherActivity.class)));
         view.findViewById(R.id.btn_test).setOnClickListener(v -> startActivity(new Intent(getActivity(), TestActivity.class)));
+
+        view.findViewById(R.id.github).setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/bszapp/android-wifi-pojie"));
+            startActivity(intent);
+        });
+        view.findViewById(R.id.bilibili).setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("bilibili://space/3546972610890454"));
+            startActivity(intent);
+        });
 
         ((TextView)view.findViewById(R.id.version_text)).setText("v"+getVersionName(requireActivity()));
 

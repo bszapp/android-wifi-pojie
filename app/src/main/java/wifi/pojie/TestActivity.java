@@ -1,8 +1,6 @@
 package wifi.pojie;
 
 import android.os.Bundle;
-import android.util.Log;
-import android.view.MenuItem;
 import android.widget.ImageButton;
 import android.widget.TextView;
 
@@ -20,8 +18,7 @@ public class TestActivity extends AppCompatActivity {
     private BottomNavigationView bottomNavigation;
     private TextView pageName;
 
-    static Fragment[] fragments = new Fragment[]{new WifiListFragment(), new TestCommandFragment(), new TestApiFragment(), new TestLogcatFragment()};
-    static int[] navIds = new int[]{R.id.nav_wifi_list, R.id.nav_command_test, R.id.nav_api_test, R.id.nav_logcat_test};
+    static int[] navIds = new int[]{R.id.nav_command_test, R.id.nav_api_test, R.id.nav_logcat_test};
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -77,12 +74,21 @@ public class TestActivity extends AppCompatActivity {
         @NonNull
         @Override
         public Fragment createFragment(int position) {
-            return fragments[position];
+            switch (position) {
+                case 0:
+                    return new TestCommandFragment();
+                case 1:
+                    return new TestApiFragment();
+                case 2:
+                    return new TestLogcatFragment();
+                default:
+                    return new Fragment();
+            }
         }
 
         @Override
         public int getItemCount() {
-            return fragments.length;
+            return navIds.length;
         }
     }
 }

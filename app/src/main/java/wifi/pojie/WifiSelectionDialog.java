@@ -26,7 +26,6 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 
 public class WifiSelectionDialog extends AppCompatActivity {
     private static final String TAG = "WifiSelectionDialog";
@@ -64,6 +63,7 @@ public class WifiSelectionDialog extends AppCompatActivity {
                 Toast.makeText(context, "刷新失败", Toast.LENGTH_SHORT).show();
             }
             if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(context, "定位被拒绝", Toast.LENGTH_SHORT).show();
                 finish();
                 return;
             }
@@ -102,8 +102,12 @@ public class WifiSelectionDialog extends AppCompatActivity {
         }
         settingsManager = new SettingsManager(this);
         wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        wifiScanReceiver = new WifiScanReceiver();
-        registerReceiver(wifiScanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+
+        int scanMode = settingsManager.getInt(SettingsManager.KEY_SCAN_MODE);
+        if (scanMode == 0) {
+            wifiScanReceiver = new WifiScanReceiver();
+            registerReceiver(wifiScanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+        }
         initViews();
         setupWifiList();
     }
@@ -269,7 +273,9 @@ public class WifiSelectionDialog extends AppCompatActivity {
         if (handler != null && addWifiRunnable != null) {
             handler.removeCallbacks(addWifiRunnable);
         }
-        unregisterReceiver(wifiScanReceiver);
+        if (wifiScanReceiver != null) {
+            unregisterReceiver(wifiScanReceiver);
+        }
     }
 }
 

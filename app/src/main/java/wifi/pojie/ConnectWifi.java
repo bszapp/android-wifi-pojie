@@ -41,10 +41,9 @@ public class ConnectWifi {
     private final int manageMode;
     Map<String, ?> settings;
 
-    private String lastSsid;
     private final Context context;
 
-    public ConnectWifi(Context context, Map<String, ?> settings) {
+    public ConnectWifi(Context context, Map<String, ?> settings, Map<String, ?> config) {
         this.settings = settings;
         this.connectType = (int) this.settings.get(SettingsManager.KEY_CONNECT_MODE);
         this.manageMode = (int) this.settings.get(SettingsManager.KEY_MANAGE_MODE);
@@ -56,7 +55,7 @@ public class ConnectWifi {
         if (connectType == 1)
             this.connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
 
-        this.connectWIfiListener = new ConnectWIfiListener(context, this.listenType, (int) this.settings.get(SettingsManager.KEY_READ_MODE_CMD));
+        this.connectWIfiListener = new ConnectWIfiListener(context, this.listenType, (int) this.settings.get(SettingsManager.KEY_READ_MODE_CMD),config);
     }
 
     private void clearListener() {
@@ -74,7 +73,7 @@ public class ConnectWifi {
         startTime = System.currentTimeMillis();
 
         this.connectWIfiListener.onEvent = data -> {
-            if (System.currentTimeMillis() - startTime < 3000 && !Objects.equals(data, "success"))
+            if (System.currentTimeMillis() - startTime < 3000 && Objects.equals(data, "auth_fail"))
                 return;
 
             if (timeoutTask != null) {
@@ -106,7 +105,6 @@ public class ConnectWifi {
     }
 
     private void runConnect(String ssid, String password) {
-        lastSsid = ssid;
         if (connectType == 0) {
             //0:API28
             WifiConfiguration wifiConfig = new WifiConfiguration();
@@ -118,7 +116,7 @@ public class ConnectWifi {
                 Log.d(TAG, "使用wifiManager添加网络" + netId);
                 wifiManager.enableNetwork(netId, true);
             } else {
-                throw new RuntimeException("connect fail");
+                throw new RuntimeException("connect fail\n忘记密码操作可能执行失败，请去设置手动点击忘记");
             }
         } else if (connectType == 1) {
             //1:API29

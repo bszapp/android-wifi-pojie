@@ -1,8 +1,5 @@
 package wifi.pojie;
 
-import static androidx.activity.result.ActivityResultCallerKt.registerForActivityResult;
-import static androidx.core.app.ActivityCompat.requestPermissions;
-
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Context;
@@ -26,7 +23,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 

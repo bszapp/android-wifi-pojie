@@ -2,5 +2,7 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:color="@color/switch_track_checked" android:state_checked="true"/>
     <item android:color="@color/switch_track_normal" android:state_checked="false"/>
+    <!-- File: res/values/colors.xml -->
+    <color name="splash_background">@color/splash_background_light</color>
 </selector>
 

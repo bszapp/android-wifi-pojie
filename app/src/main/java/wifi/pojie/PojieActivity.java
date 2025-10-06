@@ -24,13 +24,18 @@ import android.util.Rational;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+
+import View.SegmentedButtonGroup;
+
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -42,6 +47,7 @@ import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 import androidx.fragment.app.Fragment;
 
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.gson.Gson;
 
@@ -56,7 +62,6 @@ import java.util.Map;
 
 public class PojieActivity extends Fragment {
     private static final String TAG = "PojieActivity";
-    private static final int REQUEST_CODE_PERMISSION = 1001;
     private static final int NOTIFICATION_ID = 1;
     private static final String CHANNEL_ID = "wifi_pojie_channel";
 
@@ -73,6 +78,11 @@ public class PojieActivity extends Fragment {
     private ScrollView scrollView;
     private HorizontalScrollView horizontalScrollView;
     private FloatingActionButton fab;
+    private SegmentedButtonGroup failSign;
+    private LinearLayout failTimeoutGroup;
+    private LinearLayout failCountGroup;
+    private EditText failTimeoutInput;
+    private EditText failCountInput;
 
     private volatile boolean isRunning = false;
     private String[] dictionary = new String[]{}; // 默认词典
@@ -131,6 +141,7 @@ public class PojieActivity extends Fragment {
                 });
 
             } else if (WifiPojieService.ACTION_FINISHED.equals(action)) {
+                requireActivity().runOnUiThread(() -> progressText.append("【已暂停】"));
                 stopRunningCommand();
                 hideProgressNotification();
             }
@@ -153,52 +164,63 @@ public class PojieActivity extends Fragment {
         }
     };
 
-    private final ActivityResultLauncher<Intent> filePickerLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
-                    Toast t = Toast.makeText(getActivity(), "正在加载", Toast.LENGTH_SHORT);
-                    t.show();
-                    dictionarySelect.postDelayed(() -> {
-                        Uri uri = result.getData().getData();
-                        if (uri != null && getActivity() != null) {
-                            try {
-                                dictionary = readDictionaryFromFile(uri);
-                                t.cancel();
-                                Toast.makeText(getActivity(), "加载完毕，共" + dictionary.length + "项", Toast.LENGTH_SHORT).show();
-
-                                // 获取文件名并设置到按钮上
-                                String fileName = getFileNameFromUri(uri);
-                                if (fileName != null) {
-                                    getActivity().runOnUiThread(() -> dictionarySelect.setText(fileName));
-                                }
-                            } catch (IOException e) {
-                                Log.e(TAG, "读取字典文件失败", e);
-                                if (getActivity() != null) {
-                                    Toast.makeText(getActivity(), "读取失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                                }
-                            }
-                        }
-                    }, 0);
-                }
-            });
-
-    private final ActivityResultLauncher<Intent> wifiSelectionLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
-                    String wifiName = result.getData().getStringExtra("wifi_name");
-                    if (wifiName != null) {
-                        wifiSsid.setText(wifiName);
-                    }
-                }
-            });
+    private ActivityResultLauncher<Intent> filePickerLauncher;
+    private ActivityResultLauncher<Intent> wifiSelectionLauncher;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         settingsManager = new SettingsManager(requireContext());
         pm = ((MainActivity) requireActivity()).pm;
+    }
+
+    @Override
+    public void onAttach(@NonNull Context context) {
+        super.onAttach(context);
+
+        // 在 onAttach 中注册所有的 ActivityResultLauncher
+        filePickerLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
+                        Toast t = Toast.makeText(getActivity(), "正在加载", Toast.LENGTH_SHORT);
+                        t.show();
+                        dictionarySelect.postDelayed(() -> {
+                            Uri uri = result.getData().getData();
+                            if (uri != null && getActivity() != null) {
+                                try {
+                                    dictionary = readDictionaryFromFile(uri);
+                                    t.cancel();
+                                    Toast.makeText(getActivity(), "加载完毕，共" + dictionary.length + "项", Toast.LENGTH_SHORT).show();
+
+                                    // 获取文件名并设置到按钮上
+                                    String fileName = getFileNameFromUri(uri);
+                                    if (fileName != null) {
+                                        getActivity().runOnUiThread(() -> dictionarySelect.setText(fileName));
+                                    }
+                                } catch (IOException e) {
+                                    Log.e(TAG, "读取字典文件失败", e);
+                                    if (getActivity() != null) {
+                                        Toast.makeText(getActivity(), "读取失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                                    }
+                                }
+                            }
+                        }, 0);
+                    }
+                }
+        );
+
+        wifiSelectionLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
+                        String wifiName = result.getData().getStringExtra("wifi_name");
+                        if (wifiName != null) {
+                            wifiSsid.setText(wifiName);
+                        }
+                    }
+                }
+        );
     }
 
     @Override
@@ -301,10 +323,41 @@ public class PojieActivity extends Fragment {
         runningTip = view.findViewById(R.id.running_tip);
         autoscroll = view.findViewById(R.id.autoscroll);
         fab = view.findViewById(R.id.fab);
+        failSign = view.findViewById(R.id.fail_sign);
+        failTimeoutGroup = view.findViewById(R.id.fail_sign_timeout);
+        failCountGroup = view.findViewById(R.id.fail_sign_count);
+        failTimeoutInput = view.findViewById(R.id.fail_sign_timeout_input);
+        failCountInput = view.findViewById(R.id.fail_sign_count_input);
+
         String appVersion = "v" + getVersionName(requireContext());
 
         scrollView = (ScrollView) commandOutput.getParent().getParent();
         horizontalScrollView = (HorizontalScrollView) commandOutput.getParent();
+
+        failSign.listener = selectedId -> {
+            if (settingsManager.getInt(SettingsManager.KEY_READ_MODE) == 0 && selectedId == 2) {
+                failSign.setSelectedId(0);
+                new MaterialAlertDialogBuilder(requireActivity())
+                        .setTitle("切换模式")
+                        .setMessage("监听握手次数模式读取网络状态只能使用命令行模式，是否去切换模式？")
+                        .setNegativeButton("取消", (dialog, which) -> {
+                            dialog.dismiss();
+                        })
+                        .setPositiveButton("去设置", (dialog, which) -> {
+                            dialog.dismiss();
+                            startActivity(new Intent(getActivity(), WorkmodeActivity.class));
+                        })
+                        .show();
+                return;
+            }
+            failTimeoutGroup.setVisibility(selectedId == 1 ? View.VISIBLE : View.GONE);
+            failCountGroup.setVisibility(selectedId == 2 ? View.VISIBLE : View.GONE);
+        };
+        failSign.addOption("标准模式", 0);
+        failSign.addOption("握手超时", 1);
+        failSign.addOption("握手超次", 2);
+        failSign.setSelectedId(0);
+
 
         addLog("wifi密码工具" + appVersion);
     }
@@ -315,7 +368,7 @@ public class PojieActivity extends Fragment {
             return;
         }
 
-        StringBuilder settingsLog = new StringBuilder("当前设置项:");
+        StringBuilder settingsLog = new StringBuilder("\n当前设置项:");
         for (Map.Entry<String, ?> entry : allEntries.entrySet()) {
             settingsLog.append("\n").append(entry.getKey()).append(":").append(entry.getValue().toString());
         }
@@ -383,6 +436,11 @@ public class PojieActivity extends Fragment {
                         background.setTintList(colorStateList);
                         updatePictureInPictureParams();
                     });
+                    if (settingsManager.getBoolean(SettingsManager.KEY_KEEP_SCREEN_ON)) {
+                        if (getActivity() != null) {
+                            getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                        }
+                    }
                 }
 
                 if (settingsManager.getBoolean(SettingsManager.KEY_SHOW_NOTIFICATION))
@@ -396,6 +454,9 @@ public class PojieActivity extends Fragment {
                     config.put("dictionary", dictionary);
                     config.put("timeoutMillis", Integer.parseInt(tryTime.getText().toString()));
                     config.put("startLine", Integer.parseInt(startLine.getText().toString()));
+                    config.put("failSign", failSign.getSelectedId());
+                    config.put("failSignTimeout",Integer.parseInt(failTimeoutInput.getText().toString()));
+                    config.put("failSignCount",Integer.parseInt(failCountInput.getText().toString()));
 
 
                     Gson gson = new Gson();
@@ -536,6 +597,13 @@ public class PojieActivity extends Fragment {
             wifiPojieService.stopWifiPojie();
         }
         isRunning = false;
+
+        if (settingsManager.getBoolean(SettingsManager.KEY_KEEP_SCREEN_ON)) {
+            if (getActivity() != null) {
+                getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        }
+
         if (getActivity() != null) {
             Intent intent = new Intent("ACTION_STATE_CHANGED");
             intent.putExtra("isRunning", false);
@@ -543,8 +611,6 @@ public class PojieActivity extends Fragment {
 
             getActivity().runOnUiThread(() -> {
                 executeButton.setText("开始运行");
-
-                progressText.append("【已暂停】");
 
                 ((MainActivity) getActivity()).setPipProgressText(String.valueOf(progressText.getText()));
                 ((MainActivity) getActivity()).setPipRunning(false);
@@ -563,7 +629,7 @@ public class PojieActivity extends Fragment {
     private void updatePictureInPictureParams() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && getActivity() != null) {
             List<RemoteAction> actions = new ArrayList<>();
-            Icon icon = Icon.createWithResource(getContext(), isRunning ? R.drawable.ic_wifi : R.drawable.ic_send);
+            Icon icon = Icon.createWithResource(getContext(), isRunning ? R.drawable.ic_pause : R.drawable.ic_play);
             String title = isRunning ? "停止" : "开始";
             Intent intent = new Intent(ACTION_PIP_EXECUTE);
             PendingIntent pendingIntent = PendingIntent.getBroadcast(getContext(), 0, intent, PendingIntent.FLAG_IMMUTABLE);

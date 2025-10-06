@@ -12,6 +12,14 @@
             </PendingDiffInfo>
           </value>
         </entry>
+        <entry key="$PROJECT_DIR$/app/src/main/res/drawable/launch_background.xml">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/app/src/main/res/drawable/launch_background.xml" />
+              <option name="updatedContent" value="&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;&#10;&lt;layer-list xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;&gt;&#10;    &lt;!-- Background color --&gt;&#10;    &lt;item android:drawable=&quot;@android:color/white&quot; /&gt;&#10;&#10;    &lt;!-- Logo --&gt;&#10;    &lt;item&#10;        android:width=&quot;150dp&quot;&#10;        android:height=&quot;150dp&quot;&#10;        android:gravity=&quot;center&quot;&gt;&#10;        &lt;bitmap&#10;            android:src=&quot;@drawable/splash_light&quot;&#10;            android:gravity=&quot;fill_horizontal|fill_vertical&quot; /&gt;&#10;    &lt;/item&gt;&#10;&lt;/layer-list&gt;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
       </map>
     </option>
   </component>

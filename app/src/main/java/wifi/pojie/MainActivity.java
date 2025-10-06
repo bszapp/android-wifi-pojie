@@ -12,15 +12,14 @@ import android.os.Handler;
 import android.util.Log;
 import android.view.View;
 import android.widget.ArrayAdapter;
-import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.splashscreen.SplashScreen;
 import androidx.core.view.WindowCompat;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
@@ -29,7 +28,6 @@ import androidx.viewpager2.widget.ViewPager2;
 
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 
-import java.io.File;
 import java.util.ArrayList;
 
 public class MainActivity extends AppCompatActivity {
@@ -47,13 +45,22 @@ public class MainActivity extends AppCompatActivity {
 
     public PermissionManager pm;
 
-    static Fragment[] fragments = new Fragment[]{new PojieActivity(), new HistoryActivity(), new SettingsFragment()};
-    static int[] navIds = new int[]{R.id.nav_home, R.id.nav_history, R.id.nav_settings};
+    static Fragment[] fragments = new Fragment[]{new PojieActivity(), new SettingsFragment()};
+    static int[] navIds = new int[]{R.id.nav_home, R.id.nav_settings};
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        setTheme(R.style.App_Theme);
         super.onCreate(savedInstanceState);
 
+        SettingsManager settingsManager = new SettingsManager(this);
+        if (settingsManager.getBoolean(SettingsManager.KEY_SHOW_GUIDE)) {
+            Intent intent = new Intent(this, GuideActivity.class);
+            startActivity(intent);
+            finish(); // 确保用户无法返回到MainActivity
+            overridePendingTransition(0, 0); // 直接覆盖，而不是打开新页面
+            return; // 避免执行下面的代码
+        }
         pm = new PermissionManager(this);
 
         // 设置状态栏透明
@@ -134,9 +141,9 @@ public class MainActivity extends AppCompatActivity {
             if ("ACTION_STATE_CHANGED".equals(intent.getAction())) {
                 boolean isRunning = intent.getBooleanExtra("isRunning", false);
                 if (isRunning) {
-                    pipButton.setImageResource(R.drawable.ic_wifi);
+                    pipButton.setImageResource(R.drawable.ic_pause);
                 } else {
-                    pipButton.setImageResource(R.drawable.ic_send);
+                    pipButton.setImageResource(R.drawable.ic_play);
                 }
             }
         }
@@ -178,7 +185,7 @@ public class MainActivity extends AppCompatActivity {
 
     public void addPipLog(String text) {
         pipLogList.add(text);
-        if (pipLogList.size() > 10) {
+        if (pipLogList.size() > 20) {
             pipLogList.remove(0);
         }
         pipLogAdapter.notifyDataSetChanged();

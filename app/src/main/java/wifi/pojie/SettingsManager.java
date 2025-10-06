@@ -24,6 +24,8 @@ public class SettingsManager {
     public static final String KEY_MANAGE_MODE = "manage_mode";
     public static final String KEY_MANAGE_MODE_CMD = "manage_mode_cmd";
     public static final String KEY_SHOW_NOTIFICATION = "show_notification";
+    public static final String KEY_SHOW_GUIDE = "show_guide";
+    public static final String KEY_KEEP_SCREEN_ON = "keep_screen_on";
 
     private final SharedPreferences prefs;
     private final Context context;

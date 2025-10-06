@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:id="@+id/nav_wifi_list"
-        android:title="wifi列表"
-        android:icon="@drawable/ic_list" />
+<!--    <item-->
+<!--        android:id="@+id/nav_wifi_list"-->
+<!--        android:title="wifi列表"-->
+<!--        android:icon="@drawable/ic_list" />-->
 
     <item
         android:id="@+id/nav_command_test"

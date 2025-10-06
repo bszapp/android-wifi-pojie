@@ -17,6 +17,7 @@ constraintlayout = "2.2.1"
 swiperefreshlayout = "1.1.0"
 preference = "1.2.1"
 markwon = "4.6.2"
+coreSplashscreen = "1.0.1"
 
 [libraries]
 androidx-preference-v120 = { module = "androidx.preference:preference", version.ref = "preferenceVersion" }
@@ -39,6 +40,7 @@ androidx-constraintlayout = { group = "androidx.constraintlayout", name = "const
 swiperefreshlayout = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swiperefreshlayout" }
 androidx-preference = { group = "androidx.preference", name = "preference", version.ref = "preference" }
 markwon-core = { group = "io.noties.markwon", name = "core", version.ref = "markwon" }
+androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

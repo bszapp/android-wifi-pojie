@@ -61,7 +61,7 @@ public class WifiPojie {
         logOutputFunction.accept("wifi密码暴力破解工具v2 for Android");
 
         try {
-            connectWifi = new ConnectWifi(context, settings);
+            connectWifi = new ConnectWifi(context, settings, config);
 
             if (!connectWifi.wifiIsEnabled()) {
                 logOutputFunction.accept("wifi已关闭，正在打开wifi...");
@@ -71,7 +71,7 @@ public class WifiPojie {
                 if (turnonMode == 0) {
                     connectWifi.wifiManager.setWifiEnabled(true);
                     logOutputFunction.accept("请在打开WiFi后重新点击开始运行");
-                    destroy();
+                    destroy(false);
                     return;
                 } else if (turnonMode == 1)
                     ConnectWifi.runCommand("cmd wifi set-wifi-enabled enabled", (int) settings.get(SettingsManager.KEY_TURNON_MODE_CMD));
@@ -90,7 +90,7 @@ public class WifiPojie {
             executorService.submit(this::startCrackingProcess);
         } catch (RuntimeException e) {
             logOutputFunction.accept("E: " + e);
-            destroy();
+            destroy(false);
         }
     }
 
@@ -101,7 +101,7 @@ public class WifiPojie {
             if (currentTryIndex >= dictionary.length) {
                 logOutputFunction.accept("所有密码尝试完毕，连接失败！");
             }
-            destroy();
+            destroy(true);
             return;
         }
 
@@ -111,7 +111,7 @@ public class WifiPojie {
                 progressFunction.accept(
                         currentTryIndex + 1,
                         dictionary.length,
-                        String.format("%.1f", ((double)currentTryIndex * 100 / dictionary.length))+ "% [" + (currentTryIndex + 1) + "/" + dictionary.length + "] 正在尝试：" + dictionary[currentTryIndex]
+                        String.format("%.1f", ((double) currentTryIndex * 100 / dictionary.length)) + "% [" + (currentTryIndex + 1) + "/" + dictionary.length + "] 正在尝试：" + dictionary[currentTryIndex]
                 );
             }
 
@@ -129,7 +129,7 @@ public class WifiPojie {
                 if (Objects.equals(result, "success")) {
                     // 成功连接
                     logOutputFunction.accept("成功连接到WiFi网络: " + ssid + " 密码: " + dictionary[currentTryIndex]);
-                    destroy();
+                    destroy(false);
                 } else {
                     connectWifi.forgetWifiName(ssid);
                     currentTryIndex++;
@@ -138,12 +138,20 @@ public class WifiPojie {
             });
         } catch (Exception e) {
             logOutputFunction.accept("E: " + e.getMessage());
-            destroy();
+            destroy(false);
         }
     }
 
-    public void destroy() {
+    public void destroy(boolean byUser) {
         if (isDestroyed) return;
+        try {
+            if (byUser) {
+                connectWifi.forgetWifiName(ssid);
+                logOutputFunction.accept("已自动忘记没有连接成功的wifi");
+            }
+        } catch (RuntimeException e) {
+            logOutputFunction.accept(e.toString());
+        }
         isDestroyed = true;
         if (connectWifi != null) connectWifi.destroy();
         executorService.shutdownNow();

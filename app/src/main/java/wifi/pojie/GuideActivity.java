@@ -1,34 +1,35 @@
 package wifi.pojie;
 
 import android.annotation.SuppressLint;
-import android.content.DialogInterface;
+import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.widget.Button;
 import android.widget.TextView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.AlertDialog; // 导入 AlertDialog
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
 
-import com.google.android.material.dialog.MaterialAlertDialogBuilder; // 建议使用 Material 对话框
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
-import java.util.List; // 导入 List
+import java.util.List;
 import java.util.Objects;
 
 import View.StepsView;
 
-public class GuideActivity extends AppCompatActivity {
+public class GuideActivity extends AppCompatActivity implements ManagerProvider {
     private ViewPager2 viewPager;
     private Button nextButton;
     private StepsView stepsView;
     private TextView titleView;
 
     public PermissionManager pm;
+    public SettingsManager settingsManager;
 
     String[] titles = {"引导", "工作模式", "帮助文档"};
 
@@ -41,6 +42,7 @@ public class GuideActivity extends AppCompatActivity {
         getWindow().setNavigationBarColor(getColor(R.color.light_grey));
 
         pm = new PermissionManager(this);
+        settingsManager = new SettingsManager(this);
 
         titleView = findViewById(R.id.title);
 
@@ -86,7 +88,10 @@ public class GuideActivity extends AppCompatActivity {
                 navigateToNextPage();
             } else {
                 // 如果是最后一页，点击“完成”
-                //TODO:记录状态
+                settingsManager.setBoolean(SettingsManager.KEY_SHOW_GUIDE, false);
+                // 完成引导后，跳转到MainActivity
+                Intent intent = new Intent(this, MainActivity.class);
+                startActivity(intent);
                 finish();
             }
         });
@@ -105,6 +110,25 @@ public class GuideActivity extends AppCompatActivity {
                 .setCircleRadius(18)
                 .setAnimationCircleRadius(13)
                 .drawSteps();
+
+        // 拦截返回事件
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                // 在引导页中，按返回键直接退出应用
+                finishAffinity();
+            }
+        });
+    }
+
+    @Override
+    public PermissionManager getPermissionManager() {
+        return pm;
+    }
+
+    @Override
+    public SettingsManager getSettingsManager() {
+        return settingsManager;
     }
 
     /**
@@ -119,6 +143,7 @@ public class GuideActivity extends AppCompatActivity {
 
     /**
      * 显示权限缺失警告对话框
+     *
      * @param missingPermissions 缺失的权限列表
      */
     private void showPermissionWarningDialog(List<String> missingPermissions) {

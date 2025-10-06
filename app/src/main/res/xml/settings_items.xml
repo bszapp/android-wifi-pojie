@@ -19,6 +19,11 @@
         show="true" />
 
     <item
+        key="show_guide"
+        type="switch"
+        defaultValue="true"
+        show="false" />
+    <item
         key="read_mode"
         type="int"
         defaultValue="0"

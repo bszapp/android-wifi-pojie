@@ -4,6 +4,8 @@
     <color name="white">#000000</color>
     <color name="light_grey">#333333</color>
     <color name="main_color">#FF018786</color>
+    <color name="main_color_dark">#c4f2f1</color>
+    <color name="main_color_light">#006868</color>
     <color name="main_color_transparent_2">#66018786</color>
     <color name="main_color_transparent_1">#44018786</color>
     <color name="main_color_transparent_0">#30018786</color>

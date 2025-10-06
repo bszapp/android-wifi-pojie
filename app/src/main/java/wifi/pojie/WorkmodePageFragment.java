@@ -7,10 +7,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.Fragment;
-
-import java.util.Objects;
 
 import View.SegmentedButtonGroup;
 
@@ -56,8 +53,9 @@ public class WorkmodePageFragment extends Fragment {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        settingsManager = new SettingsManager(requireContext());
-        pm = ((GuideActivity) requireActivity()).pm;
+        ManagerProvider provider = (ManagerProvider) requireActivity();
+        settingsManager = provider.getSettingsManager();
+        pm = provider.getPermissionManager();
     }
 
     @Override
