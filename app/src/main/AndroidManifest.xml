@@ -29,6 +29,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:theme="@style/AppTheme.NoActionBar.Home"
             android:screenOrientation="portrait"
             android:supportsPictureInPicture="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"

@@ -19,7 +19,6 @@ import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.splashscreen.SplashScreen;
 import androidx.core.view.WindowCompat;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
@@ -52,7 +51,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         setTheme(R.style.App_Theme);
         super.onCreate(savedInstanceState);
-
         SettingsManager settingsManager = new SettingsManager(this);
         if (settingsManager.getBoolean(SettingsManager.KEY_SHOW_GUIDE)) {
             Intent intent = new Intent(this, GuideActivity.class);

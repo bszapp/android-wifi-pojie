@@ -59,4 +59,9 @@
         <item name="colorPrimary">@color/main_color</item>
         <item name="colorOnPrimary">@color/white</item>
     </style>
+    
+    <!-- This is the new, isolated splash theme -->
+    <style name="AppTheme.NoActionBar.Home" parent="@style/App.Theme">
+        <item name="android:windowBackground">@drawable/layerlist_splash</item>
+    </style>
 </resources>
