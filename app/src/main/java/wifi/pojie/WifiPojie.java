@@ -2,6 +2,12 @@ package wifi.pojie;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.util.Log;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.util.Map;
 import java.util.Objects;
@@ -11,7 +17,6 @@ import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 public class WifiPojie {
-    private static final String TAG = "WifiPojie";
 
     private final String ssid;
     private final String[] dictionary;
@@ -24,6 +29,7 @@ public class WifiPojie {
     private ConnectWifi connectWifi;
     private boolean isDestroyed = false;
     private int currentTryIndex;
+    private final Context context;
 
     /**
      * 构造函数
@@ -42,6 +48,7 @@ public class WifiPojie {
                      Runnable endFunc) throws ExecutionException, InterruptedException {
 
 
+        this.context = context;
         this.ssid = (String) config.get("ssid");
         this.dictionary = (String[]) config.get("dictionary");
         this.timeoutMillis = (int) config.get("timeoutMillis");
@@ -115,6 +122,9 @@ public class WifiPojie {
                 );
             }
 
+            // 记录尝试
+            logAttempt(ssid, currentTryIndex + 1, null);
+
             // 尝试连接
             connectWifi.connect(String.valueOf(ssid), dictionary[currentTryIndex], timeoutMillis, (result) -> {
                 // 确保回调在非销毁状态下执行
@@ -129,6 +139,7 @@ public class WifiPojie {
                 if (Objects.equals(result, "success")) {
                     // 成功连接
                     logOutputFunction.accept("成功连接到WiFi网络: " + ssid + " 密码: " + dictionary[currentTryIndex]);
+                    logAttempt(ssid, currentTryIndex + 1, dictionary[currentTryIndex]);
                     destroy(false);
                 } else {
                     connectWifi.forgetWifiName(ssid);
@@ -140,6 +151,65 @@ public class WifiPojie {
             logOutputFunction.accept("E: " + e.getMessage());
             destroy(false);
         }
+    }
+
+    /**
+     * 记录尝试数据到 SharedPreferences，并输出日志确认
+     * 逻辑：
+     * 1. 如果已存在该ssid，则尝试次数+1，若本次密码正确则更新密码。
+     * 2. 如果不存在则新建。
+     */
+    private void logAttempt(String ssid, int attemptCount, String correctPassword) {
+        Log.i("WifiPojie", "开始记录尝试数据: SSID=" + ssid + ", 尝试次数=" + attemptCount);
+
+        SharedPreferences sharedPreferences = context.getSharedPreferences("wifi_attempts", Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor = sharedPreferences.edit();
+
+        // 获取现有记录
+        String existingData = sharedPreferences.getString("attempts", "[]");
+        JSONArray attemptsArray;
+        try {
+            attemptsArray = new JSONArray(existingData);
+        } catch (JSONException e) {
+            Log.e("WifiPojie", "解析现有记录时出错", e);
+            attemptsArray = new JSONArray();
+        }
+
+        boolean found = false;
+        for (int i = 0; i < attemptsArray.length(); i++) {
+            try {
+                JSONObject obj = attemptsArray.getJSONObject(i);
+                if (obj.getString("ssid").equals(ssid)) {
+                    // 已存在该ssid，尝试次数+1
+                    int oldCount = obj.optInt("attemptCount", 0);
+                    obj.put("attemptCount", oldCount + 1);
+                    // 如果本次密码正确，更新密码
+                    if (correctPassword != null && !"N/A".equals(correctPassword)) {
+                        obj.put("correctPassword", correctPassword);
+                    }
+                    found = true;
+                    break;
+                }
+            } catch (JSONException e) {
+                Log.e("WifiPojie", "遍历记录时出错", e);
+            }
+        }
+        if (!found) {
+            // 新建记录
+            JSONObject attemptObject = new JSONObject();
+            try {
+                attemptObject.put("ssid", ssid);
+                attemptObject.put("attemptCount", 1);
+                attemptObject.put("correctPassword", correctPassword != null ? correctPassword : "N/A");
+                attemptsArray.put(attemptObject);
+            } catch (JSONException e) {
+                Log.e("WifiPojie", "创建新记录对象时出错", e);
+            }
+        }
+        // 保存更新后的记录
+        editor.putString("attempts", attemptsArray.toString());
+        editor.apply();
+        Log.i("WifiPojie", "记录已保存: SSID=" + ssid + ", 尝试次数=" + attemptCount + ", 密码=" + (correctPassword != null ? correctPassword : "N/A"));
     }
 
     public void destroy(boolean byUser) {
@@ -164,6 +234,9 @@ public class WifiPojie {
         }
     }
 
+    public void shutdownExecutorService() {
+        executorService.shutdownNow();
+    }
 
     @FunctionalInterface
     public interface TriConsumer<T, U, V> {

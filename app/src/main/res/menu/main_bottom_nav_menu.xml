@@ -5,10 +5,10 @@
         android:title="主页"
         android:icon="@drawable/ic_home" />
 
-<!--    <item-->
-<!--        android:id="@+id/nav_history"-->
-<!--        android:title="历史"-->
-<!--        android:icon="@drawable/ic_history" />-->
+    <item
+        android:id="@+id/nav_history"
+        android:title="历史"
+        android:icon="@drawable/ic_history" />
 
     <item
         android:id="@+id/nav_settings"

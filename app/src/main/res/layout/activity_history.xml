@@ -24,11 +24,18 @@
 
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/textView7"
+    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+        android:id="@+id/swipe_refresh_layout"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="请输入文本" />
+        android:layout_height="match_parent">
 
+        <ListView
+            android:id="@+id/history_listview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="@null"
+            android:dividerHeight="0dp" />
+
+    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
 </LinearLayout>

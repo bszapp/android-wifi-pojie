@@ -89,7 +89,6 @@ public class PojieActivity extends Fragment {
     private WifiPojieService wifiPojieService;
     private boolean isServiceBound = false;
     private SettingsManager settingsManager;
-    private PermissionManager pm;
 
     private static final String ACTION_PIP_EXECUTE = "wifi.pojie.ACTION_PIP_EXECUTE";
 
@@ -171,7 +170,6 @@ public class PojieActivity extends Fragment {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         settingsManager = new SettingsManager(requireContext());
-        pm = ((MainActivity) requireActivity()).pm;
     }
 
     @Override
@@ -395,6 +393,15 @@ public class PojieActivity extends Fragment {
         ((MainActivity) requireActivity()).clearPipLog();
     }
 
+    private void alert(String text,String title){
+        new MaterialAlertDialogBuilder(requireActivity())
+                .setTitle(title)
+                .setMessage(text)
+                .setNegativeButton("知道了", (dialog, which) -> {
+                    dialog.dismiss();
+                })
+                .show();
+    }
 
     /**
      * 设置所有按钮的点击监听器
@@ -405,9 +412,19 @@ public class PojieActivity extends Fragment {
             if (isRunning) {
                 stopRunningCommand();
             } else {
+                String ssid=wifiSsid.getText().toString();
+                if(ssid.isEmpty()){
+                    alert("wifi名称为空，请先选择wifi","缺失参数");
+                    return;
+                }
+                if(dictionary.length==0){
+                    alert("字典为空，请先选择字典文件","缺失参数");
+                    return;
+                }
+
                 clearLog();
 
-                List<String> missingPermissions = pm.getMissingPermissionsSummary(true);
+                List<String> missingPermissions = ((MainActivity) requireActivity()).getMissingPermissionsSummary();
                 if (!missingPermissions.isEmpty()) {
                     StringBuilder output = new StringBuilder("缺失必要权限：\n");
                     for (String permission : missingPermissions) {
@@ -450,7 +467,7 @@ public class PojieActivity extends Fragment {
                 if (getActivity() != null) {
                     Map<String, Object> config = new HashMap<>();
 
-                    config.put("ssid", wifiSsid.getText().toString());
+                    config.put("ssid", ssid);
                     config.put("dictionary", dictionary);
                     config.put("timeoutMillis", Integer.parseInt(tryTime.getText().toString()));
                     config.put("startLine", Integer.parseInt(startLine.getText().toString()));

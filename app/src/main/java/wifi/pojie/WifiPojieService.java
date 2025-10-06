@@ -227,12 +227,13 @@ public class WifiPojieService extends Service {
 
     @Override
     public void onDestroy() {
-        super.onDestroy();
+        isRunning = false;
         Log.d(TAG, "WifiPojieService destroyed");
         if (wifiPojie != null) {
             wifiPojie.destroy(false);
+            wifiPojie.shutdownExecutorService();
         }
-        isRunning = false;
+        super.onDestroy();
     }
 
 }

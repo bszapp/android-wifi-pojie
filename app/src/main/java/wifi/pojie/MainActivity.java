@@ -28,6 +28,7 @@ import androidx.viewpager2.widget.ViewPager2;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 
 import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
     private ViewPager2 viewPager;
@@ -42,10 +43,10 @@ public class MainActivity extends AppCompatActivity {
     private ArrayAdapter<String> pipLogAdapter;
     private ProgressBar pipRunningTip;
 
-    public PermissionManager pm;
+    private PermissionManager pm;
 
-    static Fragment[] fragments = new Fragment[]{new PojieActivity(), new SettingsFragment()};
-    static int[] navIds = new int[]{R.id.nav_home, R.id.nav_settings};
+    static Fragment[] fragments = new Fragment[]{new PojieActivity(), new HistoryActivity(), new SettingsFragment()};
+    static int[] navIds = new int[]{R.id.nav_home, R.id.nav_history, R.id.nav_settings};
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -133,6 +134,10 @@ public class MainActivity extends AppCompatActivity {
         setPipMode(false);
     }
 
+    public List<String> getMissingPermissionsSummary(){
+        return pm.getMissingPermissionsSummary(true);
+    }
+
     private final BroadcastReceiver pipStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -151,6 +156,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (pm == null) {
+            pm = new PermissionManager(this);
+        }
         IntentFilter filter = new IntentFilter("wifi.pojie.ACTION_STATE_CHANGED");
         registerReceiver(pipStateReceiver, filter);
     }
@@ -189,7 +197,8 @@ public class MainActivity extends AppCompatActivity {
         pipLogAdapter.notifyDataSetChanged();
         new Handler().postDelayed(() -> pipLog.setSelection(pipLogAdapter.getCount() - 1), 0);
     }
-    public void clearPipLog(){
+
+    public void clearPipLog() {
         pipLogList.clear();
     }
 

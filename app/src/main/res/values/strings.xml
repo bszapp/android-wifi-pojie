@@ -19,7 +19,7 @@
     <string name="select_network_button_text">选择</string>
     <string name="cancel_button_text">取消</string>
     <string name="uninstall_title">⚡️你⚡️卸⚡️你⚡️大⚡️坝⚡️</string>
-    <string name="uninstall_tip">“wifi密码工具”不是系统应用，卸载后不会影响浏览器、相机、小爱App、联系人、账号等多个系统应用正常使用。\n（我们专门为小米手机桌面卸载添加了提示，提升用户体验）</string>
+    <string name="uninstall_tip">吾日三省吾身：观人妙作，而不赞乎？观其有益，不纳藏乎？得其所用，而不币之乎？\n注释：①〔赞〕点赞 ②〔藏〕收藏 ③〔币〕投币，这里名词用作作动词，指为…而投币（刻意强调）\n\n（我们专门为小米手机桌面卸载添加了提示，提升用户体验）</string>
     <string name="app_description">一款通过暴力破解密码本的方式连接wifi的工具</string>
 </resources>
 
