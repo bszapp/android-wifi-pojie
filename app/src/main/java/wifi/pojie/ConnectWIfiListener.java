@@ -108,6 +108,13 @@ public class ConnectWIfiListener {
                             handshakeCount++;
 
                         }
+
+                        //握手成功
+                        else if (Pattern.matches(".*?:\\s+WPA:\\s+Sending\\s+EAPOL-Key\\s+3/4.*", line) || Pattern.matches(".*?:\\s+WPA:\\s+Sending\\s+EAPOL-Key\\s+4/4.*", line)) {
+                            if (handshakeTimeoutHandler != null) {
+                                handshakeTimeoutHandler.removeCallbacks(handshakeTimeoutRunnable);
+                            }
+                        }
                     },
                     null
             );
