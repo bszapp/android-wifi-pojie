@@ -1,6 +1,11 @@
 # wifi密码工具
 一款通过暴力破解密码本的方式连接wifi的工具
+
 https://www.bilibili.com/video/BV1EbxjzZExd/
+<div align="center">
+  <img src="https://raw.githubusercontent.com/bszapp/android-wifi-pojie/refs/heads/main/1.png" style="width: 49%; display: inline-block; margin: 0 0.5%;">
+  <img src="https://raw.githubusercontent.com/bszapp/android-wifi-pojie/refs/heads/main/2.png" style="width: 49%; display: inline-block; margin: 0 0.5%;">
+</div>
 
 ### 免责声明
 破解他人wifi密码属于违法行为，本工具仅供网络安全测试使用，请对自己的wifi尝试，**勿用于非法用途，因此造成的后果与作者无关，继续使用代表同意此条款**
