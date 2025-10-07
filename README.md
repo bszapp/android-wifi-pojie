@@ -7,7 +7,6 @@
   <img src="https://raw.githubusercontent.com/bszapp/android-wifi-pojie/refs/heads/main/1.png" style="width: 49%; display: inline-block; margin: 0 0.5%;">
   <img src="https://raw.githubusercontent.com/bszapp/android-wifi-pojie/refs/heads/main/2.png" style="width: 49%; display: inline-block; margin: 0 0.5%;">
 </div>
-<iframe src="https://player.bilibili.com/player.html?aid=202480077&amp;bvid=BV1ja411A7bp&amp;cid=245278692&amp;page=1&amp;autoplay=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true" data-bm="23"> </iframe>
 ### 免责声明
 破解他人wifi密码属于违法行为，本工具仅供网络安全测试使用，请对自己的wifi尝试，**勿用于非法用途，因此造成的后果与作者无关，继续使用代表同意此条款**
 
