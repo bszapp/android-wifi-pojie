@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<selector xmlns:android="http://schemas.android.com/apk/res/android">
+<selector xmlns:tools="http://schemas.android.com/tools" xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:color="@color/switch_track_checked" android:state_checked="true"/>
     <item android:color="@color/switch_track_normal" android:state_checked="false"/>
     <!-- File: res/values/colors.xml -->
-    <color name="splash_background">@color/splash_background_light</color>
+    <color android:name="splash_background" tools:ignore="ExtraText">@color/splash_background_light</color>
 </selector>
 

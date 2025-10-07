@@ -253,9 +253,9 @@ public class PojieActivity extends Fragment {
         filter.addAction(WifiPojieService.ACTION_FINISHED);
 
         if (getActivity() != null) {
-            getActivity().registerReceiver(serviceBroadcastReceiver, filter, Context.RECEIVER_EXPORTED);
-            getActivity().registerReceiver(pipBroadcastReceiver, new IntentFilter(ACTION_PIP_EXECUTE), Context.RECEIVER_EXPORTED);
-            getActivity().registerReceiver(pipButtonClickReceiver, new IntentFilter("wifi.pojie.ACTION_PIP_BUTTON_CLICK"), Context.RECEIVER_EXPORTED);
+            getActivity().registerReceiver(serviceBroadcastReceiver, filter);
+            getActivity().registerReceiver(pipBroadcastReceiver, new IntentFilter(ACTION_PIP_EXECUTE));
+            getActivity().registerReceiver(pipButtonClickReceiver, new IntentFilter("wifi.pojie.ACTION_PIP_BUTTON_CLICK"));
 
             // 绑定服务
             Intent intent = new Intent(getActivity(), WifiPojieService.class);
