@@ -1,8 +1,9 @@
 # wifi密码工具
 一款通过暴力破解密码本的方式连接wifi的工具
 
-~~视频演示地址： [自制安卓免Root wifi密码暴力破解工具v2.1](https://www.bilibili.com/video/BV1EbxjzZExd/)~~（已经封号）
-视频演示地址：<iframe width="640" height="360" frameborder="0" src="https://mega.nz/embed/ShY1GKCB#i5Weok9p_Svrm2wTX92CiOF1O8V4y67e_6gCHtF6vFc" allowfullscreen ></iframe>
+~~视频演示地址： [自制安卓免Root wifi密码暴力破解工具v2.1](https://www.bilibili.com/video/BV1EbxjzZExd/)~~（稿件被锁定且被封号）
+
+视频演示地址： [MEGA云盘](https://mega.nz/embed/ShY1GKCB#i5Weok9p_Svrm2wTX92CiOF1O8V4y67e_6gCHtF6vFc)
 
 
 <div align="center">
