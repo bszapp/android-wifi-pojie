@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">wifi工具箱</string>
+    <string name="failure_flag_help_text">用于程序判断单次尝试失败：\n• 密码错误：标准的连接失败，最稳定但速度最慢\n• 握手超时：通过监听握手事件的开始时间判失败，速度较快\n• 握手超次（推荐）：通过logcat捕获系统服务的握手详细日志，超过指定次数判失败，速度最快且较上一个更稳定</string>
+    <string name="error_algin_help_text">在单次尝试超过最大尝试时间时重试\n此情况多因为连接wifi请求没有发送成功或者信号过差\n• 重试次数：单个密码最多再尝试几次\n• 等待时间翻倍基数：在尝试失败后会延迟一段时间再尝试（防止请求过于频繁被路由器忽略），以该时间为基数翻倍，每失败一次翻一倍</string>
 </resources>

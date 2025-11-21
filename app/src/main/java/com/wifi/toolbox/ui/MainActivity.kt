@@ -48,6 +48,7 @@ import com.wifi.toolbox.ui.screen.AboutScreen
 import com.wifi.toolbox.ui.screen.HomeScreen
 import com.wifi.toolbox.ui.screen.PojieScreen
 import com.wifi.toolbox.ui.screen.SettingsScreen
+import com.wifi.toolbox.ui.screen.TestScreen
 import com.wifi.toolbox.ui.theme.AppTheme
 import kotlinx.coroutines.launch
 
@@ -106,7 +107,6 @@ fun DetailedDrawerExample(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    // Handles back press to navigate to home screen
     if (currentRoute != "Home") {
         BackHandler {
             navController.popBackStack("Home", inclusive = false)
@@ -123,7 +123,11 @@ fun DetailedDrawerExample(
                         .verticalScroll(rememberScrollState())
                 ) {
                     Spacer(Modifier.height(12.dp))
-                    Text(stringResource(R.string.app_name), modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.headlineMedium)
+                    Text(
+                        stringResource(R.string.app_name),
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.headlineMedium
+                    )
 
                     NavigationDrawerItem(
                         label = { Text("主页") },
@@ -143,7 +147,11 @@ fun DetailedDrawerExample(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    Text("工具箱", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "工具箱",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.titleMedium
+                    )
                     NavigationDrawerItem(
                         label = { Text("密码字典破解") },
                         selected = currentRoute == "Pojie",
@@ -158,10 +166,28 @@ fun DetailedDrawerExample(
                         },
                         modifier = Modifier.height(NavItemHeight)
                     )
+                    NavigationDrawerItem(
+                        label = { Text("实验室") },
+                        selected = currentRoute == "Test",
+                        icon = { Icon(Icons.Outlined.Science, contentDescription = null) },
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            if (currentRoute != "Test") {
+                                navController.navigate("Test") {
+                                    launchSingleTop = true
+                                }
+                            }
+                        },
+                        modifier = Modifier.height(NavItemHeight)
+                    )
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    Text("选项", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "选项",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.titleMedium
+                    )
                     NavigationDrawerItem(
                         label = { Text("设置") },
                         selected = currentRoute == "Settings",
@@ -198,7 +224,11 @@ fun DetailedDrawerExample(
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0)
         ) { innerPadding ->
-            NavHost(navController = navController, startDestination = "Home", modifier = Modifier.padding(innerPadding)) {
+            NavHost(
+                navController = navController,
+                startDestination = "Home",
+                modifier = Modifier.padding(innerPadding)
+            ) {
                 composable("Home") {
                     HomeScreen(onMenuClick = { scope.launch { drawerState.open() } })
                 }
@@ -214,7 +244,12 @@ fun DetailedDrawerExample(
                 composable("Pojie") {
                     PojieScreen(onMenuClick = { scope.launch { drawerState.open() } })
                 }
-                composable("About") { AboutScreen() }
+                composable("Test") {
+                    TestScreen(onMenuClick = { scope.launch { drawerState.open() } })
+                }
+                composable("About") {
+                    AboutScreen(onMenuClick = { scope.launch { drawerState.open() } })
+                }
             }
         }
     }
