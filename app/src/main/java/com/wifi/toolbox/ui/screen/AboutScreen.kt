@@ -58,7 +58,7 @@ fun AboutScreen(onMenuClick: () -> Unit) {
                     .fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                Text("About Screen")
+                Text("前面的区域，以后再来探索吧")
             }
         }
     }

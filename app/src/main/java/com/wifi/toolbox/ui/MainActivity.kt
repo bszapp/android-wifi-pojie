@@ -1,78 +1,68 @@
 package com.wifi.toolbox.ui
 
-import android.content.Context
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.setContent
+import androidx.activity.compose.*
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.rememberDrawerState
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
-import androidx.navigation.compose.rememberNavController
+import androidx.navigation.compose.*
+import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.R
-import com.wifi.toolbox.ui.screen.AboutScreen
-import com.wifi.toolbox.ui.screen.HomeScreen
-import com.wifi.toolbox.ui.screen.PojieScreen
-import com.wifi.toolbox.ui.screen.SettingsScreen
-import com.wifi.toolbox.ui.screen.TestScreen
+import com.wifi.toolbox.ui.screen.*
 import com.wifi.toolbox.ui.theme.AppTheme
 import kotlinx.coroutines.launch
+import com.wifi.toolbox.utils.ShizukuUtil
 
 private val DrawerWidth = 300.dp
 private val NavItemHeight = 48.dp
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val sharedPreferences = getSharedPreferences("settings_global", Context.MODE_PRIVATE)
+        ShizukuUtil.initialize(applicationContext)
+
+        val sharedPreferences = getSharedPreferences("settings_global", MODE_PRIVATE)
 
         setContent {
+            val app = LocalContext.current.applicationContext as MyApplication
+            val alertDialogData by app.alertDialogState.collectAsState()
+
             var dynamicColor by remember {
                 mutableStateOf(sharedPreferences.getBoolean("dynamic_color", true))
             }
             var darkThemeSetting by remember {
-                mutableStateOf(sharedPreferences.getString("dark_theme", "跟随设备") ?: "跟随设备")
+                mutableStateOf(sharedPreferences.getInt("dark_theme", 0))
+            }
+            var hiddenApiBypassIndex by remember {
+                val initialValue = try {
+                    sharedPreferences.getInt("hidden_api_bypass", 1)
+                } catch (_: ClassCastException) {
+                    val stringValue = sharedPreferences.getString("hidden_api_bypass", null)
+                    val parsedValue = stringValue?.toIntOrNull() ?: 1
+                    sharedPreferences.edit { putInt("hidden_api_bypass", parsedValue) }
+                    parsedValue
+                }
+                mutableIntStateOf(initialValue)
             }
 
             val useDarkTheme = when (darkThemeSetting) {
-                "开启" -> true
-                "关闭" -> false
+                1 -> true
+                2 -> false
                 else -> isSystemInDarkTheme()
             }
             AppTheme(darkTheme = useDarkTheme, dynamicColor = dynamicColor) {
@@ -85,9 +75,27 @@ class MainActivity : ComponentActivity() {
                     darkThemeSetting = darkThemeSetting,
                     onDarkThemeSettingChange = {
                         darkThemeSetting = it
-                        sharedPreferences.edit { putString("dark_theme", it) }
+                        sharedPreferences.edit { putInt("dark_theme", it) }
+                    },
+                    hiddenApiBypass = hiddenApiBypassIndex,
+                    onHiddenApiBypassChange = {
+                        hiddenApiBypassIndex = it
+                        sharedPreferences.edit { putInt("hidden_api_bypass", it) }
+                        Toast.makeText(this, "重启应用生效", Toast.LENGTH_SHORT).show()
                     }
                 )
+                alertDialogData?.let { data ->
+                    AlertDialog(
+                        onDismissRequest = { app.dismissAlert() },
+                        title = { Text(data.title) },
+                        text = { Text(data.text) },
+                        confirmButton = {
+                            TextButton(onClick = { app.dismissAlert() }) {
+                                Text("确定")
+                            }
+                        }
+                    )
+                }
             }
         }
     }
@@ -98,8 +106,10 @@ class MainActivity : ComponentActivity() {
 fun DetailedDrawerExample(
     dynamicColor: Boolean,
     onDynamicColorChange: (Boolean) -> Unit,
-    darkThemeSetting: String,
-    onDarkThemeSettingChange: (String) -> Unit
+    darkThemeSetting: Int,
+    onDarkThemeSettingChange: (Int) -> Unit,
+    hiddenApiBypass: Int,
+    onHiddenApiBypassChange: (Int) -> Unit
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -160,6 +170,20 @@ fun DetailedDrawerExample(
                             scope.launch { drawerState.close() }
                             if (currentRoute != "Pojie") {
                                 navController.navigate("Pojie") {
+                                    launchSingleTop = true
+                                }
+                            }
+                        },
+                        modifier = Modifier.height(NavItemHeight)
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("wifi管理器") },
+                        selected = currentRoute == "Viewer",
+                        icon = { Icon(Icons.Filled.Dns, contentDescription = null) },
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            if (currentRoute != "Viewer") {
+                                navController.navigate("Viewer") {
                                     launchSingleTop = true
                                 }
                             }
@@ -238,11 +262,16 @@ fun DetailedDrawerExample(
                         onDynamicColorChange = onDynamicColorChange,
                         darkTheme = darkThemeSetting,
                         onDarkThemeChange = onDarkThemeSettingChange,
+                        hiddenApiBypass = hiddenApiBypass,
+                        onHiddenApiBypassChange = onHiddenApiBypassChange,
                         onMenuClick = { scope.launch { drawerState.open() } }
                     )
                 }
                 composable("Pojie") {
                     PojieScreen(onMenuClick = { scope.launch { drawerState.open() } })
+                }
+                composable("Viewer") {
+                    ManageScreen(onMenuClick = { scope.launch { drawerState.open() } })
                 }
                 composable("Test") {
                     TestScreen(onMenuClick = { scope.launch { drawerState.open() } })

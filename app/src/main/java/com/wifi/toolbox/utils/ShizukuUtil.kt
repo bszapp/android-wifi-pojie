@@ -1,22 +1,51 @@
-package com.wifi.toolbox.tools
+package com.wifi.toolbox.utils
 
 import android.content.Context
 import android.media.AudioManager
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputEvent
 import android.view.KeyEvent
-import rikka.shizuku.*
+import com.wifi.toolbox.structs.WifiInfo
+import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuBinderWrapper
+import rikka.shizuku.SystemServiceHelper
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.function.Consumer
+import org.lsposed.hiddenapibypass.*
+import java.util.BitSet
 
-object ShizukuTool {
+const val REQUEST_PERMISSION_CODE = 1001
+
+object ShizukuUtil {
+
+
+
+    fun initialize(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val sharedPreferences = context.getSharedPreferences("settings_global", Context.MODE_PRIVATE)
+            var hiddenApiBypassOption: Int
+            try {
+                hiddenApiBypassOption = sharedPreferences.getInt("hidden_api_bypass", 1)
+            } catch (_: ClassCastException) {
+                val stringValue = sharedPreferences.getString("hidden_api_bypass", null)
+                hiddenApiBypassOption = stringValue?.toIntOrNull() ?: 1
+            }
+
+            when (hiddenApiBypassOption) {
+                1 -> LSPass.addHiddenApiExemptions("")
+                2 -> HiddenApiBypass.addHiddenApiExemptions("")
+            }
+        }
+    }
+
     const val PACKAGE_NAME = "com.android.shell"
 
     private fun asInterface(className: String, original: IBinder): Any {
@@ -75,9 +104,9 @@ object ShizukuTool {
 
         val setWifiEnabledMethod15 = methods.firstOrNull {
             it.name == "setWifiEnabled" && it.parameterTypes.size == 3 &&
-            it.parameterTypes[0] == String::class.java &&
-            it.parameterTypes[1] == java.lang.Boolean.TYPE &&
-            it.parameterTypes[2] == Bundle::class.java
+                    it.parameterTypes[0] == String::class.java &&
+                    it.parameterTypes[1] == java.lang.Boolean.TYPE &&
+                    it.parameterTypes[2] == Bundle::class.java
         }
         if (setWifiEnabledMethod15 != null) {
             setWifiEnabledMethod15.invoke(wifiService, packageName, enabled, Bundle())
@@ -86,8 +115,8 @@ object ShizukuTool {
 
         val setWifiEnabledMethod29 = methods.firstOrNull {
             it.name == "setWifiEnabled" && it.parameterTypes.size == 2 &&
-            it.parameterTypes[0] == String::class.java &&
-            it.parameterTypes[1] == java.lang.Boolean.TYPE
+                    it.parameterTypes[0] == String::class.java &&
+                    it.parameterTypes[1] == java.lang.Boolean.TYPE
         }
         if (setWifiEnabledMethod29 != null) {
             setWifiEnabledMethod29.invoke(wifiService, packageName, enabled)
@@ -96,14 +125,14 @@ object ShizukuTool {
 
         val setWifiEnabledMethodLegacy = methods.firstOrNull {
             it.name == "setWifiEnabled" && it.parameterTypes.size == 1 &&
-            it.parameterTypes[0] == java.lang.Boolean.TYPE
+                    it.parameterTypes[0] == java.lang.Boolean.TYPE
         }
         if (setWifiEnabledMethodLegacy != null) {
             setWifiEnabledMethodLegacy.invoke(wifiService, enabled)
             return
         }
 
-        throw NoSuchMethodException("没有发现setWifiEnabled方法，请将hidden_api_policy设为1然后重启应用")
+        throw NoSuchMethodException("没有发现setWifiEnabled方法")
     }
 
     fun connectToWifi(ssid: String, password: String) {
@@ -115,7 +144,7 @@ object ShizukuTool {
 
         wifiConfigurationClass.getField("SSID").set(wifiConfig, "\"$ssid\"")
 
-        val keyMgmtBitSet = java.util.BitSet()
+        val keyMgmtBitSet = BitSet()
         if (password.isEmpty()) {
             keyMgmtBitSet.set(0)
         } else {
@@ -130,33 +159,42 @@ object ShizukuTool {
 
         val addOrUpdateNetworkMethodApi29 = methods.firstOrNull {
             it.name == "addOrUpdateNetwork" && it.parameterTypes.size == 3 &&
-            it.parameterTypes[0] == wifiConfigurationClass &&
-            it.parameterTypes[1] == String::class.java &&
-            it.parameterTypes[2] == Bundle::class.java
+                    it.parameterTypes[0] == wifiConfigurationClass &&
+                    it.parameterTypes[1] == String::class.java &&
+                    it.parameterTypes[2] == Bundle::class.java
         }
         if (addOrUpdateNetworkMethodApi29 != null) {
             founded = true
-            Log.d("ShizukuTool","addOrUpdateNetworkMethodApi29")
-            netId = addOrUpdateNetworkMethodApi29.invoke(wifiService, wifiConfig, PACKAGE_NAME, Bundle()) as Int
+            Log.d("ShizukuTool", "addOrUpdateNetworkMethodApi29")
+            netId = addOrUpdateNetworkMethodApi29.invoke(
+                wifiService,
+                wifiConfig,
+                PACKAGE_NAME,
+                Bundle()
+            ) as Int
         }
 
         if (netId == -1) {
             val addOrUpdateNetworkMethodApi27 = methods.firstOrNull {
                 it.name == "addOrUpdateNetwork" && it.parameterTypes.size == 2 &&
-                it.parameterTypes[0] == wifiConfigurationClass &&
-                it.parameterTypes[1] == String::class.java
+                        it.parameterTypes[0] == wifiConfigurationClass &&
+                        it.parameterTypes[1] == String::class.java
             }
             if (addOrUpdateNetworkMethodApi27 != null) {
                 founded = true
                 Log.d("ShizukuTool", "addOrUpdateNetworkMethodApi27")
-                netId = addOrUpdateNetworkMethodApi27.invoke(wifiService, wifiConfig, PACKAGE_NAME) as Int
+                netId = addOrUpdateNetworkMethodApi27.invoke(
+                    wifiService,
+                    wifiConfig,
+                    PACKAGE_NAME
+                ) as Int
             }
         }
 
         if (netId == -1) {
             val addOrUpdateNetworkMethodLegacy = methods.firstOrNull {
                 it.name == "addOrUpdateNetwork" && it.parameterTypes.size == 1 &&
-                it.parameterTypes[0] == wifiConfigurationClass
+                        it.parameterTypes[0] == wifiConfigurationClass
             }
             if (addOrUpdateNetworkMethodLegacy != null) {
                 founded = true
@@ -167,11 +205,11 @@ object ShizukuTool {
         }
 
         if (!founded) {
-            throw NoSuchMethodException("没有发现addOrUpdateNetwork方法，请将hidden_api_policy设为1然后重启应用")
+            throw NoSuchMethodException("没有发现addOrUpdateNetwork方法")
         }
 
         if (netId == -1) {
-            throw RuntimeException("添加网络失败（netid=-1）")
+            throw RuntimeException("添加网络失败（NetId=-1）")
         }
 
         val enableNetworkMethod = wifiService::class.java.getMethod(
@@ -182,6 +220,175 @@ object ShizukuTool {
         )
         enableNetworkMethod.invoke(wifiService, netId, true, PACKAGE_NAME)
     }
+
+    fun startWifiScan(): Boolean {
+        val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
+        val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
+
+        return try {
+            val startScanMethod = wifiService::class.java.getMethod(
+                "startScan",
+                String::class.java,
+                String::class.java
+            )
+            val scanInitiated = startScanMethod.invoke(wifiService, PACKAGE_NAME, null) as Boolean
+            scanInitiated
+        } catch (e: Exception) {
+            Log.e("ShizukuTool", "Error initiating Wi-Fi scan: ${e.message}")
+            false
+        }
+    }
+
+    fun getWifiScanResults(): List<WifiInfo> {
+        val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
+        val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
+
+        val results = mutableListOf<WifiInfo>()
+        val getScanResultsMethod = wifiService::class.java.getMethod(
+            "getScanResults",
+            String::class.java,
+            String::class.java
+        )
+        val parceledListSlice = getScanResultsMethod.invoke(wifiService, PACKAGE_NAME, null)
+
+        val actualParceledListSliceClass = parceledListSlice.javaClass
+        val getListMethod = actualParceledListSliceClass.getMethod("getList")
+
+        @Suppress("UNCHECKED_CAST")
+        val scanResultsList = getListMethod.invoke(parceledListSlice) as List<Any>
+
+        if (scanResultsList.isEmpty()) {
+            return results
+        }
+
+        val scanResultClass = Class.forName("android.net.wifi.ScanResult")
+        val ssidField = scanResultClass.getField("SSID")
+        val levelField = scanResultClass.getField("level")
+        val capabilitiesField = scanResultClass.getField("capabilities")
+
+        scanResultsList.forEach { result ->
+            val ssid = ssidField.get(result)?.toString() ?: ""
+            val level = levelField.get(result) as Int
+            val capabilities = capabilitiesField.get(result)?.toString() ?: ""
+
+            results.add(WifiInfo(ssid, level, capabilities))
+        }
+        results.sortByDescending { it.level }
+        return results
+    }
+    fun getSavedWifiList(): List<Pair<Int, String>> {
+        val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
+        val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
+
+        val results = mutableListOf<Pair<Int, String>>()
+        val methods = wifiService::class.java.declaredMethods
+        val wifiConfigurationClass = Class.forName("android.net.wifi.WifiConfiguration")
+
+        var parceledListSlice: Any? = null
+        var founded = false
+
+        // 1. 新版方法: getConfiguredNetworks(String packageName, String featureId, boolean callerNetworksOnly)
+        val getConfiguredNetworksMethodNew = methods.firstOrNull {
+            it.name == "getConfiguredNetworks" &&
+                    it.parameterTypes.size == 3 &&
+                    it.parameterTypes[0] == String::class.java &&
+                    it.parameterTypes[1] == String::class.java &&
+                    it.parameterTypes[2] == Boolean::class.javaPrimitiveType
+        }
+        if (getConfiguredNetworksMethodNew != null) {
+            founded = true
+            parceledListSlice = getConfiguredNetworksMethodNew.invoke(
+                wifiService,
+                PACKAGE_NAME,
+                null,  // featureId
+                false  // callerNetworksOnly = false 获取所有配置
+            )
+        }
+
+        // 2. 老版本: getConfiguredNetworks(String packageName, Bundle options) (API 29)
+        if (!founded) {
+            val getConfiguredNetworksMethodApi29 = methods.firstOrNull {
+                it.name == "getConfiguredNetworks" &&
+                        it.parameterTypes.size == 2 &&
+                        it.parameterTypes[0] == String::class.java &&
+                        it.parameterTypes[1] == Bundle::class.java
+            }
+            if (getConfiguredNetworksMethodApi29 != null) {
+                founded = true
+                parceledListSlice = getConfiguredNetworksMethodApi29.invoke(
+                    wifiService,
+                    PACKAGE_NAME,
+                    Bundle()
+                )
+            }
+        }
+
+        // 3. 老版本: getConfiguredNetworks(String packageName) (API 27)
+        if (!founded) {
+            val getConfiguredNetworksMethodApi27 = methods.firstOrNull {
+                it.name == "getConfiguredNetworks" &&
+                        it.parameterTypes.size == 1 &&
+                        it.parameterTypes[0] == String::class.java
+            }
+            if (getConfiguredNetworksMethodApi27 != null) {
+                founded = true
+                parceledListSlice = getConfiguredNetworksMethodApi27.invoke(
+                    wifiService,
+                    PACKAGE_NAME
+                )
+            }
+        }
+
+        // 4. Legacy: getConfiguredNetworks()
+        if (!founded) {
+            val getConfiguredNetworksMethodLegacy = methods.firstOrNull {
+                it.name == "getConfiguredNetworks" && it.parameterTypes.isEmpty()
+            }
+            if (getConfiguredNetworksMethodLegacy != null) {
+                founded = true
+                parceledListSlice = getConfiguredNetworksMethodLegacy.invoke(wifiService)
+            }
+        }
+
+        if (!founded) throw NoSuchMethodException("没有发现getConfiguredNetworks方法")
+
+        if (parceledListSlice == null) return emptyList()
+
+        val getListMethod = parceledListSlice.javaClass.getMethod("getList")
+        @Suppress("UNCHECKED_CAST")
+        val configuredNetworksList = getListMethod.invoke(parceledListSlice) as List<Any>
+        if (configuredNetworksList.isEmpty()) return results
+        val networkIdField = wifiConfigurationClass.getField("networkId")
+
+        val ssidFieldConfig = try {
+            wifiConfigurationClass.getField("SSID")
+        } catch (_: Exception) {
+            null
+        }
+
+        val seenIds = HashSet<Int>()
+
+        configuredNetworksList.forEach { config ->
+            val networkId = networkIdField.get(config) as Int
+            if (seenIds.contains(networkId)) return@forEach
+            seenIds.add(networkId)
+            var ssidValue = ""
+            if (ssidFieldConfig != null) {
+                ssidValue = try {
+                    ssidFieldConfig.get(config)?.toString() ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
+            }
+            if (ssidValue.length >= 2 && ssidValue.startsWith("\"") && ssidValue.endsWith("\"")) {
+                ssidValue = ssidValue.substring(1, ssidValue.length - 1)
+            }
+            results.add(Pair(networkId, ssidValue))
+        }
+
+        return results
+    }
+
 
     /**
      * 执行命令
@@ -195,21 +402,14 @@ object ShizukuTool {
         onOutputReceived: Consumer<String>?,
         onCommandFinished: Consumer<String>?
     ): Runnable {
-        // 使用AtomicBoolean以便在匿名内部类中修改
         val isCancelled = AtomicBoolean(false)
         val isRunning = AtomicBoolean(true)
 
-
-        // 存储所有输出
         val allOutput = StringBuilder()
-
-
-        // 创建进程引用
         val processHolder = arrayOfNulls<Process>(1)
 
         val outputThread = Thread {
             try {
-                // 使用反射调用 Shizuku.newProcess 方法
                 val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
                     "newProcess",
                     Array<String>::class.java,
@@ -220,59 +420,36 @@ object ShizukuTool {
 
                 val cmd = parseCommand(command)
 
-
-                // 调用 Shizuku.newProcess 方法
                 val process = newProcessMethod.invoke(null, cmd, null, "/") as Process
                 processHolder[0] = process
 
-
-                // 读取标准输出
                 val inputStream = process.inputStream
                 val reader = BufferedReader(InputStreamReader(inputStream))
                 var line: String? = null
 
                 while (isRunning.get() && (reader.readLine().also { line = it }) != null) {
-                    if (isCancelled.get()) {
-                        break
-                    }
+                    if (isCancelled.get()) break
 
-
-                    // 添加到总输出
                     allOutput.append(line).append("\n")
-
-
-                    // 回调通知新行输出
                     onOutputReceived?.accept(line ?: "")
                 }
 
-
-                // 读取错误输出
                 val errorStream = process.errorStream
                 val errorReader = BufferedReader(InputStreamReader(errorStream))
                 while (isRunning.get() && (errorReader.readLine().also { line = it }) != null) {
                     if (isCancelled.get()) {
                         break
                     }
-
-
-                    // 添加到总输出
                     allOutput.append(line).append("\n")
-
-
-                    // 回调通知新行输出（错误信息也通过这个回调）
                     onOutputReceived?.accept(line ?: "")
                 }
 
-
-                // 等待进程结束
                 try {
                     process.waitFor()
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
 
-
-                // 如果没有被取消，则执行结束回调
                 if (!isCancelled.get()) {
                     onCommandFinished?.accept(allOutput.toString())
                 }
@@ -287,8 +464,6 @@ object ShizukuTool {
 
         outputThread.start()
 
-
-        // 返回停止执行的函数
         return Runnable {
             isCancelled.set(true)
             isRunning.set(false)
@@ -317,26 +492,20 @@ object ShizukuTool {
         }
     }
 
-    /**
-     * 解析命令行参数，正确处理引号内的空格
-     * @param command 完整的命令行字符串
-     * @return 解析后的参数数组
-     */
     private fun parseCommand(command: String): Array<String> {
         val args = mutableListOf<String>()
         var inQuotes = false
         val currentArg = StringBuilder()
 
         for (c in command) {
-            when {
-                c == '\"' -> inQuotes = !inQuotes
-                c == ' ' && !inQuotes -> {
+            when (c) {
+                '\"' -> inQuotes = !inQuotes
+                ' ' if !inQuotes -> {
                     if (currentArg.isNotEmpty()) {
                         args.add(currentArg.toString())
                         currentArg.clear()
                     }
                 }
-
                 else -> currentArg.append(c)
             }
         }

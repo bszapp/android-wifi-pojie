@@ -15,8 +15,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.R
@@ -25,17 +28,26 @@ import me.zhanghai.compose.preference.ListPreferenceType
 import me.zhanghai.compose.preference.PreferenceCategory
 import me.zhanghai.compose.preference.SwitchPreference
 import me.zhanghai.compose.preference.ProvidePreferenceLocals
+import androidx.compose.material.icons.filled.Api // Assuming an icon for API
+import androidx.compose.ui.text.AnnotatedString
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     dynamicColor: Boolean,
     onDynamicColorChange: (Boolean) -> Unit,
-    darkTheme: String,
-    onDarkThemeChange: (String) -> Unit,
+    darkTheme: Int,
+    onDarkThemeChange: (Int) -> Unit,
+    hiddenApiBypass: Int,
+    onHiddenApiBypassChange: (Int) -> Unit,
     onMenuClick: () -> Unit
 ) {
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
+    val hiddenApiBypassValues = listOf("不使用", "LSPass", "HiddenApiBypass")
+    val darkThemeValues = listOf("跟随设备", "开启", "关闭")
+
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
                 title = {
@@ -60,7 +72,8 @@ fun SettingsScreen(
                             contentDescription = "Open navigation drawer"
                         )
                     }
-                }
+                },
+                scrollBehavior = scrollBehavior
             )
         }
     ) { innerPadding ->
@@ -72,8 +85,6 @@ fun SettingsScreen(
             ) {
                 item {
                     PreferenceCategory(title = { Text("主题") })
-                }
-                item {
                     SwitchPreference(
                         value = dynamicColor,
                         onValueChange = onDynamicColorChange,
@@ -86,18 +97,33 @@ fun SettingsScreen(
                             )
                         }
                     )
-                }
-                item {
                     ListPreference(
                         value = darkTheme,
                         onValueChange = onDarkThemeChange,
-                        values = listOf("跟随设备", "开启", "关闭"),
+                        values = darkThemeValues.indices.toList(),
+                        valueToText = { AnnotatedString(darkThemeValues[it]) },
                         title = { Text("深色主题") },
-                        summary = { Text(text = darkTheme) },
+                        summary = { Text(text = darkThemeValues[darkTheme]) },
                         type = ListPreferenceType.DROPDOWN_MENU,
                         icon = {
                             Icon(
                                 imageVector = Icons.Filled.Brightness4,
+                                contentDescription = null
+                            )
+                        }
+                    )
+                    PreferenceCategory(title = { Text("隐藏API调用") })
+                    ListPreference(
+                        value = hiddenApiBypass,
+                        onValueChange = onHiddenApiBypassChange,
+                        values = hiddenApiBypassValues.indices.toList(),
+                        valueToText = { AnnotatedString(hiddenApiBypassValues[it]) },
+                        title = { Text("实现方式") },
+                        summary = { Text(text = hiddenApiBypassValues[hiddenApiBypass]) },
+                        type = ListPreferenceType.DROPDOWN_MENU,
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Filled.Api,
                                 contentDescription = null
                             )
                         }

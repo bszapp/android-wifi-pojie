@@ -11,10 +11,15 @@ android {
         version = release(36)
     }
 
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
     defaultConfig {
         applicationId = "com.wifi.toolbox"
         minSdk = 24
-        //noinspection ExpiredTargetSdkVersion
+        //noinspection ExpiredTargetSdkVersion 注:WifiManager需要
         targetSdk = 28
         versionCode = 1
         versionName = "1.0"
@@ -35,36 +40,42 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+        }
     }
     buildFeatures {
         compose = true
     }
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
 }
 
 dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
-    val shizuku_version = "13.1.5"
-    implementation("dev.rikka.shizuku:api:$shizuku_version")
-    implementation("dev.rikka.shizuku:provider:$shizuku_version")
+    implementation(libs.api)
+    implementation(libs.provider)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
 
-    // Compose BOM for consistent versions
-    implementation(platform("androidx.compose:compose-bom:2025.11.01"))
+    implementation(platform(libs.androidx.compose.bom.v20251200))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation("androidx.compose.material3:material3:1.5.0-alpha09")
+    implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.preference)
     implementation(libs.androidx.compose.runtime.annotation)
     implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
+
+    implementation(libs.hiddenapibypass)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

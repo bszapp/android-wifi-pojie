@@ -1,38 +1,17 @@
 package com.wifi.toolbox.ui.screen
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PrimaryTabRow
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.R
-import com.wifi.toolbox.ui.items.FoldCard
-import com.wifi.toolbox.ui.items.LogView
-import com.wifi.toolbox.ui.items.rememberLogState
-import com.wifi.toolbox.ui.screen.test.ConnectWifiTest
-import com.wifi.toolbox.ui.screen.test.ShellTest
-import com.wifi.toolbox.ui.screen.test.ShizukuTest
+import com.wifi.toolbox.ui.items.*
+import com.wifi.toolbox.ui.screen.test.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,7 +61,7 @@ fun TestScreen(onMenuClick: () -> Unit) {
                             text = {
                                 Text(
                                     text = title,
-                                    color = if (selectedTabIndex == index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                    color = if (selectedTabIndex == index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             })
                     }
@@ -90,7 +69,7 @@ fun TestScreen(onMenuClick: () -> Unit) {
 
                 when (selectedTabIndex) {
                     0 -> ShizukuTest(logState = logState, modifier = Modifier.fillMaxSize())
-                    1 -> ConnectWifiTest(logState = logState, modifier = Modifier.fillMaxSize())
+                    1 -> ApiTest(logState = logState, modifier = Modifier.fillMaxSize())
                     2 -> ShellTest(logState = logState, modifier = Modifier.fillMaxSize())
                 }
             }

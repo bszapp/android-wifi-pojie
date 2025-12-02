@@ -13,7 +13,7 @@ import com.wifi.toolbox.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(onMenuClick: () -> Unit) {
+fun ManageScreen(onMenuClick: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -22,7 +22,7 @@ fun HomeScreen(onMenuClick: () -> Unit) {
                         modifier = Modifier.padding(0.dp, 8.dp)
                     ) {
                         Text(
-                            text = "主页",
+                            text = "wifi管理器",
                             style = MaterialTheme.typography.titleLarge
                         )
                         Text(

@@ -1,40 +1,14 @@
 package com.wifi.toolbox.ui.screen.pojie
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.animation.*
+import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PlainTooltip
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Text
-import androidx.compose.material3.TooltipBox
-import androidx.compose.material3.rememberTooltipState
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.*
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.*
 import androidx.compose.ui.window.PopupPositionProvider
 import com.wifi.toolbox.R
 import com.wifi.toolbox.structs.PojieConfig
@@ -45,10 +19,10 @@ import kotlin.math.roundToInt
 @Composable
 fun ConfigItems(
     config: PojieConfig,
-    onConfigChange: (PojieConfig) -> Unit,
-    failureOptions: List<String>
+    onConfigChange: (PojieConfig) -> Unit
 ) {
     val retryCountLabels = listOf("不重试", "1", "2", "3", "4", "5", "无限")
+    val failureOptions = listOf("密码错误", "握手超时", "握手超次")
 
     val belowAnchorPopupPositionProvider = remember {
         object : PopupPositionProvider {
