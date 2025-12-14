@@ -2,10 +2,12 @@ package com.wifi.toolbox.ui.screen
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -18,12 +20,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AboutScreen(onMenuClick: () -> Unit) {
+    val app = LocalContext.current.applicationContext as MyApplication
     Box(
         modifier = Modifier.fillMaxSize(),
     ) {
@@ -56,9 +61,16 @@ fun AboutScreen(onMenuClick: () -> Unit) {
                 modifier = Modifier
                     .padding(innerPadding)
                     .fillMaxSize(),
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
-                Text("前面的区域，以后再来探索吧")
+                Column {
+                    Text("前面的区域，以后再来探索吧")
+                    Button(
+                        onClick = { app.alert("标题", "点什么点") }
+                    ) {
+                        Text("test")
+                    }
+                }
             }
         }
     }

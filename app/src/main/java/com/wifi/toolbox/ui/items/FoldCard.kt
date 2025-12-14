@@ -38,7 +38,7 @@ fun FoldCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp)),
-        color = MaterialTheme.colorScheme.surface,
+        color = MaterialTheme.colorScheme.surfaceContainer,
         tonalElevation = 2.dp
     ) {
         Column(Modifier.animateContentSize(spring(stiffness = Spring.StiffnessLow))) {

@@ -1,59 +1,36 @@
 package com.wifi.toolbox.ui.screen.test
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
-import android.net.wifi.WifiConfiguration
-import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSpecifier
+import android.net.*
+import android.net.wifi.*
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
-import androidx.annotation.RequiresPermission
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.InsertLink
-import androidx.compose.material.icons.filled.Radar
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.filled.WifiOff
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.google.android.gms.common.api.ResolvableApiException
+import com.google.android.gms.location.*
+import com.google.android.gms.tasks.Task
 import com.wifi.toolbox.structs.WifiInfo
-import com.wifi.toolbox.ui.items.ActionChip
-import com.wifi.toolbox.ui.items.LogState
-import com.wifi.toolbox.ui.items.SectionDivider
-import com.wifi.toolbox.ui.items.SectionTitle
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.wifi.toolbox.ui.items.*
+import kotlinx.coroutines.*
 
 
 @Composable
@@ -74,9 +51,10 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                         Manifest.permission.ACCESS_FINE_LOCATION
                     ) != PackageManager.PERMISSION_GRANTED
                 ) {
-
+                    performWifiScan(context, logState)
+                } else {
+                    logState.addLog("E: 缺少位置权限，无法扫描Wi-Fi")
                 }
-                performWifiScan(context, logState)
             }
         } else {
             logState.addLog("E: 缺少位置权限，无法扫描Wi-Fi")
@@ -178,13 +156,19 @@ private fun checkAndPerformWifiScan(
             context,
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED -> {
-            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) && !locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            val locationManager =
+                context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) && !locationManager.isProviderEnabled(
+                    LocationManager.NETWORK_PROVIDER
+                )
+            ) {
                 logState.addLog("系统定位服务未开启，请在设置中打开")
+                enableLocation(context)
                 return
             }
 
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val wifiManager =
+                context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             if (!wifiManager.isWifiEnabled) {
                 logState.addLog("Wi-Fi未开启，请打开Wi-Fi")
                 return
@@ -194,6 +178,7 @@ private fun checkAndPerformWifiScan(
                 performWifiScan(context, logState)
             }
         }
+
         else -> {
             logState.addLog("请先允许定位权限")
             wifiScanLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -204,13 +189,12 @@ private fun checkAndPerformWifiScan(
 
 private suspend fun performWifiScan(context: Context, logState: LogState) {
     try {
-        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val wifiManager =
+            context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val success = wifiManager.startScan()
         if (!success) {
-            logState.addLog("扫描频率过快，请求被系统拒绝")
-            return
-        }
-        logState.addLog("请求已发送，3秒后获取结果")
+            logState.addLog("W: 扫描频率过快，请求被系统拒绝")
+        } else logState.addLog("请求已发送，3秒后获取结果")
         delay(3000)
         if (ActivityCompat.checkSelfPermission(
                 context,
@@ -229,7 +213,14 @@ private suspend fun performWifiScan(context: Context, logState: LogState) {
         }
         logState.addLog("=== 扫描结果 ===")
         result.forEach {
-            logState.addLog(String.format("名称: %-16s 信号强度: %-8s 支持的协议: %s", it.ssid, it.level, it.capabilities))
+            logState.addLog(
+                String.format(
+                    "名称: %-16s 信号强度: %-8s 支持的协议: %s",
+                    it.ssid,
+                    it.level,
+                    it.capabilities
+                )
+            )
         }
         logState.addLog("===============")
 
@@ -320,5 +311,32 @@ private fun connectToWifiApi28(
         logState.addLog("请求已发送")
     } else {
         logState.addLog("请求发送失败（请去设置忘记此网络）")
+    }
+}
+
+private fun enableLocation(context: Context) {
+    try {
+        //先用GooglePlayGMS弹窗
+        val activity = context as Activity
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000)
+            .setMinUpdateIntervalMillis(5000)
+            .build()
+
+        val builder = LocationSettingsRequest.Builder()
+            .addLocationRequest(locationRequest)
+            .setAlwaysShow(true)
+        val settingsClient: SettingsClient = LocationServices.getSettingsClient(activity)
+        val task: Task<LocationSettingsResponse> =
+            settingsClient.checkLocationSettings(builder.build())
+
+        task.addOnFailureListener { exception ->
+            if (exception is ResolvableApiException) {
+                exception.startResolutionForResult(activity, 0x1)
+            }
+        }
+    } catch (_: Exception) {
+        //直接打开设置页
+        val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+        context.startActivity(intent)
     }
 }

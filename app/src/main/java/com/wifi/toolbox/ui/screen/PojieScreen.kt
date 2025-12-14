@@ -1,6 +1,7 @@
 package com.wifi.toolbox.ui.screen
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -11,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -22,6 +24,7 @@ import androidx.navigation.compose.*
 import com.wifi.toolbox.ui.screen.pojie.*
 import androidx.core.content.edit
 import com.wifi.toolbox.MyApplication
+import com.wifi.toolbox.structs.PojieRunInfo
 import com.wifi.toolbox.structs.PojieSettings
 import com.wifi.toolbox.ui.items.*
 import com.wifi.toolbox.utils.ShizukuUtil
@@ -60,6 +63,7 @@ fun PojieScreen(onMenuClick: () -> Unit) {
     val currentDestination = navBackStackEntry?.destination
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
 
+    var haveWifiScanResultState by rememberSaveable { mutableStateOf(false) }
 
     val app = LocalContext.current.applicationContext as MyApplication
 
@@ -85,6 +89,10 @@ fun PojieScreen(onMenuClick: () -> Unit) {
                 scanMode = sharedPreferences.getInt(
                     PojieSettings.SCAN_MODE_KEY,
                     PojieSettings.SCAN_MODE_DEFAULT
+                ),
+                allowScanUseCommand = sharedPreferences.getBoolean(
+                    PojieSettings.ALLOW_SCAN_USE_COMMAND_KEY,
+                    PojieSettings.ALLOW_SCAN_USE_COMMAND_DEFAULT
                 ),
                 enableMode = sharedPreferences.getInt(
                     PojieSettings.ENABLE_MODE_KEY,
@@ -118,6 +126,7 @@ fun PojieScreen(onMenuClick: () -> Unit) {
             putInt(PojieSettings.CONNECT_MODE_KEY, newSettings.connectMode)
             putInt(PojieSettings.MANAGE_SAVED_MODE_KEY, newSettings.manageSavedMode)
             putInt(PojieSettings.SCAN_MODE_KEY, newSettings.scanMode)
+            putBoolean(PojieSettings.ALLOW_SCAN_USE_COMMAND_KEY, newSettings.allowScanUseCommand)
             putInt(PojieSettings.ENABLE_MODE_KEY, newSettings.enableMode)
             putBoolean(PojieSettings.SCREEN_ALWAYS_ON_KEY, newSettings.screenAlwaysOn)
             putBoolean(
@@ -254,21 +263,106 @@ fun PojieScreen(onMenuClick: () -> Unit) {
                     runListView = {
                         RunListView(
                             scanWifi = {
-                                app.alert("缺失参数", "")
+                                val wifiManager =
+                                    context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                                if (pojieSettings.scanMode == 0) {
+                                    StartScanResult(
+                                        StartScanResult.CODE_SCAN_FAIL,
+                                        "扫描wifi实现为空，请先去设置中选择"
+                                    )
+                                } else if (wifiManager == null) {
+                                    StartScanResult(StartScanResult.CODE_UNKNOWN)
+                                } else if (!wifiManager.isWifiEnabled) {
+                                    StartScanResult(StartScanResult.CODE_WIFI_NOT_ENABLED)
+                                } else {
+                                    try {
+                                        when (pojieSettings.scanMode) {
+                                            1 -> {
+                                                if (checkShizukuUI(app)) {
+                                                    if (ShizukuUtil.startWifiScan(pojieSettings.allowScanUseCommand)) {
+                                                        haveWifiScanResultState = true
+                                                        StartScanResult(StartScanResult.CODE_SUCCESS)
+                                                    } else {
+                                                        StartScanResult(
+                                                            StartScanResult.CODE_SCAN_FAIL,
+                                                            "扫描频率过快，被系统拒绝"
+                                                        )
+                                                    }
+                                                } else
+                                                    StartScanResult(
+                                                        StartScanResult.CODE_SCAN_FAIL,
+                                                        "未授予Shizuku权限"
+                                                    )
+
+                                            }
+
+                                            else -> StartScanResult()
+                                        }
+                                    } catch (e: Exception) {
+                                        StartScanResult(StartScanResult.CODE_UNKNOWN, e.message)
+                                    }
+                                }
+                            },
+                            getScanResult = {
+                                try {
+                                    when (pojieSettings.scanMode) {
+                                        0 -> {
+                                            ScanResult(
+                                                ScanResult.CODE_SCAN_FAIL,
+                                                "扫描wifi实现为空，请先去设置中选择"
+                                            )
+                                        }
+
+                                        1 -> {
+                                            if (!haveWifiScanResultState) {
+                                                ScanResult(ScanResult.CODE_NOT_SCANNED)
+                                            } else {
+                                                val result = ShizukuUtil.getWifiScanResults()
+                                                ScanResult(
+                                                    ScanResult.CODE_SUCCESS,
+                                                    null,
+                                                    result
+                                                        .filter { it.ssid.isNotEmpty() }
+                                                        .distinctBy { it.ssid }
+                                                )
+                                            }
+                                        }
+
+                                        else -> ScanResult()
+                                    }
+                                } catch (e: Exception) {
+                                    ScanResult(errorMessage = e.message)
+                                }
                             },
                             enableWifi = {
                                 when (pojieSettings.enableMode) {
                                     0 -> {
-                                        app.alert("缺失参数", "打开wifi实现为空，请先在设置中选择")
+                                        app.alert(
+                                            "缺失参数",
+                                            "打开wifi实现为空，请先在设置中选择"
+                                        )
                                     }
 
                                     1 -> {
-                                        CheckShizukuUI(app) {
+                                        checkShizukuUI(app) {
                                             ShizukuUtil.setWifiEnabled(true)
                                         }
                                     }
                                 }
-                            }
+                            },
+                            runningTasks = app.runningPojieTasks,
+                            onStartClick = { ssid ->
+                                app.startTask(
+                                    PojieRunInfo(
+                                        ssid = ssid,
+                                        tryList = emptyList(),
+                                    )
+                                )
+                            },
+
+                            onStopClick = { ssid ->
+                                app.stopTask(ssid)
+                            },
                         )
                     }
                 )

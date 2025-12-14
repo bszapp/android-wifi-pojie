@@ -4,6 +4,7 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
@@ -87,14 +88,44 @@ fun ConfigItems(
         TooltipBox(
             positionProvider = belowAnchorPopupPositionProvider,
             tooltip = {
-                PlainTooltip(
+                RichTooltip(
                     modifier = Modifier
                         .width(320.dp)
-                        .padding(8.dp)
+                        .padding(8.dp),
+                    title = {
+                        Text("失败标志")
+                    },
+                    action = {
+                        Row(
+                            horizontalArrangement = Arrangement.End,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch { tooltipState.dismiss() }
+                                },
+                                modifier = Modifier.padding(end = 8.dp)
+                            ) {
+                                Text("了解更多")
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .padding(start = 2.dp)
+                                )
+                            }
+
+                            TextButton(onClick = {
+                                scope.launch { tooltipState.dismiss() }
+                            }) {
+                                Text("知道了")
+                            }
+                        }
+                    }
                 ) {
                     Text(
                         text = stringResource(id = R.string.failure_flag_help_text),
-                        modifier = Modifier.padding(4.dp),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -196,14 +227,44 @@ fun ConfigItems(
         TooltipBox(
             positionProvider = belowAnchorPopupPositionProvider,
             tooltip = {
-                PlainTooltip(
+                RichTooltip(
                     modifier = Modifier
                         .width(320.dp)
-                        .padding(8.dp)
+                        .padding(8.dp),
+                    title = {
+                        Text("异常重试")
+                    },
+                    action = {
+                        Row(
+                            horizontalArrangement = Arrangement.End,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch { tooltipState.dismiss() }
+                                },
+                                modifier = Modifier.padding(end = 8.dp)
+                            ) {
+                                Text("了解更多")
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .padding(start = 2.dp)
+                                )
+                            }
+
+                            TextButton(onClick = {
+                                scope.launch { tooltipState.dismiss() }
+                            }) {
+                                Text("知道了")
+                            }
+                        }
+                    }
                 ) {
                     Text(
                         text = stringResource(id = R.string.error_algin_help_text),
-                        modifier = Modifier.padding(4.dp),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }

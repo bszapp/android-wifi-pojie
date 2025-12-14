@@ -43,6 +43,7 @@ androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-te
 preference = { module = "me.zhanghai.compose.preference:preference", version.ref = "preference" }
 androidx-compose-runtime-annotation = { group = "androidx.compose.runtime", name = "runtime-annotation", version.ref = "runtimeAnnotation" }
 provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizukuVersion" }
+materialKolor = "com.materialkolor:material-kolor:4.0.5"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

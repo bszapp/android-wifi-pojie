@@ -35,6 +35,9 @@ android {
                 "proguard-rules.pro"
             )
         }
+        debug {
+            //isMinifyEnabled = true
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -51,6 +54,15 @@ android {
     dependenciesInfo {
         includeInApk = false
         includeInBundle = false
+    }
+
+    applicationVariants.all {
+        if (name == "release") {
+            outputs.configureEach {
+                (this as? com.android.build.gradle.internal.api.ApkVariantOutputImpl)?.outputFileName =
+                    "${defaultConfig.applicationId}-v${defaultConfig.versionName}.apk"
+            }
+        }
     }
 }
 
@@ -75,8 +87,13 @@ dependencies {
     implementation(libs.androidx.compose.runtime.annotation)
     implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
 
+    implementation(libs.materialKolor)
+
+    implementation("top.yukonga.miuix.kmp:miuix:0.7.2")
+
     implementation(libs.hiddenapibypass)
 
+    implementation("com.google.android.gms:play-services-location:21.0.1") //注:依赖play服务，打开系统定位（也许有点臃肿，算了不管了）
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

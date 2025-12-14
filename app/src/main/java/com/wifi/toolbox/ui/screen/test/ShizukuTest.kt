@@ -15,7 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.utils.ShizukuUtil
 import com.wifi.toolbox.ui.items.*
-import com.wifi.toolbox.utils.REQUEST_PERMISSION_CODE
+import com.wifi.toolbox.utils.ShizukuUtil.REQUEST_PERMISSION_CODE
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import rikka.shizuku.*
@@ -109,7 +109,7 @@ fun ShizukuTest(logState: LogState, modifier: Modifier = Modifier) {
         }
     }
 
-    LazyColumn{
+    LazyColumn {
         item {
             Column(
                 modifier = modifier
@@ -168,13 +168,23 @@ fun ShizukuTest(logState: LogState, modifier: Modifier = Modifier) {
                         onClick = {
                             scope.launch {
                                 try {
-                                    ShizukuUtil.startWifiScan()
-                                    logState.addLog("请求已发送，3秒后获取结果")
+                                    if (ShizukuUtil.startWifiScan()) {
+                                        logState.addLog("请求已发送，3秒后获取结果")
+                                    } else {
+                                        logState.addLog("W: 请求发送失败")
+                                    }
                                     delay(3000)
                                     val result = ShizukuUtil.getWifiScanResults()
                                     logState.addLog("=== 扫描结果 ===")
                                     result.forEach {
-                                        logState.addLog(String.format("名称: %-16s 信号强度: %-8s 支持的协议: %s", it.ssid, it.level, it.capabilities))
+                                        logState.addLog(
+                                            String.format(
+                                                "名称: %-16s 信号强度: %-8s 支持的协议: %s",
+                                                it.ssid,
+                                                it.level,
+                                                it.capabilities
+                                            )
+                                        )
                                     }
                                     logState.addLog("===============")
 
@@ -192,7 +202,13 @@ fun ShizukuTest(logState: LogState, modifier: Modifier = Modifier) {
                                 val result = ShizukuUtil.getSavedWifiList()
                                 logState.addLog("=== 已保存的wifi列表 ===")
                                 result.forEach {
-                                    logState.addLog(String.format("ID: %-4s 名称: %s", it.first, it.second))
+                                    logState.addLog(
+                                        String.format(
+                                            "ID: %-4s 名称: %s",
+                                            it.first,
+                                            it.second
+                                        )
+                                    )
                                 }
                                 logState.addLog("===============")
                             } catch (e: Exception) {

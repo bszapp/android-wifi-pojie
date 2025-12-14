@@ -22,15 +22,14 @@ import java.util.function.Consumer
 import org.lsposed.hiddenapibypass.*
 import java.util.BitSet
 
-const val REQUEST_PERMISSION_CODE = 1001
-
 object ShizukuUtil {
 
-
+    const val REQUEST_PERMISSION_CODE = 1001
 
     fun initialize(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val sharedPreferences = context.getSharedPreferences("settings_global", Context.MODE_PRIVATE)
+            val sharedPreferences =
+                context.getSharedPreferences("settings_global", Context.MODE_PRIVATE)
             var hiddenApiBypassOption: Int
             try {
                 hiddenApiBypassOption = sharedPreferences.getInt("hidden_api_bypass", 1)
@@ -46,7 +45,7 @@ object ShizukuUtil {
         }
     }
 
-    const val PACKAGE_NAME = "com.android.shell"
+    const val PACKAGE_NAME = "com.android.settings"
 
     private fun asInterface(className: String, original: IBinder): Any {
         return Class.forName("$className\$Stub").run {
@@ -98,7 +97,6 @@ object ShizukuUtil {
     fun setWifiEnabled(enabled: Boolean) {
         val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
         val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
-        val packageName = "com.android.shell"
 
         val methods = wifiService::class.java.declaredMethods
 
@@ -109,7 +107,7 @@ object ShizukuUtil {
                     it.parameterTypes[2] == Bundle::class.java
         }
         if (setWifiEnabledMethod15 != null) {
-            setWifiEnabledMethod15.invoke(wifiService, packageName, enabled, Bundle())
+            setWifiEnabledMethod15.invoke(wifiService, PACKAGE_NAME, enabled, Bundle())
             return
         }
 
@@ -119,7 +117,7 @@ object ShizukuUtil {
                     it.parameterTypes[1] == java.lang.Boolean.TYPE
         }
         if (setWifiEnabledMethod29 != null) {
-            setWifiEnabledMethod29.invoke(wifiService, packageName, enabled)
+            setWifiEnabledMethod29.invoke(wifiService, PACKAGE_NAME, enabled)
             return
         }
 
@@ -221,22 +219,20 @@ object ShizukuUtil {
         enableNetworkMethod.invoke(wifiService, netId, true, PACKAGE_NAME)
     }
 
-    fun startWifiScan(): Boolean {
+    fun startWifiScan(allowUseCommand: Boolean = false): Boolean {
         val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
         val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
 
-        return try {
-            val startScanMethod = wifiService::class.java.getMethod(
-                "startScan",
-                String::class.java,
-                String::class.java
-            )
-            val scanInitiated = startScanMethod.invoke(wifiService, PACKAGE_NAME, null) as Boolean
-            scanInitiated
-        } catch (e: Exception) {
-            Log.e("ShizukuTool", "Error initiating Wi-Fi scan: ${e.message}")
-            false
+        val startScanMethod = wifiService::class.java.getMethod(
+            "startScan",
+            String::class.java,
+            String::class.java
+        )
+        val scanInitiated = startScanMethod.invoke(wifiService, PACKAGE_NAME, null) as Boolean
+        if (!scanInitiated && allowUseCommand) {
+            return executeCommandSync("cmd wifi start-scan").exitCode == 0
         }
+        return scanInitiated
     }
 
     fun getWifiScanResults(): List<WifiInfo> {
@@ -276,6 +272,7 @@ object ShizukuUtil {
         results.sortByDescending { it.level }
         return results
     }
+
     fun getSavedWifiList(): List<Pair<Int, String>> {
         val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
         val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
@@ -355,6 +352,7 @@ object ShizukuUtil {
         if (parceledListSlice == null) return emptyList()
 
         val getListMethod = parceledListSlice.javaClass.getMethod("getList")
+
         @Suppress("UNCHECKED_CAST")
         val configuredNetworksList = getListMethod.invoke(parceledListSlice) as List<Any>
         if (configuredNetworksList.isEmpty()) return results
@@ -400,7 +398,7 @@ object ShizukuUtil {
     fun executeCommand(
         command: String,
         onOutputReceived: Consumer<String>?,
-        onCommandFinished: Consumer<String>?
+        onCommandFinished: Consumer<CommandRunner.CommandResult>?
     ): Runnable {
         val isCancelled = AtomicBoolean(false)
         val isRunning = AtomicBoolean(true)
@@ -409,6 +407,7 @@ object ShizukuUtil {
         val processHolder = arrayOfNulls<Process>(1)
 
         val outputThread = Thread {
+            var exitCode = -1
             try {
                 val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
                     "newProcess",
@@ -418,7 +417,7 @@ object ShizukuUtil {
                 )
                 newProcessMethod.isAccessible = true
 
-                val cmd = parseCommand(command)
+                val cmd = CommandRunner.parseCommand(command)
 
                 val process = newProcessMethod.invoke(null, cmd, null, "/") as Process
                 processHolder[0] = process
@@ -432,6 +431,12 @@ object ShizukuUtil {
 
                     allOutput.append(line).append("\n")
                     onOutputReceived?.accept(line ?: "")
+                }
+
+                try {
+                    exitCode = process.waitFor()
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
                 }
 
                 val errorStream = process.errorStream
@@ -451,11 +456,11 @@ object ShizukuUtil {
                 }
 
                 if (!isCancelled.get()) {
-                    onCommandFinished?.accept(allOutput.toString())
+                    onCommandFinished?.accept(CommandRunner.CommandResult(allOutput.toString(), exitCode))
                 }
             } catch (e: Exception) {
                 if (!isCancelled.get()) {
-                    onCommandFinished?.accept(e.stackTraceToString())
+                    onCommandFinished?.accept(CommandRunner.CommandResult(e.stackTraceToString(), exitCode))
                 }
             } finally {
                 isRunning.set(false)
@@ -478,42 +483,17 @@ object ShizukuUtil {
      * @param command 命令文本
      * @return CompletableFuture 异步返回命令执行的完整输出
      */
-    fun executeCommandSync(command: String): String {
-        val future = CompletableFuture<String?>()
+    fun executeCommandSync(command: String): CommandRunner.CommandResult {
+        val future = CompletableFuture<CommandRunner.CommandResult?>()
 
-        executeCommand(command, null) { t: String? -> future.complete(t) }
+        executeCommand(command, null) { future.complete(it) }
 
         try {
-            return future.get() ?: ""
+            return future.get() ?: CommandRunner.CommandResult("", -1)
         } catch (e: ExecutionException) {
             throw RuntimeException(e)
         } catch (e: InterruptedException) {
             throw RuntimeException(e)
         }
-    }
-
-    private fun parseCommand(command: String): Array<String> {
-        val args = mutableListOf<String>()
-        var inQuotes = false
-        val currentArg = StringBuilder()
-
-        for (c in command) {
-            when (c) {
-                '\"' -> inQuotes = !inQuotes
-                ' ' if !inQuotes -> {
-                    if (currentArg.isNotEmpty()) {
-                        args.add(currentArg.toString())
-                        currentArg.clear()
-                    }
-                }
-                else -> currentArg.append(c)
-            }
-        }
-
-        if (currentArg.isNotEmpty()) {
-            args.add(currentArg.toString())
-        }
-
-        return args.toTypedArray()
     }
 }

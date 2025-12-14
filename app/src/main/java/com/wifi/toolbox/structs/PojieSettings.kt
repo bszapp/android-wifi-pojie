@@ -9,6 +9,7 @@ data class PojieSettings(
     val connectMode: Int = CONNECT_MODE_DEFAULT,
     val manageSavedMode: Int = MANAGE_SAVED_MODE_DEFAULT,
     val scanMode: Int = SCAN_MODE_DEFAULT,
+    val allowScanUseCommand: Boolean = ALLOW_SCAN_USE_COMMAND_DEFAULT,
     val enableMode: Int = ENABLE_MODE_DEFAULT,
     val screenAlwaysOn: Boolean = SCREEN_ALWAYS_ON_DEFAULT,
     val showRunningNotification: Boolean = SHOW_RUNNING_NOTIFICATION_DEFAULT,
@@ -33,6 +34,9 @@ data class PojieSettings(
 
         const val SCREEN_ALWAYS_ON_KEY = "screen_always_on"
         const val SCREEN_ALWAYS_ON_DEFAULT = true
+
+        const val ALLOW_SCAN_USE_COMMAND_KEY = "allow_scan_use_command"
+        const val ALLOW_SCAN_USE_COMMAND_DEFAULT = true
 
         const val SHOW_RUNNING_NOTIFICATION_KEY = "show_running_notification"
         const val SHOW_RUNNING_NOTIFICATION_DEFAULT = true

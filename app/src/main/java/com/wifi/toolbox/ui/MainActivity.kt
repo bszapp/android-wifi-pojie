@@ -1,5 +1,8 @@
 package com.wifi.toolbox.ui
 
+import android.annotation.SuppressLint
+import android.app.ActivityOptions
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -13,6 +16,8 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -22,14 +27,20 @@ import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.R
 import com.wifi.toolbox.ui.screen.*
 import com.wifi.toolbox.ui.theme.AppTheme
+import com.wifi.toolbox.ui.theme.defaultColorSeed
 import kotlinx.coroutines.launch
 import com.wifi.toolbox.utils.ShizukuUtil
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.extra.SuperDialog
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private val DrawerWidth = 300.dp
 private val NavItemHeight = 48.dp
 
 class MainActivity : ComponentActivity() {
 
+    @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -40,13 +51,31 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val app = LocalContext.current.applicationContext as MyApplication
-            val alertDialogData by app.alertDialogState.collectAsState()
+
+            val snackbarHostState = remember { SnackbarHostState() }
+
+            LaunchedEffect(Unit) {
+                app.snackbarState.collect { data ->
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val result = snackbarHostState.showSnackbar(
+                        message = data.message,
+                        actionLabel = data.actionLabel,
+                        duration = SnackbarDuration.Short
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        data.onActionClick?.invoke()
+                    }
+                }
+            }
 
             var dynamicColor by remember {
                 mutableStateOf(sharedPreferences.getBoolean("dynamic_color", true))
             }
+            var dynamicColorSeed by remember {
+                mutableStateOf(sharedPreferences.getInt("dynamic_color_seed", defaultColorSeed.toArgb()))
+            }
             var darkThemeSetting by remember {
-                mutableStateOf(sharedPreferences.getInt("dark_theme", 0))
+                mutableIntStateOf(sharedPreferences.getInt("dark_theme", 0))
             }
             var hiddenApiBypassIndex by remember {
                 val initialValue = try {
@@ -65,37 +94,78 @@ class MainActivity : ComponentActivity() {
                 2 -> false
                 else -> isSystemInDarkTheme()
             }
-            AppTheme(darkTheme = useDarkTheme, dynamicColor = dynamicColor) {
-                DetailedDrawerExample(
-                    dynamicColor = dynamicColor,
-                    onDynamicColorChange = {
-                        dynamicColor = it
-                        sharedPreferences.edit { putBoolean("dynamic_color", it) }
-                    },
-                    darkThemeSetting = darkThemeSetting,
-                    onDarkThemeSettingChange = {
-                        darkThemeSetting = it
-                        sharedPreferences.edit { putInt("dark_theme", it) }
-                    },
-                    hiddenApiBypass = hiddenApiBypassIndex,
-                    onHiddenApiBypassChange = {
-                        hiddenApiBypassIndex = it
-                        sharedPreferences.edit { putInt("hidden_api_bypass", it) }
-                        Toast.makeText(this, "重启应用生效", Toast.LENGTH_SHORT).show()
+            AppTheme(darkTheme = useDarkTheme, dynamicColor = dynamicColor, dynamicColorSeed = Color(dynamicColorSeed)) {
+                val alertDialogData by app.alertDialogState.collectAsState(initial = null)
+                val showDialog = remember { mutableStateOf(false) }
+
+                LaunchedEffect(alertDialogData) {
+                    if (alertDialogData != null) {
+                        showDialog.value = true
                     }
-                )
-                alertDialogData?.let { data ->
-                    AlertDialog(
-                        onDismissRequest = { app.dismissAlert() },
-                        title = { Text(data.title) },
-                        text = { Text(data.text) },
-                        confirmButton = {
-                            TextButton(onClick = { app.dismissAlert() }) {
-                                Text("确定")
+                }
+
+                Scaffold(
+                    snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+                ) {
+                    if (alertDialogData != null) {
+                        SuperDialog(
+                            title = alertDialogData?.title ?: "",
+                            summary = alertDialogData?.text ?: "",
+                            show = showDialog,
+                            onDismissRequest = { app.dismissAlert() }
+                        ) {
+                            TextButton(
+                                text = "确定",
+                                onClick = { app.dismissAlert() },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                    DetailedDrawerExample(
+                        dynamicColor = dynamicColor,
+                        onDynamicColorChange = {
+                            dynamicColor = it
+                            sharedPreferences.edit { putBoolean("dynamic_color", it) }
+                        },
+                        dynamicColorSeed = dynamicColorSeed,
+                        onDynamicColorSeedChange = {
+                            dynamicColorSeed = it
+                            sharedPreferences.edit { putInt("dynamic_color_seed", it) }
+                        },
+                        darkThemeSetting = darkThemeSetting,
+                        onDarkThemeSettingChange = {
+                            darkThemeSetting = it
+                            sharedPreferences.edit { putInt("dark_theme", it) }
+                        },
+                        hiddenApiBypass = hiddenApiBypassIndex,
+                        onHiddenApiBypassChange = {
+                            hiddenApiBypassIndex = it
+                            sharedPreferences.edit { putInt("hidden_api_bypass", it) }
+                            app.snackbar("重启应用生效", "重启") {
+                                val intent = packageManager.getLaunchIntentForPackage(packageName)
+                                val restartIntent =
+                                    Intent.makeRestartActivityTask(intent?.component)
+                                restartIntent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                                val options = ActivityOptions.makeCustomAnimation(this, 0, 0)
+                                startActivity(restartIntent, options.toBundle())
+                                Runtime.getRuntime().exit(0)
                             }
                         }
                     )
+
                 }
+//                alertDialogData?.let { data ->
+//                    AlertDialog(
+//                        onDismissRequest = { app.dismissAlert() },
+//                        title = { Text(data.title) },
+//                        text = { Text(data.text) },
+//                        confirmButton = {
+//                            TextButton(onClick = { app.dismissAlert() }) {
+//                                Text("确定")
+//                            }
+//                        }
+//                    )
+//                }
             }
         }
     }
@@ -106,6 +176,8 @@ class MainActivity : ComponentActivity() {
 fun DetailedDrawerExample(
     dynamicColor: Boolean,
     onDynamicColorChange: (Boolean) -> Unit,
+    dynamicColorSeed: Int,
+    onDynamicColorSeedChange: (Int) -> Unit,
     darkThemeSetting: Int,
     onDarkThemeSettingChange: (Int) -> Unit,
     hiddenApiBypass: Int,
@@ -264,7 +336,9 @@ fun DetailedDrawerExample(
                         onDarkThemeChange = onDarkThemeSettingChange,
                         hiddenApiBypass = hiddenApiBypass,
                         onHiddenApiBypassChange = onHiddenApiBypassChange,
-                        onMenuClick = { scope.launch { drawerState.open() } }
+                        onMenuClick = { scope.launch { drawerState.open() } },
+                        dynamicColorSeed = dynamicColorSeed,
+                        onDynamicColorSeedChange = onDynamicColorSeedChange
                     )
                 }
                 composable("Pojie") {

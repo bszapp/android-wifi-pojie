@@ -145,8 +145,8 @@ fun ShellTest(logState: LogState, modifier: Modifier = Modifier) {
                             isCommandRunning = true
                             val commandToExecute = command
                             val onOutput: (String) -> Unit = { output -> logState.addLog(output) }
-                            val onFinish: (String) -> Unit = { _ ->
-                                logState.addLog("[执行完毕]")
+                            val onFinish: (CommandRunner.CommandResult) -> Unit = { result ->
+                                logState.addLog("[执行完毕 退出码${result.exitCode}]")
                                 isCommandRunning = false
                                 stopCommandRunnable = null
                             }
