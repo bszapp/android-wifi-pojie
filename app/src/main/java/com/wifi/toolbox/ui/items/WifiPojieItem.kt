@@ -110,7 +110,7 @@ fun wifiPojieItem(
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (runningInfo != null) colorResource(
-                                android.R.color.holo_red_light
+                                R.color.holo_red_light
                             )
                             else MaterialTheme.colorScheme.primary
                         ),
@@ -193,8 +193,7 @@ fun wifiPojieItem(
                                         )
                                     )
                                 } else {
-                                    val progress =
-                                        (currentIndex + 1).toFloat() / totalCount
+                                    val progress = currentIndex.toFloat() / totalCount
                                     LinearProgressIndicator(
                                         progress = { progress },
                                         modifier = Modifier
@@ -213,7 +212,7 @@ fun wifiPojieItem(
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     val progressText =
-                                        if (totalCount > 0) "${currentIndex + 1} / $totalCount" else "-/-"
+                                        if (totalCount > 0) "$currentIndex / $totalCount" else "-/-"
                                     val progress =
                                         if (totalCount > 0) (currentIndex.toFloat() / totalCount * 100) else null
                                     val progressNum =

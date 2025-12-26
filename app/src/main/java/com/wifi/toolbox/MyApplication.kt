@@ -20,6 +20,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuProvider
+import android.content.Intent
+import com.wifi.toolbox.services.PojieService
 
 
 class MyApplication : Application() {
@@ -119,6 +121,10 @@ class MyApplication : Application() {
     val runningPojieTasks = mutableStateListOf<PojieRunInfo>()
     fun startTask(data: PojieRunInfo) {
         if (runningPojieTasks.none { it.ssid == data.ssid }) {
+            if (runningPojieTasks.isEmpty()) {
+                val serviceIntent = Intent(this, PojieService::class.java)
+                startService(serviceIntent)
+            }
             runningPojieTasks.add(data)
         }
     }
@@ -128,6 +134,11 @@ class MyApplication : Application() {
      */
     fun stopTask(ssid: String) {
         runningPojieTasks.removeIf { it.ssid == ssid }
+        if (runningPojieTasks.isEmpty()) {
+            // Stop service if no tasks are running
+            val serviceIntent = Intent(this, PojieService::class.java)
+            stopService(serviceIntent)
+        }
     }
 
     /**

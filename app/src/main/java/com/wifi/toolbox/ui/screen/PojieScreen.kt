@@ -355,7 +355,7 @@ fun PojieScreen(onMenuClick: () -> Unit) {
                                 app.startTask(
                                     PojieRunInfo(
                                         ssid = ssid,
-                                        tryList = emptyList(),
+                                        tryList = listOf("12345678", "11111111", "12121212", "abcd1234", "11223344", "a1234567"),
                                     )
                                 )
                             },

@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.app.ActivityOptions
 import android.content.Intent
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.*
 import androidx.activity.enableEdgeToEdge
@@ -34,24 +33,42 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.ThemeController
 
 private val DrawerWidth = 300.dp
 private val NavItemHeight = 48.dp
 
 class MainActivity : ComponentActivity() {
 
+    private var pendingNavigation = mutableStateOf<String?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val target = intent.getStringExtra("target")
+        if (target != null) {
+            pendingNavigation.value = target
+        }
+    }
+
+    private fun handleIntent(intent: Intent) {
+        val target = intent.getStringExtra("target")
+        if (target != null) {
+            pendingNavigation.value = target
+        }
+    }
+
     @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleIntent(intent)
+
         enableEdgeToEdge()
-
         ShizukuUtil.initialize(applicationContext)
-
         val sharedPreferences = getSharedPreferences("settings_global", MODE_PRIVATE)
 
         setContent {
             val app = LocalContext.current.applicationContext as MyApplication
-
             val snackbarHostState = remember { SnackbarHostState() }
 
             LaunchedEffect(Unit) {
@@ -94,78 +111,69 @@ class MainActivity : ComponentActivity() {
                 2 -> false
                 else -> isSystemInDarkTheme()
             }
-            AppTheme(darkTheme = useDarkTheme, dynamicColor = dynamicColor, dynamicColorSeed = Color(dynamicColorSeed)) {
-                val alertDialogData by app.alertDialogState.collectAsState(initial = null)
-                val showDialog = remember { mutableStateOf(false) }
 
-                LaunchedEffect(alertDialogData) {
-                    if (alertDialogData != null) {
-                        showDialog.value = true
-                    }
-                }
-
-                Scaffold(
-                    snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+            MiuixTheme(ThemeController(isDark = useDarkTheme)) {
+                AppTheme(
+                    darkTheme = useDarkTheme,
+                    dynamicColor = dynamicColor,
+                    dynamicColorSeed = Color(dynamicColorSeed)
                 ) {
-                    if (alertDialogData != null) {
-                        SuperDialog(
-                            title = alertDialogData?.title ?: "",
-                            summary = alertDialogData?.text ?: "",
-                            show = showDialog,
-                            onDismissRequest = { app.dismissAlert() }
-                        ) {
-                            TextButton(
-                                text = "确定",
-                                onClick = { app.dismissAlert() },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
+                    val alertDialogData by app.alertDialogState.collectAsState(initial = null)
+                    val showDialog = remember { mutableStateOf(false) }
+
+                    LaunchedEffect(alertDialogData) {
+                        if (alertDialogData != null) showDialog.value = true
                     }
-                    DetailedDrawerExample(
-                        dynamicColor = dynamicColor,
-                        onDynamicColorChange = {
-                            dynamicColor = it
-                            sharedPreferences.edit { putBoolean("dynamic_color", it) }
-                        },
-                        dynamicColorSeed = dynamicColorSeed,
-                        onDynamicColorSeedChange = {
-                            dynamicColorSeed = it
-                            sharedPreferences.edit { putInt("dynamic_color_seed", it) }
-                        },
-                        darkThemeSetting = darkThemeSetting,
-                        onDarkThemeSettingChange = {
-                            darkThemeSetting = it
-                            sharedPreferences.edit { putInt("dark_theme", it) }
-                        },
-                        hiddenApiBypass = hiddenApiBypassIndex,
-                        onHiddenApiBypassChange = {
-                            hiddenApiBypassIndex = it
-                            sharedPreferences.edit { putInt("hidden_api_bypass", it) }
-                            app.snackbar("重启应用生效", "重启") {
-                                val intent = packageManager.getLaunchIntentForPackage(packageName)
-                                val restartIntent =
-                                    Intent.makeRestartActivityTask(intent?.component)
-                                restartIntent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-                                val options = ActivityOptions.makeCustomAnimation(this, 0, 0)
-                                startActivity(restartIntent, options.toBundle())
-                                Runtime.getRuntime().exit(0)
+
+                    Scaffold(
+                        snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+                    ) {
+                        if (alertDialogData != null) {
+                            SuperDialog(
+                                title = alertDialogData?.title ?: "",
+                                summary = alertDialogData?.text ?: "",
+                                show = showDialog,
+                                onDismissRequest = { app.dismissAlert() }
+                            ) {
+                                TextButton(
+                                    text = "确定",
+                                    onClick = { app.dismissAlert() },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
-                    )
-
+                        DetailedDrawerExample(
+                            dynamicColor = dynamicColor,
+                            onDynamicColorChange = {
+                                dynamicColor = it
+                                sharedPreferences.edit { putBoolean("dynamic_color", it) }
+                            },
+                            dynamicColorSeed = dynamicColorSeed,
+                            onDynamicColorSeedChange = {
+                                dynamicColorSeed = it
+                                sharedPreferences.edit { putInt("dynamic_color_seed", it) }
+                            },
+                            darkThemeSetting = darkThemeSetting,
+                            onDarkThemeSettingChange = {
+                                darkThemeSetting = it
+                                sharedPreferences.edit { putInt("dark_theme", it) }
+                            },
+                            hiddenApiBypass = hiddenApiBypassIndex,
+                            onHiddenApiBypassChange = {
+                                hiddenApiBypassIndex = it
+                                sharedPreferences.edit { putInt("hidden_api_bypass", it) }
+                                app.snackbar("重启应用生效", "重启") {
+                                    val restartIntent = packageManager.getLaunchIntentForPackage(packageName)
+                                    val intent = Intent.makeRestartActivityTask(restartIntent?.component)
+                                    intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                                    startActivity(intent, ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle())
+                                    Runtime.getRuntime().exit(0)
+                                }
+                            },
+                            pendingNavigation = pendingNavigation
+                        )
+                    }
                 }
-//                alertDialogData?.let { data ->
-//                    AlertDialog(
-//                        onDismissRequest = { app.dismissAlert() },
-//                        title = { Text(data.title) },
-//                        text = { Text(data.text) },
-//                        confirmButton = {
-//                            TextButton(onClick = { app.dismissAlert() }) {
-//                                Text("确定")
-//                            }
-//                        }
-//                    )
-//                }
             }
         }
     }
@@ -181,13 +189,25 @@ fun DetailedDrawerExample(
     darkThemeSetting: Int,
     onDarkThemeSettingChange: (Int) -> Unit,
     hiddenApiBypass: Int,
-    onHiddenApiBypassChange: (Int) -> Unit
+    onHiddenApiBypassChange: (Int) -> Unit,
+    pendingNavigation: MutableState<String?>
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+
+    LaunchedEffect(pendingNavigation.value) {
+        pendingNavigation.value?.let { route ->
+            navController.navigate(route) {
+                popUpTo("Home") { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+            pendingNavigation.value = null
+        }
+    }
 
     if (currentRoute != "Home") {
         BackHandler {
@@ -229,130 +249,81 @@ fun DetailedDrawerExample(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    Text(
-                        "工具箱",
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.titleMedium
+                    Text("工具箱", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
+
+                    val tools = listOf(
+                        Triple("密码字典破解", "Pojie", Icons.Outlined.LockOpen),
+                        Triple("wifi管理器", "Viewer", Icons.Filled.Dns),
+                        Triple("实验室", "Test", Icons.Outlined.Science)
                     )
-                    NavigationDrawerItem(
-                        label = { Text("密码字典破解") },
-                        selected = currentRoute == "Pojie",
-                        icon = { Icon(Icons.Outlined.LockOpen, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            if (currentRoute != "Pojie") {
-                                navController.navigate("Pojie") {
-                                    launchSingleTop = true
+
+                    tools.forEach { (label, route, icon) ->
+                        NavigationDrawerItem(
+                            label = { Text(label) },
+                            selected = currentRoute == route,
+                            icon = { Icon(icon, contentDescription = null) },
+                            onClick = {
+                                scope.launch { drawerState.close() }
+                                if (currentRoute != route) {
+                                    navController.navigate(route) { launchSingleTop = true }
                                 }
-                            }
-                        },
-                        modifier = Modifier.height(NavItemHeight)
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("wifi管理器") },
-                        selected = currentRoute == "Viewer",
-                        icon = { Icon(Icons.Filled.Dns, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            if (currentRoute != "Viewer") {
-                                navController.navigate("Viewer") {
-                                    launchSingleTop = true
-                                }
-                            }
-                        },
-                        modifier = Modifier.height(NavItemHeight)
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("实验室") },
-                        selected = currentRoute == "Test",
-                        icon = { Icon(Icons.Outlined.Science, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            if (currentRoute != "Test") {
-                                navController.navigate("Test") {
-                                    launchSingleTop = true
-                                }
-                            }
-                        },
-                        modifier = Modifier.height(NavItemHeight)
-                    )
+                            },
+                            modifier = Modifier.height(NavItemHeight)
+                        )
+                    }
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    Text(
-                        "选项",
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.titleMedium
+                    Text("选项", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
+
+                    val options = listOf(
+                        Triple("设置", "Settings", Icons.Outlined.Settings),
+                        Triple("帮助&关于", "About", Icons.Filled.Info)
                     )
-                    NavigationDrawerItem(
-                        label = { Text("设置") },
-                        selected = currentRoute == "Settings",
-                        icon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            if (currentRoute != "Settings") {
-                                navController.navigate("Settings") {
-                                    launchSingleTop = true
+
+                    options.forEach { (label, route, icon) ->
+                        NavigationDrawerItem(
+                            label = { Text(label) },
+                            selected = currentRoute == route,
+                            icon = { Icon(icon, contentDescription = null) },
+                            onClick = {
+                                scope.launch { drawerState.close() }
+                                if (currentRoute != route) {
+                                    navController.navigate(route) { launchSingleTop = true }
                                 }
-                            }
-                        },
-                        modifier = Modifier.height(NavItemHeight)
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("帮助&关于") },
-                        selected = currentRoute == "About",
-                        icon = { Icon(Icons.Filled.Info, contentDescription = null) },
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            if (currentRoute != "About") {
-                                navController.navigate("About") {
-                                    launchSingleTop = true
-                                }
-                            }
-                        },
-                        modifier = Modifier.height(NavItemHeight)
-                    )
+                            },
+                            modifier = Modifier.height(NavItemHeight)
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                 }
             }
         }
     ) {
-        Scaffold(
-            contentWindowInsets = WindowInsets(0, 0, 0, 0)
-        ) { innerPadding ->
+        Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0)) { innerPadding ->
             NavHost(
                 navController = navController,
                 startDestination = "Home",
                 modifier = Modifier.padding(innerPadding)
             ) {
-                composable("Home") {
-                    HomeScreen(onMenuClick = { scope.launch { drawerState.open() } })
-                }
+                composable("Home") { HomeScreen { scope.launch { drawerState.open() } } }
                 composable("Settings") {
                     SettingsScreen(
                         dynamicColor = dynamicColor,
                         onDynamicColorChange = onDynamicColorChange,
+                        dynamicColorSeed = dynamicColorSeed,
+                        onDynamicColorSeedChange = onDynamicColorSeedChange,
                         darkTheme = darkThemeSetting,
                         onDarkThemeChange = onDarkThemeSettingChange,
                         hiddenApiBypass = hiddenApiBypass,
                         onHiddenApiBypassChange = onHiddenApiBypassChange,
-                        onMenuClick = { scope.launch { drawerState.open() } },
-                        dynamicColorSeed = dynamicColorSeed,
-                        onDynamicColorSeedChange = onDynamicColorSeedChange
+                        onMenuClick = { scope.launch { drawerState.open() } }
                     )
                 }
-                composable("Pojie") {
-                    PojieScreen(onMenuClick = { scope.launch { drawerState.open() } })
-                }
-                composable("Viewer") {
-                    ManageScreen(onMenuClick = { scope.launch { drawerState.open() } })
-                }
-                composable("Test") {
-                    TestScreen(onMenuClick = { scope.launch { drawerState.open() } })
-                }
-                composable("About") {
-                    AboutScreen(onMenuClick = { scope.launch { drawerState.open() } })
-                }
+                composable("Pojie") { PojieScreen { scope.launch { drawerState.open() } } }
+                composable("Viewer") { ManageScreen { scope.launch { drawerState.open() } } }
+                composable("Test") { TestScreen { scope.launch { drawerState.open() } } }
+                composable("About") { AboutScreen { scope.launch { drawerState.open() } } }
             }
         }
     }

@@ -133,11 +133,14 @@ fun AppTheme(
         isDark = darkTheme,
         style = PaletteStyle.TonalSpot,
         seedColor = seedColor,
-//        modifyColorScheme = { generatedScheme ->
+        modifyColorScheme = { generatedScheme ->
 //            if (!useSystemColor && false) {
 //                if (isDark) darkScheme else lightScheme
 //            } else generatedScheme
-//        }
+            if (dynamicColorSeed == defaultColorSeed && !useSystemColor)
+                generatedScheme.copy(primary = dynamicColorSeed)
+            else generatedScheme
+        }
     )
 
     DynamicMaterialTheme(
