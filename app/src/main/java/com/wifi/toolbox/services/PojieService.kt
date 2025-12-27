@@ -49,8 +49,10 @@ class PojieService : Service() {
                                     }
 
                                     WifiLogData.EVENT_CONNECT_FAILED -> {
-                                        continuation.resume(SinglePojieTask.RESULT_FAILED)
-                                        cancel()
+                                        if(System.currentTimeMillis()-data.eventStartTime>2000){
+                                            continuation.resume(SinglePojieTask.RESULT_FAILED)
+                                            cancel()
+                                        }
                                     }
 
                                     WifiLogData.EVENT_HANDSHAKE -> {
@@ -165,6 +167,7 @@ wifi密码暴力破解工具 v3 for Android
 
                 if (tasks.isEmpty()) {
                     app.logState.addLog("[运行结束]")
+                    logcatService.close()
                     stopSelf()
                     break
                 }
@@ -190,11 +193,12 @@ wifi密码暴力破解工具 v3 for Android
                 var taskResult = -1
 
                 currentWorkerJob = launch {
-                    if (task.ssid != lastTrySsid) {
-                        lastTrySsid = task.ssid
-                        ShizukuUtil.disconnectWifi()
-                        delay(500)
-                    }
+//                    if (task.ssid != lastTrySsid) {
+//                        lastTrySsid = task.ssid
+//                        ShizukuUtil.disconnectWifi()
+//                        delay(500)
+//                    }
+                    ShizukuUtil.disconnectWifi()
                     taskResult = performTaskLogic(
                         app, SinglePojieTask(
                             ssid = task.ssid, password = currentPass
@@ -216,7 +220,7 @@ wifi密码暴力破解工具 v3 for Android
                     app.logState.addLog("连接成功: (${task.ssid}, $currentPass)")
                     ShizukuUtil.disconnectWifi()
                     app.stopTask(task.ssid)
-                    delay(2000)
+                    //delay(1000)
                 }
 
                 currentWorkingSsid = null

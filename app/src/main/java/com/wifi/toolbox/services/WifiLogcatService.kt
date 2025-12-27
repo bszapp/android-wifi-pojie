@@ -22,6 +22,27 @@ class WifiLogcatService : AutoCloseable {
         stopFunc = null
     }
 
+    private fun decodeHexSsid(hexSsid: String): String {
+        if (!hexSsid.contains("\\x")) return hexSsid
+        return try {
+            val bais = java.io.ByteArrayOutputStream()
+            var i = 0
+            while (i < hexSsid.length) {
+                if (hexSsid[i] == '\\' && i + 3 < hexSsid.length && hexSsid[i + 1] == 'x') {
+                    val hex = hexSsid.substring(i + 2, i + 4)
+                    bais.write(hex.toInt(16))
+                    i += 4
+                } else {
+                    bais.write(hexSsid[i].code)
+                    i++
+                }
+            }
+            bais.toString("UTF-8")
+        } catch (e: Exception) {
+            hexSsid
+        }
+    }
+
     init {
         stopFunc = ShizukuUtil.executeCommand(
             command = "sh -c \"logcat -c && logcat -s \\\"WifiService:D\\\" \\\"wpa_supplicant:D\\\" \\\"DhcpClient:D\\\"\"",
@@ -31,7 +52,7 @@ class WifiLogcatService : AutoCloseable {
                     line.contains("Trying to associate with SSID") -> {
                         val match = Regex("SSID '(.*?)'").find(line)
                         if (match != null) {
-                            currentSsid = match.groupValues[1]
+                            currentSsid = decodeHexSsid(match.groupValues[1])
                             connectStartTime = System.currentTimeMillis()
                             handshakeStartTime = 0L
                             handshakeCount = 0
