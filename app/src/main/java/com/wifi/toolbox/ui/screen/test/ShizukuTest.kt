@@ -218,6 +218,18 @@ fun ShizukuTest(logState: LogState, modifier: Modifier = Modifier) {
                             }
                         })
                     ActionChip(
+                        text = "断开wifi",
+                        icon = Icons.Filled.WifiOff,
+                        onClick = {
+                            try {
+                                ShizukuUtil.disconnectWifi()
+                                logState.addLog("请求已发送")
+                            } catch (e: Exception) {
+                                logState.addLog("E: 断开失败")
+                                logState.addLog(e.stackTraceToString())
+                            }
+                        })
+                    ActionChip(
                         text = "锁屏",
                         icon = Icons.Filled.Lock,
                         onClick = {

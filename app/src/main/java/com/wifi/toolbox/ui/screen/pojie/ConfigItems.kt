@@ -1,6 +1,7 @@
 package com.wifi.toolbox.ui.screen.pojie
 
 import androidx.compose.animation.*
+import androidx.compose.animation.expandVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
@@ -61,16 +62,16 @@ fun ConfigItems(
     ) {
         Text("最大尝试时间")
         Text(
-            text = "${config.maxTryTime.roundToInt()} ms",
+            text = "${config.maxTryTime} ms",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 8.dp)
         )
     }
     Slider(
-        value = config.maxTryTime,
-        onValueChange = { onConfigChange(config.copy(maxTryTime = it)) },
+        value = config.maxTryTime.toFloat(),
+        onValueChange = { onConfigChange(config.copy(maxTryTime = it.toInt())) },
         valueRange = 1000f..10000f,
-        steps = (10000f - 1000f).toInt() / 500 - 1
+        steps = (10000 - 1000) / 500 - 1
     )
 
     Row(
@@ -172,14 +173,14 @@ fun ConfigItems(
                     ) {
                         Text("超时时间")
                         Text(
-                            text = "${config.timeout.roundToInt()} ms",
+                            text = "${config.timeout} ms",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 8.dp)
                         )
                     }
                     Slider(
-                        value = config.timeout,
-                        onValueChange = { onConfigChange(config.copy(timeout = it)) },
+                        value = config.timeout.toFloat(),
+                        onValueChange = { onConfigChange(config.copy(timeout = it.toInt())) },
                         valueRange = 500f..5000f,
                         steps = (5000f - 500f).toInt() / 250 - 1
                     )
@@ -195,14 +196,14 @@ fun ConfigItems(
                     ) {
                         Text("最大握手次数")
                         Text(
-                            text = "${config.maxHandshakeCount.roundToInt()}",
+                            text = "${config.maxHandshakeCount}",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 8.dp)
                         )
                     }
                     Slider(
-                        value = config.maxHandshakeCount,
-                        onValueChange = { onConfigChange(config.copy(maxHandshakeCount = it)) },
+                        value = config.maxHandshakeCount.toFloat(),
+                        onValueChange = { onConfigChange(config.copy(maxHandshakeCount = it.toInt())) },
                         valueRange = 1f..5f,
                         steps = 3
                     )
@@ -288,19 +289,23 @@ fun ConfigItems(
     ) {
         Text("重试次数")
         Text(
-            text = retryCountLabels[config.retryCount.roundToInt()],
+            text = retryCountLabels[config.retryCount],
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 8.dp)
         )
     }
     Slider(
-        value = config.retryCount,
-        onValueChange = { onConfigChange(config.copy(retryCount = it)) },
+        value = config.retryCount.toFloat(),
+        onValueChange = { onConfigChange(config.copy(retryCount = it.toInt())) },
         valueRange = 0f..6f,
         steps = 5
     )
     Spacer(modifier = Modifier.height(8.dp))
-    AnimatedVisibility(visible = config.retryCount.roundToInt() != 0) {
+    AnimatedVisibility(
+        visible = config.retryCount != 0,
+        enter = expandVertically(),
+        exit = shrinkVertically()
+    ) {
         Column {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -309,14 +314,14 @@ fun ConfigItems(
             ) {
                 Text("等待时间翻倍基数")
                 Text(
-                    text = if (config.doublingBase.roundToInt() == 0) "不翻倍" else "${config.doublingBase.roundToInt() * 1000} ms",
+                    text = if (config.doublingBase == 0) "不翻倍" else "${config.doublingBase * 1000} ms",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 8.dp)
                 )
             }
             Slider(
-                value = config.doublingBase,
-                onValueChange = { onConfigChange(config.copy(doublingBase = it)) },
+                value = config.doublingBase.toFloat(),
+                onValueChange = { onConfigChange(config.copy(doublingBase = it.toInt())) },
                 valueRange = 0f..8f,
                 steps = 7
             )

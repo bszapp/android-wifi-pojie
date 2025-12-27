@@ -12,17 +12,17 @@
 
         <group android:alpha="0.77">
             <path
-                android:fillColor="@android:color/system_accent1_600"
+                android:fillColor="@android:color/system_accent1_500"
                 android:fillType="evenOdd"
                 android:pathData="M12,13.1667C7.722,13.1667 4.205,16.2419 3.7912,20.1801C3.7703,20.3791 3.8395,20.577 3.9816,20.7252C4.1238,20.8735 4.3257,20.9583 4.5375,20.9583H19.4628C19.6746,20.9583 19.8765,20.8735 20.0187,20.7252C20.1608,20.577 20.23,20.3791 20.2091,20.1801C19.7953,16.2419 16.2789,13.1667 12,13.1667Z M8.625,18.4792C8.2108,18.4792 7.875,18.162 7.875,17.7708C7.875,17.3796 8.2108,17.0625 8.625,17.0625C9.0392,17.0625 9.375,17.3796 9.375,17.7708C9.375,18.162 9.0392,18.4792 8.625,18.4792Z M15.375,18.4792C14.9608,18.4792 14.625,18.162 14.625,17.7708C14.625,17.3796 14.9608,17.0625 15.375,17.0625C15.7892,17.0625 16.125,17.3796 16.125,17.7708C16.125,18.162 15.7892,18.4792 15.375,18.4792Z" />
 
             <path
-                android:fillColor="@android:color/system_accent1_600"
+                android:fillColor="@android:color/system_accent1_500"
                 android:pathData="M6.3779,11.4892C6.7376,11.2951 7.1956,11.4131 7.4011,11.7528L8.9011,14.2319C9.1066,14.5716 8.9817,15.0042 8.6221,15.1983C8.2624,15.3924 7.8044,15.2744 7.5989,14.9347L6.0989,12.4556C5.8934,12.1159 6.0183,11.6833 6.3779,11.4892Z M16.2239,11.7528C16.4294,11.4131 16.8874,11.2951 17.2471,11.4892C17.6067,11.6833 17.7316,12.1159 17.5261,12.4556L16.0261,14.9347C15.8206,15.2744 15.3626,15.3924 15.0029,15.1983C14.6433,15.0042 14.5184,14.5716 14.7239,14.2319L16.2239,11.7528Z" />
         </group>
 
         <path
-            android:strokeColor="@android:color/system_accent1_400"
+            android:strokeColor="@android:color/system_accent1_300"
             android:strokeWidth="2"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
@@ -30,7 +30,7 @@
 
         <path
             android:alpha="0.63"
-            android:strokeColor="@android:color/system_accent1_500"
+            android:strokeColor="@android:color/system_accent1_400"
             android:strokeWidth="2"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
@@ -38,7 +38,7 @@
 
         <path
             android:alpha="0.42"
-            android:strokeColor="@android:color/system_accent1_600"
+            android:strokeColor="@android:color/system_accent1_500"
             android:strokeWidth="2"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"

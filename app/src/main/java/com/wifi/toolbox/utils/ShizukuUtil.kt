@@ -219,6 +219,32 @@ object ShizukuUtil {
         enableNetworkMethod.invoke(wifiService, netId, true, PACKAGE_NAME)
     }
 
+    /**
+     * 优雅地断开网络
+     * */
+    fun disconnectWifi() {
+        val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
+        val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
+
+        val wifiInfo = wifiService::class.java
+            .getMethod("getConnectionInfo", String::class.java, String::class.java)
+            .invoke(wifiService, PACKAGE_NAME, null) as? android.net.wifi.WifiInfo
+        val currentNetId = wifiInfo?.networkId ?: -1
+        if (currentNetId != -1) {
+            val allowAutojoinMethod = wifiService::class.java.getMethod(
+                "allowAutojoin",
+                Integer.TYPE,
+                java.lang.Boolean.TYPE
+            )
+            allowAutojoinMethod.invoke(wifiService, currentNetId, false)
+        }
+        val disconnectMethod = wifiService::class.java.getMethod(
+            "disconnect",
+            String::class.java
+        )
+        disconnectMethod.invoke(wifiService, PACKAGE_NAME)
+    }
+
     fun startWifiScan(allowUseCommand: Boolean = false): Boolean {
         val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
         val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
@@ -245,7 +271,8 @@ object ShizukuUtil {
             String::class.java,
             String::class.java
         )
-        val resultObject = getScanResultsMethod.invoke(wifiService, PACKAGE_NAME, null) ?: return results
+        val resultObject =
+            getScanResultsMethod.invoke(wifiService, PACKAGE_NAME, null) ?: return results
 
         @Suppress("UNCHECKED_CAST")
         val scanResultsList = if (resultObject is List<*>) {
@@ -458,11 +485,21 @@ object ShizukuUtil {
                 }
 
                 if (!isCancelled.get()) {
-                    onCommandFinished?.accept(CommandRunner.CommandResult(allOutput.toString(), exitCode))
+                    onCommandFinished?.accept(
+                        CommandRunner.CommandResult(
+                            allOutput.toString(),
+                            exitCode
+                        )
+                    )
                 }
             } catch (e: Exception) {
                 if (!isCancelled.get()) {
-                    onCommandFinished?.accept(CommandRunner.CommandResult(e.stackTraceToString(), exitCode))
+                    onCommandFinished?.accept(
+                        CommandRunner.CommandResult(
+                            e.stackTraceToString(),
+                            exitCode
+                        )
+                    )
                 }
             } finally {
                 isRunning.set(false)
