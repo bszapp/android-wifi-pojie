@@ -137,7 +137,7 @@ fun AppTheme(
 //            if (!useSystemColor && false) {
 //                if (isDark) darkScheme else lightScheme
 //            } else generatedScheme
-            if (dynamicColorSeed == defaultColorSeed && !useSystemColor)
+            if (dynamicColorSeed == defaultColorSeed && !useSystemColor && !darkTheme)
                 generatedScheme.copy(primary = dynamicColorSeed)
             else generatedScheme
         }

@@ -30,6 +30,7 @@ import com.google.android.gms.location.*
 import com.google.android.gms.tasks.Task
 import com.wifi.toolbox.structs.WifiInfo
 import com.wifi.toolbox.ui.items.*
+import com.wifi.toolbox.utils.LogState
 import kotlinx.coroutines.*
 
 

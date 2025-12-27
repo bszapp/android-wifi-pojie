@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.wifi.toolbox.structs.PojieConfig
 import com.wifi.toolbox.structs.PojieRunInfo
-import com.wifi.toolbox.ui.items.LogState
+import com.wifi.toolbox.utils.LogState
 import com.wifi.toolbox.utils.ShizukuUtil.REQUEST_PERMISSION_CODE
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -134,11 +134,6 @@ class MyApplication : Application() {
      */
     fun stopTask(ssid: String) {
         runningPojieTasks.removeIf { it.ssid == ssid }
-        if (runningPojieTasks.isEmpty()) {
-            // Stop service if no tasks are running
-            val serviceIntent = Intent(this, PojieService::class.java)
-            stopService(serviceIntent)
-        }
     }
 
     /**

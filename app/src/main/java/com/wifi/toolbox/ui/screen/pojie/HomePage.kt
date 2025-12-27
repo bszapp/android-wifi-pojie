@@ -36,13 +36,6 @@ fun HomePage(
 
     val logState = app.logState
 
-    LaunchedEffect(Unit) {
-        val currentTime =
-            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-        logState.addLog("HomePage resumed at: $currentTime")
-    }
-
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -93,7 +86,7 @@ fun HomePage(
             LogView(
                 logState = logState,
                 modifier = Modifier
-                    .fillMaxHeight(0.4f)
+                    .fillMaxHeight(0.5f)
                     .padding(8.dp)
             )
         }

@@ -356,6 +356,7 @@ fun PojieScreen(onMenuClick: () -> Unit) {
                                     PojieRunInfo(
                                         ssid = ssid,
                                         tryList = listOf("12345678", "11111111", "12121212", "abcd1234", "11223344", "a1234567"),
+                                        lastTryTime = System.currentTimeMillis()
                                     )
                                 )
                             },

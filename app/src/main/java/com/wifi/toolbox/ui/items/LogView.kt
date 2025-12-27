@@ -45,33 +45,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.wifi.toolbox.R
+import com.wifi.toolbox.utils.LogState
 import kotlinx.coroutines.launch
-
-
-class LogState {
-    val logs = androidx.compose.runtime.mutableStateListOf<String>()
-    var wordWrap by mutableStateOf(false)
-    var autoScroll by mutableStateOf(true)
-
-    fun addLog(log: String) {
-        logs.add(log)
-    }
-
-    fun clear() {
-        logs.clear()
-    }
-
-    fun setLine(log: String) {
-        if (logs.isNotEmpty()) {
-            logs[logs.size - 1] = log
-        } else {
-            addLog(log)
-        }
-    }
-}
 
 @Composable
 fun rememberLogState(): LogState = remember { LogState() }
@@ -98,10 +82,21 @@ fun LogView(
     ) {
         SelectionContainer {
             val allLogs = logState.logs.joinToString("\n")
+
             Text(
                 text = allLogs,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily(
+                    Font(resId = R.font.mono, weight = FontWeight.Normal)
+                ),
+                fontSize = 14.sp,
                 softWrap = logState.wordWrap,
+                style = TextStyle(
+                    lineHeight = 19.sp,
+                    lineHeightStyle = LineHeightStyle(
+                        alignment = LineHeightStyle.Alignment.Center,
+                        trim = LineHeightStyle.Trim.Both
+                    )
+                ),
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(8.dp)

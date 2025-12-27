@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.utils.ShizukuUtil
 import com.wifi.toolbox.ui.items.*
+import com.wifi.toolbox.utils.LogState
 import com.wifi.toolbox.utils.ShizukuUtil.REQUEST_PERMISSION_CODE
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

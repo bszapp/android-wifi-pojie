@@ -45,7 +45,7 @@ object ShizukuUtil {
         }
     }
 
-    const val PACKAGE_NAME = "com.android.settings"
+    const val PACKAGE_NAME = "com.android.shell"
 
     private fun asInterface(className: String, original: IBinder): Any {
         return Class.forName("$className\$Stub").run {
@@ -245,13 +245,15 @@ object ShizukuUtil {
             String::class.java,
             String::class.java
         )
-        val parceledListSlice = getScanResultsMethod.invoke(wifiService, PACKAGE_NAME, null)
-
-        val actualParceledListSliceClass = parceledListSlice.javaClass
-        val getListMethod = actualParceledListSliceClass.getMethod("getList")
+        val resultObject = getScanResultsMethod.invoke(wifiService, PACKAGE_NAME, null) ?: return results
 
         @Suppress("UNCHECKED_CAST")
-        val scanResultsList = getListMethod.invoke(parceledListSlice) as List<Any>
+        val scanResultsList = if (resultObject is List<*>) {
+            resultObject as List<Any>
+        } else {
+            val getListMethod = resultObject.javaClass.getMethod("getList")
+            getListMethod.invoke(resultObject) as List<Any>
+        }
 
         if (scanResultsList.isEmpty()) {
             return results

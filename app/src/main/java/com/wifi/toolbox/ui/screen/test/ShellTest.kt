@@ -26,7 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.ui.items.ActionChip
-import com.wifi.toolbox.ui.items.LogState
+import com.wifi.toolbox.utils.LogState
 import com.wifi.toolbox.ui.items.SectionDivider
 import com.wifi.toolbox.ui.items.SectionTitle
 import com.wifi.toolbox.utils.ShizukuUtil
