@@ -1,8 +1,6 @@
 # wifi密码工具
 一款通过暴力破解密码本的方式连接wifi的工具
 
-~~视频演示地址： [自制安卓免Root wifi密码暴力破解工具v2.1](https://www.bilibili.com/video/BV1EbxjzZExd/)~~（稿件被锁定且被封号）
-
 视频演示地址： [MEGA云盘](https://mega.nz/embed/ShY1GKCB#i5Weok9p_Svrm2wTX92CiOF1O8V4y67e_6gCHtF6vFc)
 
 
@@ -17,6 +15,8 @@
 项目近期在使用 kotlin + compose material3 重构，由于作者繁忙，目前不会处理任何反馈，但会参考来完成新版本，近期不会更新（2025/12/7）
 
 寒假出新版，完全重构整个项目（旧版本用ai写成屎山了），增加若干新功能，最大的更新是新版本支持同时尝试多个，界面大更新，最快速度是上一版本最快速度的两倍（最快一秒尝试三个）（2025/12/28）
+
+https://github.com/bszapp/android-wifi-pojie/tree/v3.x
 
 <img src="https://github.com/user-attachments/assets/8791782d-b26c-4cc0-8e48-8d8154a6129b" style="width: 49%; display: inline-block; margin: 0 0.5%;">
 
