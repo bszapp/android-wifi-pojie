@@ -89,7 +89,7 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(sharedPreferences.getBoolean("dynamic_color", true))
             }
             var dynamicColorSeed by remember {
-                mutableStateOf(sharedPreferences.getInt("dynamic_color_seed", defaultColorSeed.toArgb()))
+                mutableIntStateOf(sharedPreferences.getInt("dynamic_color_seed", defaultColorSeed.toArgb()))
             }
             var darkThemeSetting by remember {
                 mutableIntStateOf(sharedPreferences.getInt("dark_theme", 0))
@@ -198,6 +198,8 @@ fun DetailedDrawerExample(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
+    val view = androidx.compose.ui.platform.LocalView.current
+
     LaunchedEffect(pendingNavigation.value) {
         pendingNavigation.value?.let { route ->
             navController.navigate(route) {
@@ -236,6 +238,7 @@ fun DetailedDrawerExample(
                         selected = currentRoute == "Home",
                         icon = { Icon(Icons.Outlined.Home, contentDescription = null) },
                         onClick = {
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
                             scope.launch { drawerState.close() }
                             if (currentRoute != "Home") {
                                 navController.navigate("Home") {
@@ -264,6 +267,7 @@ fun DetailedDrawerExample(
                             icon = { Icon(icon, contentDescription = null) },
                             onClick = {
                                 scope.launch { drawerState.close() }
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
                                 if (currentRoute != route) {
                                     navController.navigate(route) { launchSingleTop = true }
                                 }
@@ -288,6 +292,7 @@ fun DetailedDrawerExample(
                             icon = { Icon(icon, contentDescription = null) },
                             onClick = {
                                 scope.launch { drawerState.close() }
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
                                 if (currentRoute != route) {
                                     navController.navigate(route) { launchSingleTop = true }
                                 }
