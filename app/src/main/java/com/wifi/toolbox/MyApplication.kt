@@ -22,6 +22,7 @@ import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuProvider
 import android.content.Intent
 import com.wifi.toolbox.services.PojieService
+import kotlin.text.clear
 
 
 class MyApplication : Application() {
@@ -129,24 +130,11 @@ class MyApplication : Application() {
         }
     }
 
-    /**
-     * 停止并移除任务
-     */
     fun stopTask(ssid: String) {
         runningPojieTasks.removeIf { it.ssid == ssid }
     }
 
-    /**
-     * 更新现有任务的状态（可选，比如更新 tryIndex）
-     */
-    fun updateTaskProgress(ssid: String, newIndex: Int) {
-        val index = runningPojieTasks.indexOfFirst { it.ssid == ssid }
-        if (index != -1) {
-            val current = runningPojieTasks[index]
-            runningPojieTasks[index] = current.copy(
-                tryIndex = newIndex,
-                lastTryTime = System.currentTimeMillis()
-            )
-        }
+    fun stopAllTasks() {
+        runningPojieTasks.clear()
     }
 }

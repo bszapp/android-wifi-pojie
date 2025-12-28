@@ -48,3 +48,4 @@ data class PojieSettings(
         const val COMMAND_METHOD_DEFAULT = 0
     }
 }
+

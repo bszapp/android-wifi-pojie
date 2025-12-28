@@ -1,12 +1,15 @@
 package com.wifi.toolbox.services
 
 import android.util.Log
+import com.wifi.toolbox.structs.PojieSettings
 import com.wifi.toolbox.structs.WifiLogData
+import com.wifi.toolbox.utils.CommandRunner
 import com.wifi.toolbox.utils.ShizukuUtil
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import java.util.function.Consumer
 
-class WifiLogcatService : AutoCloseable {
+class WifiLogcatService(private val pojieSettings: PojieSettings) : AutoCloseable {
     var stopFunc: Runnable? = null
 
     private val _logFlow = MutableSharedFlow<WifiLogData>(extraBufferCapacity = 64)
@@ -38,13 +41,27 @@ class WifiLogcatService : AutoCloseable {
                 }
             }
             bais.toString("UTF-8")
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             hexSsid
         }
     }
 
+    fun executeCommand(
+        command: String,
+        onOutputReceived: Consumer<String>?,
+        onCommandFinished: Consumer<CommandRunner.CommandResult>?
+    ): Runnable {
+        var stopFunc = Runnable {}
+        when (pojieSettings.commandMethod) {
+            0 -> throw Exception("命令行实现方式为空，请先去设置中选择")
+            1 -> stopFunc = ShizukuUtil.executeCommand(command, onOutputReceived, onCommandFinished)
+            2 -> throw Exception("前面的区域，以后再来探索吧(commandMethod=2)")
+        }
+        return stopFunc
+    }
+
     init {
-        stopFunc = ShizukuUtil.executeCommand(
+        stopFunc = executeCommand(
             command = "sh -c \"logcat -c && logcat -s \\\"WifiService:D\\\" \\\"wpa_supplicant:D\\\" \\\"DhcpClient:D\\\"\"",
             onOutputReceived = { line ->
                 Log.d("WifiLogcatService", line)

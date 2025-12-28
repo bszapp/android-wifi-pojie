@@ -29,14 +29,18 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
         debug {
-            //isMinifyEnabled = true
+//            isMinifyEnabled = true
+//            proguardFiles(
+//                getDefaultProguardFile("proguard-android-optimize.txt"),
+//                "proguard-rules.pro"
+//            )
         }
     }
     compileOptions {
@@ -90,12 +94,12 @@ dependencies {
 
     implementation(libs.materialKolor)
 
-    implementation("top.yukonga.miuix.kmp:miuix:0.7.2")
-    implementation("io.coil-kt.coil3:coil-compose:3.3.0")
+    implementation(libs.miuix)
+    implementation(libs.coil.compose)
 
     implementation(libs.hiddenapibypass)
 
-    implementation("com.google.android.gms:play-services-location:21.0.1") //注:依赖play服务，打开系统定位（也许有点臃肿，算了不管了）
+    implementation(libs.play.services.location) //注:依赖play服务，打开系统定位（也许有点臃肿，算了不管了）
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
