@@ -17,6 +17,7 @@ navigationCompose = "2.9.6"
 preference = "2.1.0"
 runtimeAnnotation = "1.10.0"
 shizukuVersion = "13.1.5"
+foundationLayout = "1.10.0"
 
 [libraries]
 androidx-compose-bom-v20251200 = { module = "androidx.compose:compose-bom", version.ref = "composeBomVersion" }
@@ -44,6 +45,7 @@ preference = { module = "me.zhanghai.compose.preference:preference", version.ref
 androidx-compose-runtime-annotation = { group = "androidx.compose.runtime", name = "runtime-annotation", version.ref = "runtimeAnnotation" }
 provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizukuVersion" }
 materialKolor = "com.materialkolor:material-kolor:4.0.5"
+androidx-compose-foundation-layout = { group = "androidx.compose.foundation", name = "foundation-layout", version.ref = "foundationLayout" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

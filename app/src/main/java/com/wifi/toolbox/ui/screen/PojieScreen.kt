@@ -5,6 +5,7 @@ import android.net.wifi.WifiManager
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -13,6 +14,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -28,6 +30,7 @@ import com.wifi.toolbox.structs.PojieRunInfo
 import com.wifi.toolbox.structs.PojieSettings
 import com.wifi.toolbox.ui.items.*
 import com.wifi.toolbox.utils.ShizukuUtil
+import kotlinx.coroutines.launch
 
 sealed class PojieScreenPages(
     val route: String,
@@ -70,7 +73,10 @@ fun PojieScreen(onMenuClick: () -> Unit) {
     val context = LocalContext.current
     val sharedPreferences = context.getSharedPreferences("settings_pojie", Context.MODE_PRIVATE)
 
-    // Settings states
+    var showPasswordSheet by remember { mutableStateOf(false) }
+    var passwordInputText by remember { mutableStateOf("") }
+    var currentTargetSsid by remember { mutableStateOf("") }
+    val sheetState = rememberModalBottomSheetState()
     var pojieSettings by remember {
         mutableStateOf(
             PojieSettings(
@@ -351,14 +357,10 @@ fun PojieScreen(onMenuClick: () -> Unit) {
                                 }
                             },
                             runningTasks = app.runningPojieTasks,
+
                             onStartClick = { ssid ->
-                                app.startTask(
-                                    PojieRunInfo(
-                                        ssid = ssid,
-                                        tryList = listOf("12345678","88888888","11111111","00000000","66666666","12312312","65432109","11223344","87654321","20242024","password","86868686","52013141","13572468","12348888","qwertyui","66688822","99999999","77777777","10203040","00000000"),
-                                        lastTryTime = System.currentTimeMillis()
-                                    )
-                                )
+                                currentTargetSsid = ssid
+                                showPasswordSheet = true
                             },
 
                             onStopClick = { ssid ->
@@ -382,6 +384,104 @@ fun PojieScreen(onMenuClick: () -> Unit) {
             }
             composable(PojieScreenPages.Help.route) {
                 HelpPage()
+            }
+        }
+        if (showPasswordSheet) {
+            val scope = rememberCoroutineScope()
+            ModalBottomSheet(
+                onDismissRequest = { showPasswordSheet = false },
+                sheetState = sheetState,
+            ) {
+                var isError by remember { mutableStateOf(false) }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .navigationBarsPadding()
+                ) {
+                    Text(
+                        text = "输入密码本 - $currentTargetSsid",
+                        style = MaterialTheme.typography.headlineMedium
+                    )
+
+                    OutlinedTextField(
+                        value = passwordInputText,
+                        onValueChange = {
+                            passwordInputText = it
+                            isError = false
+                        },
+                        isError = isError,
+
+                        supportingText = {
+                            if (isError) {
+                                Text(
+                                    text = "请输入至少一个密码",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        },
+                        label = { Text("密码本") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .padding(vertical = 16.dp)
+                            .heightIn(min = 200.dp),
+                        placeholder = { Text("一行一个密码...") }
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                scope.launch {
+                                    sheetState.hide()
+                                }.invokeOnCompletion {
+                                    if (!sheetState.isVisible) {
+                                        showPasswordSheet = false
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("取消")
+                        }
+
+                        Button(
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                val passwordList = passwordInputText.lines()
+                                    .map { it.trim() }
+                                    .filter { it.isNotEmpty() }
+
+                                if (passwordList.isNotEmpty()) {
+                                    app.startTask(
+                                        PojieRunInfo(
+                                            ssid = currentTargetSsid,
+                                            tryList = passwordList,
+                                            lastTryTime = System.currentTimeMillis()
+                                        )
+                                    )
+                                    scope.launch {
+                                        sheetState.hide()
+                                    }.invokeOnCompletion {
+                                        if (!sheetState.isVisible) {
+                                            showPasswordSheet = false
+                                            passwordInputText = ""
+                                        }
+                                    }
+                                } else {
+                                    isError = true
+                                }
+                            }
+                        ) {
+                            Text("开始")
+                        }
+                    }
+                }
             }
         }
     }

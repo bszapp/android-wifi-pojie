@@ -100,6 +100,11 @@ class PojieService : Service() {
         return null
     }
 
+    private fun getLogTime(): String {
+        val df = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+        return "[${df.format(java.util.Date())}]"
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannel()
         val notificationIntent = Intent(this, MainActivity::class.java).apply {
@@ -193,12 +198,6 @@ wifi密码暴力破解工具 v3 for Android
                 var taskResult = -1
 
                 currentWorkerJob = launch {
-//                    if (task.ssid != lastTrySsid) {
-//                        lastTrySsid = task.ssid
-//                        ShizukuUtil.disconnectWifi()
-//                        delay(500)
-//                    }
-                    ShizukuUtil.disconnectWifi()
                     taskResult = performTaskLogic(
                         app, SinglePojieTask(
                             ssid = task.ssid, password = currentPass
@@ -206,21 +205,22 @@ wifi密码暴力破解工具 v3 for Android
                     )
                 }
 
-                app.logState.addLog("尝试: (${task.ssid}, $currentPass) ...")
+                var timeTag = getLogTime()
+                app.logState.addLog("$timeTag 尝试: (${task.ssid}, $currentPass) ...")
 
                 currentWorkerJob?.join()
-
+                timeTag = getLogTime()
                 if (currentWorkerJob?.isCancelled == true) {
-                    app.logState.setLine("尝试: (${task.ssid}, $currentPass) 结果: 任务中断")
+                    app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: 任务中断")
+                    ShizukuUtil.disconnectWifi()
                 } else {
-                    app.logState.setLine("尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
+                    app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
                     processTaskCompletion(app, task.ssid)
+                    ShizukuUtil.disconnectWifi()//干完事情恢复原样可是好习惯
                 }
                 if (taskResult == 0) {
                     app.logState.addLog("连接成功: (${task.ssid}, $currentPass)")
-                    ShizukuUtil.disconnectWifi()
                     app.stopTask(task.ssid)
-                    //delay(1000)
                 }
 
                 currentWorkingSsid = null
