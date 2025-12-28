@@ -22,7 +22,7 @@ android {
         //noinspection ExpiredTargetSdkVersion 注:WifiManager需要
         targetSdk = 28
         versionCode = 1
-        versionName = "1.0"
+        versionName = "3.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
