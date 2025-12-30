@@ -238,7 +238,7 @@ fun DetailedDrawerExample(
                         selected = currentRoute == "Home",
                         icon = { Icon(Icons.Outlined.Home, contentDescription = null) },
                         onClick = {
-                            view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                             scope.launch { drawerState.close() }
                             if (currentRoute != "Home") {
                                 navController.navigate("Home") {
@@ -267,7 +267,7 @@ fun DetailedDrawerExample(
                             icon = { Icon(icon, contentDescription = null) },
                             onClick = {
                                 scope.launch { drawerState.close() }
-                                view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                                 if (currentRoute != route) {
                                     navController.navigate(route) { launchSingleTop = true }
                                 }
@@ -292,7 +292,7 @@ fun DetailedDrawerExample(
                             icon = { Icon(icon, contentDescription = null) },
                             onClick = {
                                 scope.launch { drawerState.close() }
-                                view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                                 if (currentRoute != route) {
                                     navController.navigate(route) { launchSingleTop = true }
                                 }

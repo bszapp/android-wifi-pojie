@@ -3,9 +3,12 @@ package com.wifi.toolbox.ui.screen
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material.icons.Icons
@@ -19,6 +22,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.ui.screen.pojie.*
@@ -29,6 +34,7 @@ import com.wifi.toolbox.structs.PojieSettings
 import com.wifi.toolbox.ui.items.*
 import com.wifi.toolbox.utils.ShizukuUtil
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.detectTapGestures
 
 sealed class PojieScreenPages(
     val name: String,
@@ -65,6 +71,8 @@ fun PojieScreen(onMenuClick: () -> Unit) {
     val view = androidx.compose.ui.platform.LocalView.current
     val context = LocalContext.current
     val sharedPreferences = context.getSharedPreferences("settings_pojie", Context.MODE_PRIVATE)
+
+    var navBarWidth by remember { mutableFloatStateOf(0f) }
 
     var showPasswordSheet by remember { mutableStateOf(false) }
     var passwordInputText by remember { mutableStateOf("") }
@@ -104,6 +112,13 @@ fun PojieScreen(onMenuClick: () -> Unit) {
         }
     }
 
+    val homeIndex = items.indexOf(PojieScreenPages.Home)
+
+    BackHandler(enabled = currentSelectedIndex != homeIndex) {
+        previousSelectedIndex = currentSelectedIndex
+        currentSelectedIndex = homeIndex
+    }
+
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
@@ -134,7 +149,50 @@ fun PojieScreen(onMenuClick: () -> Unit) {
             )
         },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                modifier = Modifier
+                    .onGloballyPositioned { navBarWidth = it.size.width.toFloat() }
+                    .pointerInput(items.size) {
+                        // 处理按下和滑动
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                val index = (offset.x / (navBarWidth / items.size))
+                                    .toInt()
+                                    .coerceIn(0, items.size - 1)
+                                if (currentSelectedIndex != index) {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                                    previousSelectedIndex = currentSelectedIndex
+                                    currentSelectedIndex = index
+                                }
+                            },
+                            onDrag = { change, _ ->
+                                val index = (change.position.x / (navBarWidth / items.size))
+                                    .toInt()
+                                    .coerceIn(0, items.size - 1)
+                                if (currentSelectedIndex != index) {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                                    previousSelectedIndex = currentSelectedIndex
+                                    currentSelectedIndex = index
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(items.size) {
+                        // 处理单纯的快速点击
+                        detectTapGestures(
+                            onPress = { offset ->
+                                val index = (offset.x / (navBarWidth / items.size))
+                                    .toInt()
+                                    .coerceIn(0, items.size - 1)
+                                if (currentSelectedIndex != index) {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                                    previousSelectedIndex = currentSelectedIndex
+                                    currentSelectedIndex = index
+                                }
+                            }
+                        )
+                    }
+            ) {
                 items.forEachIndexed { index, screen ->
                     val selected = currentSelectedIndex == index
                     NavigationBarItem(
@@ -143,11 +201,9 @@ fun PojieScreen(onMenuClick: () -> Unit) {
                         selected = selected,
                         alwaysShowLabel = false,
                         onClick = {
-                            view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-                            if (currentSelectedIndex != index) {
-                                previousSelectedIndex = currentSelectedIndex
-                                currentSelectedIndex = index
-                            }
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                            previousSelectedIndex = currentSelectedIndex
+                            currentSelectedIndex = index
                         }
                     )
                 }

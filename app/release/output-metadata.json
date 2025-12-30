@@ -12,8 +12,8 @@
       "filters": [],
       "attributes": [],
       "versionCode": 1,
-      "versionName": "1.0",
-      "outputFile": "com.wifi.toolbox-v1.0.apk"
+      "versionName": "3.0.0",
+      "outputFile": "com.wifi.toolbox-v3.0.0.apk"
     }
   ],
   "elementType": "File",
@@ -22,14 +22,14 @@
       "minApi": 28,
       "maxApi": 30,
       "baselineProfiles": [
-        "baselineProfiles/1/com.wifi.toolbox-v1.0.dm"
+        "baselineProfiles/1/com.wifi.toolbox-v3.0.0.dm"
       ]
     },
     {
       "minApi": 31,
       "maxApi": 2147483647,
       "baselineProfiles": [
-        "baselineProfiles/0/com.wifi.toolbox-v1.0.dm"
+        "baselineProfiles/0/com.wifi.toolbox-v3.0.0.dm"
       ]
     }
   ],
