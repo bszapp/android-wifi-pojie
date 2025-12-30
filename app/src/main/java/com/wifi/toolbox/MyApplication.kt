@@ -130,11 +130,8 @@ class MyApplication : Application() {
         }
     }
 
-    fun stopTask(ssid: String) {
+    fun stopTaskByName(ssid: String) {
         runningPojieTasks.removeIf { it.ssid == ssid }
     }
 
-    fun stopAllTasks() {
-        runningPojieTasks.clear()
-    }
 }

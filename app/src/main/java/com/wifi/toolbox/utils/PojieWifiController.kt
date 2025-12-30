@@ -1,0 +1,111 @@
+package com.wifi.toolbox.utils
+
+import android.content.Context
+import android.net.wifi.WifiManager
+import androidx.compose.runtime.*
+import com.wifi.toolbox.MyApplication
+import com.wifi.toolbox.structs.PojieRunInfo
+import com.wifi.toolbox.structs.PojieSettings
+import com.wifi.toolbox.ui.items.ScanResult
+import com.wifi.toolbox.ui.items.ScreenState
+import com.wifi.toolbox.ui.items.StartScanResult
+import com.wifi.toolbox.ui.items.checkShizukuUI
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+interface PojieWifiController {
+    val uiState: ScreenState
+    val isScanning: Boolean
+    val trigger: Int
+    val runningTasks: List<PojieRunInfo>
+    fun reload()
+    fun fetchResults(): ScanResult
+    fun toggleWifiOn()
+}
+
+@Composable
+fun rememberPojieWifiController(
+    context: Context,
+    app: MyApplication,
+    settings: PojieSettings
+): PojieWifiController {
+    val scope = rememberCoroutineScope()
+    var uiState by remember { mutableStateOf<ScreenState>(ScreenState.Idle) }
+    var refreshJob by remember { mutableStateOf<Job?>(null) }
+    var trigger by remember { mutableIntStateOf(0) }
+    var showScanResult by remember { mutableStateOf(true) }
+
+    val currentRunningTasks = app.runningPojieTasks
+
+    return remember(settings, uiState, refreshJob, trigger, showScanResult, currentRunningTasks.size) {
+        object : PojieWifiController {
+            override val uiState = uiState
+            override val isScanning = refreshJob?.isActive == true
+            override val trigger = trigger
+            override val runningTasks = currentRunningTasks
+
+            override fun reload() {
+                refreshJob?.cancel()
+                refreshJob = scope.launch {
+                    val start = scanInternal()
+                    when (start.code) {
+                        StartScanResult.CODE_SUCCESS -> {
+                            uiState = ScreenState.Success
+                            showScanResult = false
+                            delay(500)
+                            trigger++
+                            showScanResult = true
+                            delay(2500)
+                            trigger++
+                            refreshJob = null
+                        }
+                        StartScanResult.CODE_SCAN_FAIL -> uiState = ScreenState.Error(
+                            start.errorMessage ?: "扫描失败",
+                            ScreenState.ERROR_SCAN_FAIL
+                        )
+                        StartScanResult.CODE_WIFI_NOT_ENABLED -> uiState = ScreenState.Error(
+                            "wifi未开启",
+                            ScreenState.ERROR_WIFI_NOT_ENABLED
+                        )
+                        else -> uiState = ScreenState.Error(
+                            "未知错误(${start.errorMessage})",
+                            ScreenState.ERROR_UNKNOWN
+                        )
+                    }
+                }
+            }
+
+            private fun scanInternal(): StartScanResult {
+                val wm = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                if (settings.scanMode == 0) return StartScanResult(StartScanResult.CODE_SCAN_FAIL, "扫描实现为空")
+                if (wm == null) return StartScanResult(StartScanResult.CODE_UNKNOWN)
+                if (!wm.isWifiEnabled) return StartScanResult(StartScanResult.CODE_WIFI_NOT_ENABLED)
+                return try {
+                    if (checkShizukuUI(app)) {
+                        if (ShizukuUtil.startWifiScan(settings.allowScanUseCommand)) StartScanResult(StartScanResult.CODE_SUCCESS)
+                        else StartScanResult(StartScanResult.CODE_SCAN_FAIL, "频率过快")
+                    } else StartScanResult(StartScanResult.CODE_SCAN_FAIL, "未授权")
+                } catch (e: Exception) { StartScanResult(StartScanResult.CODE_UNKNOWN, e.message) }
+            }
+
+            override fun fetchResults(): ScanResult {
+                if (!showScanResult) return ScanResult()
+                return try {
+                    val result = ShizukuUtil.getWifiScanResults()
+                    ScanResult(
+                        ScanResult.CODE_SUCCESS,
+                        null,
+                        result.filter { it.ssid.isNotEmpty() }.distinctBy { it.ssid }
+                    )
+                } catch (e: Exception) { ScanResult(errorMessage = e.message) }
+            }
+
+            override fun toggleWifiOn() {
+                if (settings.enableMode == 1) checkShizukuUI(app) { ShizukuUtil.setWifiEnabled(true) }
+                else app.alert("缺失参数", "实现为空")
+                reload()
+            }
+        }
+    }
+}

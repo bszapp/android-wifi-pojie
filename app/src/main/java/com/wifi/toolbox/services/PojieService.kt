@@ -87,7 +87,7 @@ class PojieService : Service() {
 
     fun stopAllTasks() {
         val app = applicationContext as MyApplication
-        app.stopAllTasks()
+        app.runningPojieTasks.clear()
         currentWorkerJob?.cancel()
     }
 
@@ -319,11 +319,11 @@ wifi密码暴力破解工具 v3 for Android
                 when (taskResult) {
                     SinglePojieTask.RESULT_SUCCESS -> {
                         log("连接成功: (${task.ssid}, $currentPass)")
-                        app.stopTask(task.ssid)
+                        app.stopTaskByName(task.ssid)
                     }
 
                     SinglePojieTask.RESULT_ERROR -> {
-                        app.stopTask(task.ssid)
+                        app.stopTaskByName(task.ssid)
                     }
                 }
 
@@ -338,7 +338,7 @@ wifi密码暴力破解工具 v3 for Android
         val nextIndex = currentTask.tryIndex + 1
 
         if (nextIndex >= currentTask.tryList.size) {
-            app.stopTask(ssid)
+            app.stopTaskByName(ssid)
         } else {
             updateTaskState(app, ssid) {
                 it.copy(
