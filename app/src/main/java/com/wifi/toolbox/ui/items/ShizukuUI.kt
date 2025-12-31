@@ -8,7 +8,7 @@ fun checkShizukuUI(app: MyApplication, onSuccess: () -> Unit = {}) : Boolean {
     try {
         if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
             onSuccess()
-            return true;
+            return true
         } else if (Shizuku.shouldShowRequestPermissionRationale()) {
             app.alert("Shizuku", "当前已被始终拒绝，请手动授予")
         } else {

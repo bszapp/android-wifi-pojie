@@ -15,54 +15,13 @@ import kotlin.coroutines.resume
 
 class PojieService : Service() {
 
-    private val NOTIFICATION_CHANNEL_ID = "PojieServiceChannel"
+    val NOTIFICATION_CHANNEL_ID = "PojieServiceChannel"
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private var readLogMode = 0
     private var logcatService: WifiLogcatService? = null
 
-    fun readPojieSettings(prefs: SharedPreferences): PojieSettings {
-        return PojieSettings(
-            readLogMode = prefs.getInt(
-                PojieSettings.READ_LOG_MODE_KEY,
-                PojieSettings.READ_LOG_MODE_DEFAULT
-            ),
-            connectMode = prefs.getInt(
-                PojieSettings.CONNECT_MODE_KEY,
-                PojieSettings.CONNECT_MODE_DEFAULT
-            ),
-            manageSavedMode = prefs.getInt(
-                PojieSettings.MANAGE_SAVED_MODE_KEY,
-                PojieSettings.MANAGE_SAVED_MODE_DEFAULT
-            ),
-            scanMode = prefs.getInt(PojieSettings.SCAN_MODE_KEY, PojieSettings.SCAN_MODE_DEFAULT),
-            allowScanUseCommand = prefs.getBoolean(
-                PojieSettings.ALLOW_SCAN_USE_COMMAND_KEY,
-                PojieSettings.ALLOW_SCAN_USE_COMMAND_DEFAULT
-            ),
-            enableMode = prefs.getInt(
-                PojieSettings.ENABLE_MODE_KEY,
-                PojieSettings.ENABLE_MODE_DEFAULT
-            ),
-            screenAlwaysOn = prefs.getBoolean(
-                PojieSettings.SCREEN_ALWAYS_ON_KEY,
-                PojieSettings.SCREEN_ALWAYS_ON_DEFAULT
-            ),
-            showRunningNotification = prefs.getBoolean(
-                PojieSettings.SHOW_RUNNING_NOTIFICATION_KEY,
-                PojieSettings.SHOW_RUNNING_NOTIFICATION_DEFAULT
-            ),
-            exitToPictureInPicture = prefs.getBoolean(
-                PojieSettings.EXIT_TO_PICTURE_IN_PICTURE_KEY,
-                PojieSettings.EXIT_TO_PICTURE_IN_PICTURE_DEFAULT
-            ),
-            commandMethod = prefs.getInt(
-                PojieSettings.COMMAND_METHOD_KEY,
-                PojieSettings.COMMAND_METHOD_DEFAULT
-            )
-        )
-    }
 
     fun log(log: String) {
         (applicationContext as MyApplication).logState.addLog(log)
@@ -73,10 +32,10 @@ class PojieService : Service() {
     private var _pojieSettings: PojieSettings? = null
 
     private val pojieSettings: PojieSettings
-        get() = _pojieSettings ?: readPojieSettings(sharedPreferences).also { _pojieSettings = it }
+        get() = _pojieSettings ?: PojieSettings.from(sharedPreferences).also { _pojieSettings = it }
 
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
-        _pojieSettings = readPojieSettings(prefs)
+        _pojieSettings = PojieSettings.from(prefs)
     }
 
     override fun onCreate() {
@@ -314,7 +273,7 @@ wifi密码暴力破解工具 v3 for Android
                 } else {
                     app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
                     processTaskCompletion(app, task.ssid)
-                    ShizukuUtil.disconnectWifi()//干完事情恢复原样可是好习惯
+                    ShizukuUtil.disconnectWifi() //干完事情恢复原样可是好习惯
                 }
                 when (taskResult) {
                     SinglePojieTask.RESULT_SUCCESS -> {

@@ -58,8 +58,15 @@ fun NavContainer(
                 ),
                 title = {
                     Column(modifier = Modifier.padding(0.dp, 8.dp)) {
-                        Text(text = pages[currentIndex].name, style = MaterialTheme.typography.titleLarge)
-                        Text(text = subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = pages[currentIndex].name,
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 },
                 navigationIcon = {
@@ -77,7 +84,8 @@ fun NavContainer(
                     .pointerInput(pages.size) {
                         detectDragGestures(
                             onDragStart = { offset ->
-                                val index = (offset.x / (navBarWidth / pages.size)).toInt().coerceIn(0, pages.size - 1)
+                                val index = (offset.x / (navBarWidth / pages.size)).toInt()
+                                    .coerceIn(0, pages.size - 1)
                                 if (currentIndex != index) {
                                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                     previousIndex = currentIndex
@@ -85,7 +93,8 @@ fun NavContainer(
                                 }
                             },
                             onDrag = { change, _ ->
-                                val index = (change.position.x / (navBarWidth / pages.size)).toInt().coerceIn(0, pages.size - 1)
+                                val index = (change.position.x / (navBarWidth / pages.size)).toInt()
+                                    .coerceIn(0, pages.size - 1)
                                 if (currentIndex != index) {
                                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                     previousIndex = currentIndex
@@ -97,7 +106,8 @@ fun NavContainer(
                     .pointerInput(pages.size) {
                         detectTapGestures(
                             onPress = { offset ->
-                                val index = (offset.x / (navBarWidth / pages.size)).toInt().coerceIn(0, pages.size - 1)
+                                val index = (offset.x / (navBarWidth / pages.size)).toInt()
+                                    .coerceIn(0, pages.size - 1)
                                 if (currentIndex != index) {
                                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                     previousIndex = currentIndex
@@ -110,10 +120,15 @@ fun NavContainer(
                 pages.forEachIndexed { index, page ->
                     val selected = currentIndex == index
                     NavigationBarItem(
-                        icon = { Icon(imageVector = if (selected) page.selectedIcon else page.unselectedIcon, contentDescription = page.name) },
+                        icon = {
+                            Icon(
+                                imageVector = if (selected) page.selectedIcon else page.unselectedIcon,
+                                contentDescription = page.name
+                            )
+                        },
                         label = { Text(page.name) },
                         selected = selected,
-                        alwaysShowLabel = false,
+                        alwaysShowLabel = pages.size < 5,
                         onClick = {
                             if (currentIndex != index) {
                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)

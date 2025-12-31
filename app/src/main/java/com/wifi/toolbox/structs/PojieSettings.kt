@@ -1,5 +1,6 @@
 package com.wifi.toolbox.structs
 
+import android.content.SharedPreferences
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
@@ -46,6 +47,21 @@ data class PojieSettings(
 
         const val COMMAND_METHOD_KEY = "command_method"
         const val COMMAND_METHOD_DEFAULT = 0
+
+
+        fun from(prefs: SharedPreferences): PojieSettings {
+            return PojieSettings(
+                readLogMode = prefs.getInt(READ_LOG_MODE_KEY, READ_LOG_MODE_DEFAULT),
+                connectMode = prefs.getInt(CONNECT_MODE_KEY, CONNECT_MODE_DEFAULT),
+                manageSavedMode = prefs.getInt(MANAGE_SAVED_MODE_KEY, MANAGE_SAVED_MODE_DEFAULT),
+                scanMode = prefs.getInt(SCAN_MODE_KEY, SCAN_MODE_DEFAULT),
+                allowScanUseCommand = prefs.getBoolean(ALLOW_SCAN_USE_COMMAND_KEY, ALLOW_SCAN_USE_COMMAND_DEFAULT),
+                enableMode = prefs.getInt(ENABLE_MODE_KEY, ENABLE_MODE_DEFAULT),
+                screenAlwaysOn = prefs.getBoolean(SCREEN_ALWAYS_ON_KEY, SCREEN_ALWAYS_ON_DEFAULT),
+                showRunningNotification = prefs.getBoolean(SHOW_RUNNING_NOTIFICATION_KEY, SHOW_RUNNING_NOTIFICATION_DEFAULT),
+                exitToPictureInPicture = prefs.getBoolean(EXIT_TO_PICTURE_IN_PICTURE_KEY, EXIT_TO_PICTURE_IN_PICTURE_DEFAULT),
+                commandMethod = prefs.getInt(COMMAND_METHOD_KEY, COMMAND_METHOD_DEFAULT)
+            )
+        }
     }
 }
-

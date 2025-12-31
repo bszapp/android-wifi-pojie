@@ -1,19 +1,11 @@
 package com.wifi.toolbox.ui.screen.test
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.location.LocationManager
-import android.net.ConnectivityManager
-import android.net.*
-import android.net.wifi.*
 import android.os.Build
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -24,13 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
-import com.google.android.gms.common.api.ResolvableApiException
-import com.google.android.gms.location.*
-import com.google.android.gms.tasks.Task
-import com.wifi.toolbox.structs.WifiInfo
 import com.wifi.toolbox.ui.items.*
-import com.wifi.toolbox.utils.LogState
+import com.wifi.toolbox.utils.*
 import kotlinx.coroutines.*
 
 
@@ -50,7 +37,7 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                 if (ActivityCompat.checkSelfPermission(
                         context,
                         Manifest.permission.ACCESS_FINE_LOCATION
-                    ) != PackageManager.PERMISSION_GRANTED
+                    ) == PackageManager.PERMISSION_GRANTED
                 ) {
                     performWifiScan(context, logState)
                 } else {
@@ -78,13 +65,23 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                         text = "打开wifi",
                         icon = Icons.Filled.Wifi,
                         onClick = {
-                            setWifiEnabled(context, true, logState)
+                            val success = ApiUtil.setWifiEnabled(context, true)
+                            if (success) {
+                                logState.addLog("Wi-Fi 打开成功")
+                            } else {
+                                logState.addLog("请求已发送")
+                            }
                         })
                     ActionChip(
                         text = "关闭wifi",
                         icon = Icons.Filled.WifiOff,
                         onClick = {
-                            setWifiEnabled(context, false, logState)
+                            val success = ApiUtil.setWifiEnabled(context, false)
+                            if (success) {
+                                logState.addLog("Wi-Fi 关闭成功")
+                            } else {
+                                logState.addLog("请求已发送")
+                            }
                         })
                     ActionChip(
                         text = "扫描wifi",
@@ -121,7 +118,8 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        connectToWifiApi28(context, name, password, logState)
+                        val id = ApiUtil.connectToWifiApi28(context, name, password)
+                        if (id != -1) logState.addLog("请求已发送") else logState.addLog("失败(请忘记网络)")
                     },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -131,7 +129,9 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                 Button(
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            connectToWifiApi29(context, name, password, logState)
+                            ApiUtil.connectToWifiApi29(context, name, password) { success ->
+                                logState.addLog(if (success) "连接成功" else "连接失败")
+                            }
                         } else {
                             logState.addLog("设备版本过低")
                         }
@@ -146,74 +146,25 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
     }
 }
 
-private fun checkAndPerformWifiScan(
-    context: Context,
-    logState: LogState,
-    wifiScanLauncher: androidx.activity.result.ActivityResultLauncher<String>,
-    scope: CoroutineScope
-) {
-    when {
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED -> {
-            val locationManager =
-                context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) && !locationManager.isProviderEnabled(
-                    LocationManager.NETWORK_PROVIDER
-                )
-            ) {
-                logState.addLog("系统定位服务未开启，请在设置中打开")
-                enableLocation(context)
-                return
-            }
-
-            val wifiManager =
-                context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            if (!wifiManager.isWifiEnabled) {
-                logState.addLog("Wi-Fi未开启，请打开Wi-Fi")
-                return
-            }
-
-            scope.launch {
-                performWifiScan(context, logState)
-            }
-        }
-
-        else -> {
-            logState.addLog("请先允许定位权限")
-            wifiScanLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-    }
-}
-
-
 private suspend fun performWifiScan(context: Context, logState: LogState) {
     try {
-        val wifiManager =
-            context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val success = wifiManager.startScan()
+        val success = ApiUtil.startScan(context)
         if (!success) {
             logState.addLog("W: 扫描频率过快，请求被系统拒绝")
-        } else logState.addLog("请求已发送，3秒后获取结果")
+        } else {
+            logState.addLog("请求已发送，3秒后获取结果")
+        }
+
         delay(3000)
-        if (ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
+
+        if (!ApiUtil.hasLocationPermission(context)) {
             throw RuntimeException("缺少位置权限")
         }
-        val scanResults = wifiManager.scanResults
-        val result = scanResults.sortedByDescending { it.level }.map {
-            WifiInfo(
-                ssid = it.SSID,
-                level = it.level,
-                capabilities = it.capabilities
-            )
-        }
+
+        val scanResults = ApiUtil.getScanResults(context)
+
         logState.addLog("=== 扫描结果 ===")
-        result.forEach {
+        scanResults.forEach {
             logState.addLog(
                 String.format(
                     "名称: %-16s 信号强度: %-8s 支持的协议: %s",
@@ -231,113 +182,29 @@ private suspend fun performWifiScan(context: Context, logState: LogState) {
     }
 }
 
-private fun setWifiEnabled(context: Context, enabled: Boolean, logState: LogState) {
-    val wifiManager =
-        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-    try {
-        val success = wifiManager.setWifiEnabled(enabled)
-        if (success) {
-            logState.addLog("Wi-Fi ${if (enabled) "打开" else "关闭"}成功")
-        } else {
-            logState.addLog("请求已发送")
-        }
-    } catch (e: SecurityException) {
-        logState.addLog("E: 缺少权限，无法${if (enabled) "打开" else "关闭"}Wi-Fi")
-        logState.addLog(e.stackTraceToString())
-    }
-}
-
-@RequiresApi(api = Build.VERSION_CODES.Q)
-private fun connectToWifiApi29(
+private fun checkAndPerformWifiScan(
     context: Context,
-    ssid: String,
-    password: String,
-    logState: LogState
+    logState: LogState,
+    wifiScanLauncher: androidx.activity.result.ActivityResultLauncher<String>,
+    scope: CoroutineScope
 ) {
-    try {
-        val builder = WifiNetworkSpecifier.Builder()
-            .setSsid(ssid)
-
-        if (password.isNotEmpty()) {
-            builder.setWpa2Passphrase(password)
+    if (ApiUtil.hasLocationPermission(context)) {
+        if (!ApiUtil.isLocationEnabled(context)) {
+            logState.addLog("系统定位服务未开启，请在设置中打开")
+            ApiUtil.enableLocation(context)
+            return
         }
 
-        val networkSpecifier = builder.build()
-
-        val networkRequest = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .setNetworkSpecifier(networkSpecifier)
-            .build()
-
-        val connectivityManager =
-            context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-
-        val networkCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                super.onAvailable(network)
-                logState.addLog("请求已发送")
-                connectivityManager.unregisterNetworkCallback(this)
-            }
-
-            override fun onUnavailable() {
-                super.onUnavailable()
-                logState.addLog("wifi连接失败")
-                connectivityManager.unregisterNetworkCallback(this)
-            }
+        if (!ApiUtil.isWifiEnabled(context)) {
+            logState.addLog("Wi-Fi未开启，请打开Wi-Fi")
+            return
         }
 
-        connectivityManager.requestNetwork(networkRequest, networkCallback)
-    } catch (e: Exception) {
-        logState.addLog("E: 请求发送失败")
-        logState.addLog(e.stackTraceToString())
-    }
-}
-
-private fun connectToWifiApi28(
-    context: Context,
-    ssid: String,
-    password: String,
-    logState: LogState
-) {
-    val wifiManager =
-        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-
-    val wifiConfig = WifiConfiguration()
-    wifiConfig.SSID = "\"$ssid\""
-    wifiConfig.preSharedKey = "\"$password\""
-    val netId = wifiManager.addNetwork(wifiConfig)
-
-    if (netId != -1) {
-        wifiManager.enableNetwork(netId, true)
-        logState.addLog("请求已发送")
+        scope.launch {
+            performWifiScan(context, logState)
+        }
     } else {
-        logState.addLog("请求发送失败（请去设置忘记此网络）")
-    }
-}
-
-private fun enableLocation(context: Context) {
-    try {
-        //先用GooglePlayGMS弹窗
-        val activity = context as Activity
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000)
-            .setMinUpdateIntervalMillis(5000)
-            .build()
-
-        val builder = LocationSettingsRequest.Builder()
-            .addLocationRequest(locationRequest)
-            .setAlwaysShow(true)
-        val settingsClient: SettingsClient = LocationServices.getSettingsClient(activity)
-        val task: Task<LocationSettingsResponse> =
-            settingsClient.checkLocationSettings(builder.build())
-
-        task.addOnFailureListener { exception ->
-            if (exception is ResolvableApiException) {
-                exception.startResolutionForResult(activity, 0x1)
-            }
-        }
-    } catch (_: Exception) {
-        //直接打开设置页
-        val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
-        context.startActivity(intent)
+        logState.addLog("请先允许定位权限")
+        wifiScanLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 }

@@ -2,6 +2,6 @@
 <resources>
 
     <style name="Theme.Wifi工具箱" parent="android:Theme.Material.Light.NoActionBar" >
-        <item name="android:windowBackground">@drawable/layerlist_splash</item>
+        <item name="android:windowBackground">@drawable/splash</item>
     </style>
 </resources>

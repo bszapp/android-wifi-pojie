@@ -1,6 +1,5 @@
 package com.wifi.toolbox.ui.items
 
-import android.util.Log
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.layout.*
@@ -16,7 +15,6 @@ import androidx.compose.ui.*
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import com.wifi.toolbox.structs.PojieRunInfo
 import com.wifi.toolbox.structs.WifiInfo
 import com.wifi.toolbox.utils.PojieWifiController
 
@@ -28,6 +26,8 @@ data class StartScanResult(
         const val CODE_SUCCESS = 0
         const val CODE_SCAN_FAIL = -1
         const val CODE_WIFI_NOT_ENABLED = -2
+        const val CODE_LOCATION_NOT_ENABLED = -3
+        const val CODE_LOCATION_NOT_ALLOWED = -4
         const val CODE_UNKNOWN = -5
     }
 }
@@ -71,6 +71,10 @@ fun RunListView(
         if (controller.uiState is ScreenState.Idle) controller.reload()
     }
 
+    LaunchedEffect(controller.isScanning) {
+        if (!controller.isScanning) listState.animateScrollToItem(0)
+    }
+
     LaunchedEffect(runningTasks.size) {
         if (runningTasks.isNotEmpty()) listState.animateScrollToItem(0)
     }
@@ -80,7 +84,11 @@ fun RunListView(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = "wifi列表", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        Text(
+            text = "wifi列表",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f)
+        )
 
         SplitButtonLayout(
             leadingButton = {
@@ -91,7 +99,11 @@ fun RunListView(
                         contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                     )
                 ) {
-                    Icon(Icons.Rounded.Autorenew, contentDescription = null, modifier = Modifier.size(SplitButtonDefaults.LeadingIconSize))
+                    Icon(
+                        Icons.Rounded.Autorenew,
+                        contentDescription = null,
+                        modifier = Modifier.size(SplitButtonDefaults.LeadingIconSize)
+                    )
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                     Text("刷新")
                 }
@@ -115,7 +127,9 @@ fun RunListView(
                     )
                 }
                 DropdownMenu(expanded, { expanded = false }) {
-                    DropdownMenuItem(text = { Text("前面的区域，以后再来探索吧") }, onClick = { expanded = false })
+                    DropdownMenuItem(
+                        text = { Text("前面的区域，以后再来探索吧") },
+                        onClick = { expanded = false })
                 }
             }
         )
@@ -154,12 +168,35 @@ fun RunListView(
                     0 -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                         ContainedLoadingIndicator(Modifier.size(60.dp))
                     }
-                    1 -> Box(Modifier.fillMaxSize(), Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(Icons.Rounded.Inbox, null, Modifier.size(96.dp), tint = MaterialTheme.colorScheme.outlineVariant)
-                            Text("空列表", style = MaterialTheme.typography.bodyLarge)
+
+                    1 -> Column(Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Rounded.Inbox,
+                                    null,
+                                    Modifier.size(96.dp),
+                                    tint = MaterialTheme.colorScheme.outlineVariant
+                                )
+                                Text("空列表", style = MaterialTheme.typography.bodyLarge)
+                            }
                         }
+
+                        BannerTip(
+                            title = "没有找到想要的wifi？",
+                            text = "点击手动输入名称",
+                            trailingIcon = true,
+                            modifier = Modifier
+                                .padding(8.dp)
+                                .fillMaxWidth()
+                        )
                     }
+
                     2 -> Column(Modifier.fillMaxSize()) {
                         AnimatedVisibility(
                             visible = controller.isScanning,
@@ -175,7 +212,7 @@ fun RunListView(
                         Spacer(Modifier.height(4.dp))
                         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                             items(fullList, key = { it.ssid }) { wifi ->
-                                wifiPojieItem(
+                                WifiPojieItem(
                                     modifier = Modifier.animateItem(),
                                     wifi = wifi,
                                     runningInfo = runningTasks.find { it.ssid == wifi.ssid },
@@ -184,9 +221,10 @@ fun RunListView(
                                 )
                             }
                             item {
-                                BannerTip(
+                                if (!controller.isScanning || !res.wifiList.isNullOrEmpty()) BannerTip(
                                     title = "没有找到想要的wifi？",
                                     text = "点击手动输入名称",
+                                    trailingIcon = true,
                                     modifier = Modifier.padding(8.dp)
                                 )
                             }
@@ -195,6 +233,7 @@ fun RunListView(
                 }
             }
         }
+
         is ScreenState.Error -> {
             val icon = when (s.type) {
                 ScreenState.ERROR_WIFI_NOT_ENABLED -> Icons.Rounded.WifiOff
@@ -210,6 +249,7 @@ fun RunListView(
                 }
             }
         }
+
         else -> {}
     }
 }
@@ -221,7 +261,12 @@ fun ErrorTip(icon: ImageVector, message: String, button: @Composable (() -> Unit
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Icon(icon, contentDescription = null, Modifier.size(96.dp), tint = MaterialTheme.colorScheme.outlineVariant)
+        Icon(
+            icon,
+            contentDescription = null,
+            Modifier.size(96.dp),
+            tint = MaterialTheme.colorScheme.outlineVariant
+        )
         Text(message, style = MaterialTheme.typography.bodyLarge)
         if (button != null) {
             Spacer(Modifier.height(8.dp))

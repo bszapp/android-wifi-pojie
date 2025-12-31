@@ -22,6 +22,8 @@ interface PojieWifiController {
     fun reload()
     fun fetchResults(): ScanResult
     fun toggleWifiOn()
+    fun applyLocation()
+    fun enableLocation()
 }
 
 @Composable
@@ -53,11 +55,15 @@ fun rememberPojieWifiController(
                         StartScanResult.CODE_SUCCESS -> {
                             uiState = ScreenState.Success
                             showScanResult = false
-                            delay(500)
-                            trigger++
+                            repeat(500 / 500) {
+                                trigger += 1
+                                delay(500)
+                            }
                             showScanResult = true
-                            delay(2500)
-                            trigger++
+                            repeat((3000 - 500) / 500) {
+                                trigger += 1
+                                delay(500)
+                            }
                             refreshJob = null
                         }
                         StartScanResult.CODE_SCAN_FAIL -> uiState = ScreenState.Error(
@@ -105,6 +111,14 @@ fun rememberPojieWifiController(
                 if (settings.enableMode == 1) checkShizukuUI(app) { ShizukuUtil.setWifiEnabled(true) }
                 else app.alert("缺失参数", "实现为空")
                 reload()
+            }
+
+            override fun applyLocation() {
+                TODO("Not yet implemented")
+            }
+
+            override fun enableLocation() {
+                TODO("Not yet implemented")
             }
         }
     }
