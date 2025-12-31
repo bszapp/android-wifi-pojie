@@ -134,4 +134,11 @@ class MyApplication : Application() {
         runningPojieTasks.removeIf { it.ssid == ssid }
     }
 
+    fun updateTaskState(ssid: String, transform: (PojieRunInfo) -> PojieRunInfo) {
+        val index = runningPojieTasks.indexOfFirst { it.ssid == ssid }
+        if (index != -1) {
+            runningPojieTasks[index] = transform(runningPojieTasks[index])
+        }
+    }
+
 }

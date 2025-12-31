@@ -1,5 +1,6 @@
 package com.wifi.toolbox.utils
 
+import android.app.Activity
 import android.content.Context
 import android.net.wifi.WifiManager
 import androidx.compose.runtime.*
@@ -40,7 +41,14 @@ fun rememberPojieWifiController(
 
     val currentRunningTasks = app.runningPojieTasks
 
-    return remember(settings, uiState, refreshJob, trigger, showScanResult, currentRunningTasks.size) {
+    return remember(
+        settings,
+        uiState,
+        refreshJob,
+        trigger,
+        showScanResult,
+        currentRunningTasks.size
+    ) {
         object : PojieWifiController {
             override val uiState = uiState
             override val isScanning = refreshJob?.isActive == true
@@ -66,14 +74,17 @@ fun rememberPojieWifiController(
                             }
                             refreshJob = null
                         }
+
                         StartScanResult.CODE_SCAN_FAIL -> uiState = ScreenState.Error(
                             start.errorMessage ?: "扫描失败",
                             ScreenState.ERROR_SCAN_FAIL
                         )
+
                         StartScanResult.CODE_WIFI_NOT_ENABLED -> uiState = ScreenState.Error(
                             "wifi未开启",
                             ScreenState.ERROR_WIFI_NOT_ENABLED
                         )
+
                         else -> uiState = ScreenState.Error(
                             "未知错误(${start.errorMessage})",
                             ScreenState.ERROR_UNKNOWN
@@ -83,16 +94,66 @@ fun rememberPojieWifiController(
             }
 
             private fun scanInternal(): StartScanResult {
-                val wm = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                if (settings.scanMode == 0) return StartScanResult(StartScanResult.CODE_SCAN_FAIL, "扫描实现为空")
-                if (wm == null) return StartScanResult(StartScanResult.CODE_UNKNOWN)
-                if (!wm.isWifiEnabled) return StartScanResult(StartScanResult.CODE_WIFI_NOT_ENABLED)
+                if (settings.scanMode == 0) return StartScanResult(
+                    code = StartScanResult.CODE_SCAN_FAIL,
+                    errorMessage = "扫描实现为空"
+                )
+                if (!ApiUtil.isWifiEnabled(context)) return StartScanResult(
+                    code = StartScanResult.CODE_WIFI_NOT_ENABLED
+                )
                 return try {
-                    if (checkShizukuUI(app)) {
-                        if (ShizukuUtil.startWifiScan(settings.allowScanUseCommand)) StartScanResult(StartScanResult.CODE_SUCCESS)
-                        else StartScanResult(StartScanResult.CODE_SCAN_FAIL, "频率过快")
-                    } else StartScanResult(StartScanResult.CODE_SCAN_FAIL, "未授权")
-                } catch (e: Exception) { StartScanResult(StartScanResult.CODE_UNKNOWN, e.message) }
+                    when (settings.scanMode) {
+                        1 -> {
+                            //系统隐藏API (Shizuku)
+                            if (checkShizukuUI(app)) {
+                                if (ShizukuUtil.startWifiScan(settings.allowScanUseCommand))
+                                    StartScanResult(
+                                        code = StartScanResult.CODE_SUCCESS
+                                    )
+                                else StartScanResult(
+                                    code = StartScanResult.CODE_SCAN_FAIL,
+                                    errorMessage = "扫描频率过快，被系统拒绝"
+                                )
+                            } else StartScanResult(
+                                code = StartScanResult.CODE_SCAN_FAIL,
+                                errorMessage = "未授权"
+                            )
+                        }
+
+                        2 -> {
+                            if (ApiUtil.hasLocationPermission(context)) {
+                                if (ApiUtil.isLocationEnabled(context)) {
+                                    if (ApiUtil.startScan(context))
+                                        StartScanResult(
+                                            code = StartScanResult.CODE_SUCCESS
+                                        )
+                                    else StartScanResult(
+                                        code = StartScanResult.CODE_SCAN_FAIL,
+                                        errorMessage = "扫描频率过快，被系统拒绝"
+                                    )
+                                } else {
+                                    StartScanResult(
+                                        code = StartScanResult.CODE_LOCATION_NOT_ENABLED
+                                    )
+                                }
+                            } else {
+                                StartScanResult(
+                                    code = StartScanResult.CODE_LOCATION_NOT_ALLOWED
+                                )
+                            }
+                        }
+
+                        else -> {
+                            StartScanResult(
+                                code = StartScanResult.CODE_UNKNOWN,
+                                errorMessage = "前面的区域，以后再来探索吧\n(scanMode=${settings.scanMode})"
+                            )
+                        }
+                    }
+
+                } catch (e: Exception) {
+                    StartScanResult(StartScanResult.CODE_UNKNOWN, e.message)
+                }
             }
 
             override fun fetchResults(): ScanResult {
@@ -104,21 +165,27 @@ fun rememberPojieWifiController(
                         null,
                         result.filter { it.ssid.isNotEmpty() }.distinctBy { it.ssid }
                     )
-                } catch (e: Exception) { ScanResult(errorMessage = e.message) }
+                } catch (e: Exception) {
+                    ScanResult(errorMessage = e.message)
+                }
             }
 
             override fun toggleWifiOn() {
-                if (settings.enableMode == 1) checkShizukuUI(app) { ShizukuUtil.setWifiEnabled(true) }
+                if (settings.enableMode == 1) checkShizukuUI(app) {
+                    ShizukuUtil.setWifiEnabled(
+                        true
+                    )
+                }
                 else app.alert("缺失参数", "实现为空")
                 reload()
             }
 
             override fun applyLocation() {
-                TODO("Not yet implemented")
+                if(ApiUtil.requestLocationPermission(context as Activity))reload()
             }
 
             override fun enableLocation() {
-                TODO("Not yet implemented")
+                if(ApiUtil.enableLocation(context))reload()
             }
         }
     }

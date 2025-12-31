@@ -118,8 +118,8 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        val id = ApiUtil.connectToWifiApi28(context, name, password)
-                        if (id != -1) logState.addLog("请求已发送") else logState.addLog("失败(请忘记网络)")
+                        if (ApiUtil.connectToWifiApi28(context, name, password))
+                            logState.addLog("请求已发送") else logState.addLog("请求发送失败，请先忘记此网络")
                     },
                     modifier = Modifier
                         .fillMaxWidth()

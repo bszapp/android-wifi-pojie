@@ -298,7 +298,7 @@ fun ConfigItems(
         value = config.retryCountType.toFloat(),
         onValueChange = { onConfigChange(config.copy(retryCountType = it.toInt())) },
         valueRange = 0f..6f,
-        steps = 7
+        steps = 6
     )
     Spacer(modifier = Modifier.height(8.dp))
     AnimatedVisibility(

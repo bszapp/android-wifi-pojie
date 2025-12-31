@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.structs.WifiInfo
 import com.wifi.toolbox.utils.PojieWifiController
@@ -267,7 +268,10 @@ fun ErrorTip(icon: ImageVector, message: String, button: @Composable (() -> Unit
             Modifier.size(96.dp),
             tint = MaterialTheme.colorScheme.outlineVariant
         )
-        Text(message, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            message, style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center
+        )
         if (button != null) {
             Spacer(Modifier.height(8.dp))
             button()
