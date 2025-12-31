@@ -2,6 +2,7 @@
 agp = "8.13.2"
 coilCompose = "3.3.0"
 composeBomVersion = "2025.12.01"
+composeMarkdown = "0.5.0"
 desugar_jdk_libs = "2.1.5"
 hiddenapibypass = "6.1"
 kotlin = "2.3.0"
@@ -32,6 +33,7 @@ androidx-compose-material-icons-extended = { module = "androidx.compose.material
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 api = { module = "dev.rikka.shizuku:api", version.ref = "shizukuVersion" }
 coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coilCompose" }
+compose-markdown = { module = "com.github.jeziellago:compose-markdown", version.ref = "composeMarkdown" }
 desugar_jdk_libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugar_jdk_libs" }
 hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }

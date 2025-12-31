@@ -47,8 +47,8 @@ jobs:
 
       - name: Rename and Collect APKs
         run: |
-          find app/build/outputs/apk/release/ -name "*.apk" -exec mv {} "wifitoolbox-release-${{ env.VERSION_TAG }}.apk" \;
-          find app/build/outputs/apk/debug/ -name "*.apk" -exec mv {} "wifitoolbox-debug-${{ env.VERSION_TAG }}.apk" \;
+          find app/build/outputs/apk/release/ -name "*.apk" -exec mv {} "release-${{ env.VERSION_TAG }}.apk" \;
+          find app/build/outputs/apk/debug/ -name "*.apk" -exec mv {} "debug-${{ env.VERSION_TAG }}.apk" \;
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -56,7 +56,7 @@ jobs:
           tag_name: ${{ env.VERSION_TAG }}
           body_path: release_body.md
           files: |
-            wifitoolbox-release-${{ env.VERSION_TAG }}.apk
-            wifitoolbox-debug-${{ env.VERSION_TAG }}.apk
+            release-${{ env.VERSION_TAG }}.apk
+            debug-${{ env.VERSION_TAG }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

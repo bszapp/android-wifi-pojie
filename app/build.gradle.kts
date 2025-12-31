@@ -89,6 +89,7 @@ dependencies {
     implementation(libs.preference)
     implementation(libs.androidx.compose.runtime.annotation)
     implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
+    implementation(libs.compose.markdown)
 
     implementation(libs.materialKolor)
 
