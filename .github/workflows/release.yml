@@ -36,12 +36,14 @@ jobs:
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
 
       - name: Build APKs
-        run: ./gradlew assembleRelease assembleDebug
-        env:
-          ORG_GRADLE_PROJECT_androidInjectedSigningStoreFile: release.keystore
-          ORG_GRADLE_PROJECT_androidInjectedSigningStorePassword: ${{ secrets.STORE_PASSWORD }}
-          ORG_GRADLE_PROJECT_androidInjectedSigningKeyAlias: ${{ secrets.KEY_ALIAS }}
-          ORG_GRADLE_PROJECT_androidInjectedSigningKeyPassword: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=release.keystore \
+            -Pandroid.injected.signing.store.password='${{ secrets.STORE_PASSWORD }}' \
+            -Pandroid.injected.signing.key.alias='${{ secrets.KEY_ALIAS }}' \
+            -Pandroid.injected.signing.key.password='${{ secrets.KEY_PASSWORD }}'
+          
+          ./gradlew assembleDebug
 
       - name: Rename and Collect APKs
         run: |
