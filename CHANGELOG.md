@@ -5,7 +5,7 @@
 - 重构了部分逻辑
 
 其他：
-- 此版本使用Github Actions构建
+- 此版本使用Github Actions构建.
 
 其他功能正在画饼中……
 

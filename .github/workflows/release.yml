@@ -33,12 +33,12 @@ jobs:
         run: chmod +x gradlew
 
       - name: Decode Keystore
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
 
       - name: Build APKs
         run: |
           ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=release.keystore \
+            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/release.keystore \
             -Pandroid.injected.signing.store.password='${{ secrets.STORE_PASSWORD }}' \
             -Pandroid.injected.signing.key.alias='${{ secrets.KEY_ALIAS }}' \
             -Pandroid.injected.signing.key.password='${{ secrets.KEY_PASSWORD }}'
