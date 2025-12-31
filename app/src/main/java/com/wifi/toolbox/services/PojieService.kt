@@ -257,7 +257,9 @@ wifi密码暴力破解工具 v3 for Android
                             )
                         )
                     } catch (e: Exception) {
-                        log("E: 任务执行出错：${e.toString()}")
+                        if (e !is CancellationException) {
+                            log("E: 任务执行出错：${e.toString()}")
+                        }
                         taskResult = SinglePojieTask.RESULT_ERROR
                     }
                 }

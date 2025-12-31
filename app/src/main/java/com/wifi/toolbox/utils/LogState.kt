@@ -11,7 +11,7 @@ class LogState {
     var autoScroll by mutableStateOf(true)
 
     fun addLog(log: String) {
-        Log.d("WifiLogcatService",log)
+        Log.d("Log","addLog:$log")
         logs.add(log)
     }
 
@@ -20,6 +20,7 @@ class LogState {
     }
 
     fun setLine(log: String) {
+        Log.d("Log","setLine:$log")
         if (logs.isNotEmpty()) {
             logs[logs.size - 1] = log
         } else {

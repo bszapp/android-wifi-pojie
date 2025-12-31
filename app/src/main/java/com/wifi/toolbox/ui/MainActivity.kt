@@ -211,9 +211,11 @@ fun DetailedDrawerExample(
         }
     }
 
-    if (currentRoute != "Home") {
-        BackHandler {
-            navController.popBackStack("Home", inclusive = false)
+    val canGoBack = currentRoute != "Home"
+
+    BackHandler(enabled = canGoBack) {
+        navController.navigate("Home") {
+            popUpTo("Home") { inclusive = true }
         }
     }
 
@@ -269,7 +271,13 @@ fun DetailedDrawerExample(
                                 scope.launch { drawerState.close() }
                                 view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                                 if (currentRoute != route) {
-                                    navController.navigate(route) { launchSingleTop = true }
+                                    navController.navigate(route) {
+                                        popUpTo("Home") {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 }
                             },
                             modifier = Modifier.height(NavItemHeight)
@@ -294,7 +302,13 @@ fun DetailedDrawerExample(
                                 scope.launch { drawerState.close() }
                                 view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                                 if (currentRoute != route) {
-                                    navController.navigate(route) { launchSingleTop = true }
+                                    navController.navigate(route) {
+                                        popUpTo("Home") {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 }
                             },
                             modifier = Modifier.height(NavItemHeight)
