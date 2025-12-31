@@ -122,6 +122,16 @@ class WifiLogcatService(private val pojieSettings: PojieSettings) : AutoCloseabl
                             )
                         )
                     }
+
+                    line.contains("CTRL-EVENT-ASSOC-REJECT") -> {
+                        _logFlow.tryEmit(
+                            WifiLogData(
+                                WifiLogData.EVENT_CONNECT_ERROR,
+                                connectStartTime,
+                                currentSsid
+                            )
+                        )
+                    }
                 }
             },
             onCommandFinished = {

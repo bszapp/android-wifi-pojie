@@ -11,5 +11,6 @@ data class WifiLogData(
         const val EVENT_WIFI_CONNECTED = 0
         const val EVENT_CONNECT_FAILED = 1
         const val EVENT_HANDSHAKE = 2
+        const val EVENT_CONNECT_ERROR = 3
     }
 }

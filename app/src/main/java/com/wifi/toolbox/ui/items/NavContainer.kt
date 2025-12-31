@@ -5,11 +5,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
@@ -19,9 +16,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
@@ -47,7 +42,6 @@ fun NavContainer(
     val view = LocalView.current
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
     var navBarWidth by remember { mutableFloatStateOf(0f) }
-    val swipeThreshold = 300f
 
     BackHandler(enabled = currentIndex != defaultIndex) {
         previousIndex = currentIndex
@@ -106,7 +100,6 @@ fun NavContainer(
                                     previousIndex = currentIndex
                                     currentIndex = index
                                 }
-                                change.consume()
                             }
                         )
                     }
@@ -153,38 +146,6 @@ fun NavContainer(
                 .padding(innerPadding)
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
-                .pointerInput(currentIndex, pages.size) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(pass = PointerEventPass.Initial)
-                        var totalDrag = 0f
-                        var isHorizontalAttempt = false
-                        val initialIndex = currentIndex
-
-                        horizontalDrag(down.id) { change ->
-                            val dragAmount = change.positionChange().x
-                            val isLeftEdgeSwipe = initialIndex == 0 && dragAmount > 0
-                            val isRightEdgeSwipe = initialIndex == pages.size - 1 && dragAmount < 0
-
-                            if (!isLeftEdgeSwipe && !isRightEdgeSwipe) {
-                                change.consume()
-                                totalDrag += dragAmount
-                                isHorizontalAttempt = true
-                            }
-                        }
-
-                        if (isHorizontalAttempt) {
-                            if (totalDrag > swipeThreshold && currentIndex > 0) {
-                                previousIndex = currentIndex
-                                currentIndex--
-                                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            } else if (totalDrag < -swipeThreshold && currentIndex < pages.size - 1) {
-                                previousIndex = currentIndex
-                                currentIndex++
-                                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            }
-                        }
-                    }
-                }
         ) {
             pages.forEachIndexed { index, page ->
                 val isVisible = index == currentIndex

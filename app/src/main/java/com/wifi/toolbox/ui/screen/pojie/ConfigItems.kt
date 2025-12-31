@@ -289,20 +289,20 @@ fun ConfigItems(
     ) {
         Text("重试次数")
         Text(
-            text = retryCountLabels[config.retryCount],
+            text = retryCountLabels[config.retryCountType],
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 8.dp)
         )
     }
     Slider(
-        value = config.retryCount.toFloat(),
-        onValueChange = { onConfigChange(config.copy(retryCount = it.toInt())) },
+        value = config.retryCountType.toFloat(),
+        onValueChange = { onConfigChange(config.copy(retryCountType = it.toInt())) },
         valueRange = 0f..6f,
-        steps = 5
+        steps = 7
     )
     Spacer(modifier = Modifier.height(8.dp))
     AnimatedVisibility(
-        visible = config.retryCount != 0,
+        visible = config.retryCountType != 0,
         enter = expandVertically(),
         exit = shrinkVertically()
     ) {
@@ -314,7 +314,7 @@ fun ConfigItems(
             ) {
                 Text("等待时间翻倍基数")
                 Text(
-                    text = if (config.doublingBase == 0) "不翻倍" else "${config.doublingBase * 1000} ms",
+                    text = "${config.doublingBase} ms",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 8.dp)
                 )
@@ -322,8 +322,8 @@ fun ConfigItems(
             Slider(
                 value = config.doublingBase.toFloat(),
                 onValueChange = { onConfigChange(config.copy(doublingBase = it.toInt())) },
-                valueRange = 0f..8f,
-                steps = 7
+                valueRange = 0f..8000f,
+                steps = 15
             )
         }
     }
