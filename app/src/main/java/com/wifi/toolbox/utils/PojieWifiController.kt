@@ -55,6 +55,11 @@ fun rememberPojieWifiController(
             override val trigger = trigger
             override val runningTasks = currentRunningTasks
 
+            val MIN_SCAN_TIME = 500
+            val MAX_SCAN_TIME = 3000
+            val SCAN_INTERVAL = 100
+
+
             override fun reload() {
                 refreshJob?.cancel()
                 refreshJob = scope.launch {
@@ -63,14 +68,14 @@ fun rememberPojieWifiController(
                         StartScanResult.CODE_SUCCESS -> {
                             uiState = ScreenState.Success
                             showScanResult = false
-                            repeat(500 / 500) {
+                            repeat(MIN_SCAN_TIME / SCAN_INTERVAL) {
                                 trigger += 1
-                                delay(500)
+                                delay(SCAN_INTERVAL.toLong())
                             }
                             showScanResult = true
-                            repeat((3000 - 500) / 500) {
+                            repeat((MAX_SCAN_TIME - MIN_SCAN_TIME) / SCAN_INTERVAL) {
                                 trigger += 1
-                                delay(500)
+                                delay(SCAN_INTERVAL.toLong())
                             }
                             refreshJob = null
                         }
@@ -181,11 +186,11 @@ fun rememberPojieWifiController(
             }
 
             override fun applyLocation() {
-                if(ApiUtil.requestLocationPermission(context as Activity))reload()
+                if (ApiUtil.requestLocationPermission(context as Activity)) reload()
             }
 
             override fun enableLocation() {
-                if(ApiUtil.enableLocation(context))reload()
+                if (ApiUtil.enableLocation(context)) reload()
             }
         }
     }
