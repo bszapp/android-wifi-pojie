@@ -27,22 +27,30 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = project.findProperty("androidInjectedSigningStoreFile")?.let { file(it.toString()) } ?: file("release.keystore")
+            storePassword = project.findProperty("androidInjectedSigningStorePassword")?.toString() ?: ""
+            keyAlias = project.findProperty("androidInjectedSigningKeyAlias")?.toString() ?: ""
+            keyPassword = project.findProperty("androidInjectedSigningKeyPassword")?.toString() ?: ""
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
         debug {
-//            isMinifyEnabled = true
-//            proguardFiles(
-//                getDefaultProguardFile("proguard-android-optimize.txt"),
-//                "proguard-rules.pro"
-//            )
+            applicationIdSuffix = ".debug"
+            signingConfig = signingConfigs.getByName("release")
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -60,14 +68,14 @@ android {
         includeInBundle = false
     }
 
-    applicationVariants.all {
-        if (name == "release") {
-            outputs.configureEach {
-                (this as? com.android.build.gradle.internal.api.ApkVariantOutputImpl)?.outputFileName =
-                    "${defaultConfig.applicationId}-v${defaultConfig.versionName}.apk"
-            }
-        }
-    }
+//    applicationVariants.all {
+//        if (name == "release") {
+//            outputs.configureEach {
+//                (this as? com.android.build.gradle.internal.api.ApkVariantOutputImpl)?.outputFileName =
+//                    "${defaultConfig.applicationId}-v${defaultConfig.versionName}.apk"
+//            }
+//        }
+//    }
 }
 
 dependencies {
