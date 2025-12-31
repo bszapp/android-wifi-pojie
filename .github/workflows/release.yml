@@ -1,16 +1,16 @@
-name: Build and Release APK
+name: 构建发行版APK
 
 on:
   push:
-    tags:
-      - 'v*' # 只有当你手动打标签（如 v1.0）时才会触发发布
+    paths:
+      - 'CHANGELOG.md'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -18,16 +18,43 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Parse Changelog and Sync Assets
+        id: parse
+        run: |
+          TAG_LINE=$(grep -m 1 "^# " CHANGELOG.md)
+          TAG=${TAG_LINE#"# "}
+          echo "VERSION_TAG=$TAG" >> $GITHUB_ENV
+          awk '/^# /{if (p) exit; p=1; next} p' CHANGELOG.md > release_body.md
+          
+          mkdir -p app/src/main/assets/
+          cp CHANGELOG.md app/src/main/assets/
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
+
+      - name: Build APKs
+        run: |
+          ./gradlew assembleRelease assembleDebug \
+            -Pandroid.injected.signing.store.file=release.keystore \
+            -Pandroid.injected.signing.store.password='${{ secrets.STORE_PASSWORD }}' \
+            -Pandroid.injected.signing.key.alias='${{ secrets.KEY_ALIAS }}' \
+            -Pandroid.injected.signing.key.password='${{ secrets.KEY_PASSWORD }}'
+
+      - name: Rename and Collect APKs
+        run: |
+          find app/build/outputs/apk/release/ -name "*.apk" -exec mv {} "wifitoolbox-release-${{ env.VERSION_TAG }}.apk" \;
+          find app/build/outputs/apk/debug/ -name "*.apk" -exec mv {} "wifitoolbox-debug-${{ env.VERSION_TAG }}.apk" \;
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: CHANGELOG.md  # 自动读取这个文件的内容作为说明
-          files: app/build/outputs/apk/debug/*.apk
+          tag_name: ${{ env.VERSION_TAG }}
+          body_path: release_body.md
+          files: |
+            wifitoolbox-release-${{ env.VERSION_TAG }}.apk
+            wifitoolbox-debug-${{ env.VERSION_TAG }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
