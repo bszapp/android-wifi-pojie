@@ -1,8 +1,10 @@
 [versions]
 agp = "8.13.2"
+coil = "2.6.0"
 coilCompose = "3.3.0"
+coilComposeVersion = "2.7.0"
+commonmarkExtGfmTables = "0.27.0"
 composeBomVersion = "2025.12.01"
-composeMarkdown = "0.5.0"
 desugar_jdk_libs = "2.1.5"
 hiddenapibypass = "6.1"
 kotlin = "2.3.0"
@@ -32,8 +34,14 @@ androidx-navigation-compose = { group = "androidx.navigation", name = "navigatio
 androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended", version.ref = "materialIconsExtended" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 api = { module = "dev.rikka.shizuku:api", version.ref = "shizukuVersion" }
+coil = { module = "io.coil-kt:coil", version.ref = "coilComposeVersion" }
 coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coilCompose" }
-compose-markdown = { module = "com.github.jeziellago:compose-markdown", version.ref = "composeMarkdown" }
+coil-gif = { module = "io.coil-kt:coil-gif", version.ref = "coilComposeVersion" }
+coil-kt-coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coilComposeVersion" }
+coil-v260 = { module = "io.coil-kt:coil", version.ref = "coil" }
+commonmark = { module = "org.commonmark:commonmark", version.ref = "commonmarkExtGfmTables" }
+commonmark-ext-autolink = { module = "org.commonmark:commonmark-ext-autolink", version.ref = "commonmarkExtGfmTables" }
+commonmark-ext-gfm-tables = { module = "org.commonmark:commonmark-ext-gfm-tables", version.ref = "commonmarkExtGfmTables" }
 desugar_jdk_libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugar_jdk_libs" }
 hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }

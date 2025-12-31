@@ -39,7 +39,6 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.rememberAsyncImagePainter
 import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.R
-import dev.jeziellago.compose.markdowntext.MarkdownText
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,7 +53,7 @@ fun AboutScreen(onMenuClick: () -> Unit) {
         if (showDialog && changelogText.isEmpty()) {
             changelogText = try {
                 context.assets.open("CHANGELOG.md").bufferedReader().use { it.readText() }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 ""
             }
         }
@@ -134,9 +133,9 @@ fun AboutScreen(onMenuClick: () -> Unit) {
                         modifier = Modifier
                             .verticalScroll(rememberScrollState())
                     ) {
-                        MarkdownText(
+                        Text(
                             modifier = Modifier.padding(8.dp),
-                            markdown = changelogText,
+                            text = changelogText,
                         )
                     }
                 }
