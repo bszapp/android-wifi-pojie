@@ -133,7 +133,37 @@ object ShizukuUtil {
         throw NoSuchMethodException("没有发现setWifiEnabled方法")
     }
 
-    fun connectToWifi(ssid: String, password: String) {
+    fun forgetNetwork(netId: Int) {
+        val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
+        val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
+
+        val methods = wifiService::class.java.declaredMethods
+
+        val forgetMethod = methods.firstOrNull {
+            it.name == "forget" && it.parameterTypes.size == 2 &&
+                    (it.parameterTypes[0] == Integer.TYPE || it.parameterTypes[0] == Int::class.java)
+        }
+
+        if (forgetMethod != null) {
+            forgetMethod.invoke(wifiService, netId, null)
+            return
+        }
+
+        val removeMethod = methods.firstOrNull {
+            it.name == "removeNetwork" && it.parameterTypes.size == 2 &&
+                    (it.parameterTypes[0] == Integer.TYPE || it.parameterTypes[0] == Int::class.java) &&
+                    it.parameterTypes[1] == String::class.java
+        }
+
+        if (removeMethod != null) {
+            removeMethod.invoke(wifiService, netId, PACKAGE_NAME)
+            return
+        }
+
+        throw NoSuchMethodException("没有发现 forget 或 removeNetwork 方法")
+    }
+
+    fun connectToWifi(ssid: String, password: String): Int {
         val wifiManagerBinder = SystemServiceHelper.getSystemService(Context.WIFI_SERVICE)
         val wifiService = asInterface("android.net.wifi.IWifiManager", wifiManagerBinder)
 
@@ -217,6 +247,7 @@ object ShizukuUtil {
             String::class.java
         )
         enableNetworkMethod.invoke(wifiService, netId, true, PACKAGE_NAME)
+        return netId
     }
 
     /**

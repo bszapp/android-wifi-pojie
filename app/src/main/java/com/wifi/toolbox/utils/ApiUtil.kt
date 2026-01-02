@@ -100,7 +100,7 @@ object ApiUtil {
         wifiManager.disconnect()
     }
 
-    fun connectToWifiApi28(context: Context, ssid: String, password: String): Boolean {
+    fun connectToWifiApi28(context: Context, ssid: String, password: String): Int {
         val wifiManager =
             context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val wifiConfig = WifiConfiguration().apply {
@@ -110,8 +110,13 @@ object ApiUtil {
         val netId = wifiManager.addNetwork(wifiConfig)
         return if (netId != -1) {
             wifiManager.enableNetwork(netId, true)
-            true
-        } else false
+            netId
+        } else -1
+    }
+    fun forgetNetwork(context: Context, netId: Int){
+        val wifiManager =
+            context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiManager.removeNetwork(netId)
     }
 
     fun enableLocation(context: Context): Boolean {

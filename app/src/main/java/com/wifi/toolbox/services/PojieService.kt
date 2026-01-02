@@ -28,6 +28,7 @@ class PojieService : Service() {
     private var logcatService: WifiLogcatService? = null
 
     private var connectWifiApi29Callback: ConnectivityManager.NetworkCallback? = null
+    private var lastConnectNetId: Int? = null
 
     fun log(log: String) {
         (applicationContext as MyApplication).logState.addLog(log)
@@ -69,13 +70,11 @@ class PojieService : Service() {
         val connectMode = pojieSettings.connectMode
         when (connectMode) {
             0 -> throw Exception("连接wifi实现为空，请先去设置中选择")
-            1 -> ShizukuUtil.connectToWifi(task.ssid, task.password)
-            2 -> if (!ApiUtil.connectToWifiApi28(
-                    this,
-                    task.ssid,
-                    task.password
-                )
-            ) throw Exception("请求发送失败，请先忘记此网络")
+            1 -> lastConnectNetId = ShizukuUtil.connectToWifi(task.ssid, task.password)
+            2 -> {
+                lastConnectNetId = ApiUtil.connectToWifiApi28(this, task.ssid, task.password)
+                if (lastConnectNetId == -1) throw Exception("请求发送失败，请先手动忘记此网络")
+            }
 
             3 -> {}
             else -> throw Exception("前面的区域，以后再来探索吧(connectMode=${pojieSettings.connectMode})")
@@ -105,8 +104,7 @@ class PojieService : Service() {
                         1 -> logcatService?.logFlow?.collect { data ->
                             if (continuation.isActive) {
                                 if (connectMode == 3 || //看起来WifiNetworkSpecifier好像没有开始的日志
-                                    data.ssid == task.ssid
-                                    && data.eventStartTime >= startTime
+                                    data.ssid == task.ssid && data.eventStartTime >= startTime
                                 ) {
 
                                     when (data.event) {
@@ -252,10 +250,7 @@ wifi密码暴力破解工具 v3 for Android
             launch {
                 snapshotFlow { app.runningPojieTasks.toList() }.collect { currentList ->
                     val targetSsid = currentWorkingSsid
-                    if (
-                        currentList.isEmpty() ||
-                        (targetSsid != null && currentList.none { it.ssid == targetSsid })
-                    ) {
+                    if (currentList.isEmpty() || (targetSsid != null && currentList.none { it.ssid == targetSsid })) {
                         currentWorkerJob?.cancel()
                     }
                 }
@@ -319,8 +314,7 @@ wifi密码暴力破解工具 v3 for Android
 
                 app.updateTaskState(task.ssid) {
                     it.copy(
-                        textTip = "正在尝试：$currentPass",
-                        lastTryTime = System.currentTimeMillis()
+                        textTip = "正在尝试：$currentPass", lastTryTime = System.currentTimeMillis()
                     )
                 }
 
@@ -350,6 +344,7 @@ wifi密码暴力破解工具 v3 for Android
                 timeTag = getLogTime()
                 if (currentWorkerJob?.isCancelled == true) {
                     app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: 任务中断")
+                    forgetLastNetwork()
                 } else {
                     if (taskResult != SinglePojieTask.RESULT_ERROR) app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
                 }
@@ -357,8 +352,7 @@ wifi密码暴力破解工具 v3 for Android
                 if (connectWifiApi29Callback != null) {
                     connectWifiApi29Callback?.let {
                         ApiUtil.cancelWifiRequest(
-                            this@PojieService,
-                            it
+                            this@PojieService, it
                         )
                     }
                     connectWifiApi29Callback = null
@@ -398,6 +392,15 @@ wifi密码暴力破解工具 v3 for Android
         }
     }
 
+    private fun forgetLastNetwork(){
+        lastConnectNetId?.let {
+            when (pojieSettings.connectMode) {
+                1 -> ShizukuUtil.forgetNetwork(it)
+                2 -> ApiUtil.forgetNetwork(this@PojieService, it)
+            }
+        }
+    }
+
     private fun getTask(app: MyApplication, ssid: String): PojieRunInfo? {
         return app.runningPojieTasks.find { it.ssid == ssid }
     }
@@ -407,12 +410,12 @@ wifi密码暴力破解工具 v3 for Android
         val nextIndex = task.tryIndex + 1
 
         if (nextIndex >= task.tryList.size) {
+            forgetLastNetwork()
             app.stopTaskByName(ssid)
         } else {
             app.updateTaskState(ssid) {
                 it.copy(
-                    tryIndex = nextIndex,
-                    textTip = "排队中"
+                    tryIndex = nextIndex, textTip = "排队中"
                 )
             }
         }
@@ -436,9 +439,7 @@ wifi密码暴力破解工具 v3 for Android
     }
 
     private suspend fun connectToWifiApi29(
-        ssid: String,
-        pass: String,
-        callback: (Boolean) -> Unit
+        ssid: String, pass: String, callback: (Boolean) -> Unit
     ): ConnectivityManager.NetworkCallback? {
         val foregroundActivity = ActivityStack.get()
 
