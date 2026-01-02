@@ -2,18 +2,11 @@ package com.wifi.toolbox.utils
 
 import android.app.Activity
 import android.content.Context
-import android.net.wifi.WifiManager
 import androidx.compose.runtime.*
 import com.wifi.toolbox.MyApplication
-import com.wifi.toolbox.structs.PojieRunInfo
-import com.wifi.toolbox.structs.PojieSettings
-import com.wifi.toolbox.ui.items.ScanResult
-import com.wifi.toolbox.ui.items.ScreenState
-import com.wifi.toolbox.ui.items.StartScanResult
-import com.wifi.toolbox.ui.items.checkShizukuUI
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.wifi.toolbox.structs.*
+import com.wifi.toolbox.ui.items.*
+import kotlinx.coroutines.*
 
 interface PojieWifiController {
     val uiState: ScreenState
@@ -65,34 +58,51 @@ fun rememberPojieWifiController(
                 refreshJob = scope.launch {
                     val start = scanInternal()
                     when (start.code) {
-                        StartScanResult.CODE_SUCCESS -> {
-                            uiState = ScreenState.Success
-                            showScanResult = false
-                            repeat(MIN_SCAN_TIME / SCAN_INTERVAL) {
+                        StartScanResult.CODE_SUCCESS, StartScanResult.CODE_SEND_FAIL -> {
+                            val sendSucceed = start.code == StartScanResult.CODE_SUCCESS
+                            uiState = ScreenState.Success(sendSucceed)
+                            if (sendSucceed) {
+                                showScanResult = false
+                                repeat(MIN_SCAN_TIME / SCAN_INTERVAL) {
+                                    trigger += 1
+                                    delay(SCAN_INTERVAL.toLong())
+                                }
+                                showScanResult = true
+                                repeat((MAX_SCAN_TIME - MIN_SCAN_TIME) / SCAN_INTERVAL) {
+                                    trigger += 1
+                                    delay(SCAN_INTERVAL.toLong())
+                                }
+                            } else {
                                 trigger += 1
-                                delay(SCAN_INTERVAL.toLong())
-                            }
-                            showScanResult = true
-                            repeat((MAX_SCAN_TIME - MIN_SCAN_TIME) / SCAN_INTERVAL) {
-                                trigger += 1
-                                delay(SCAN_INTERVAL.toLong())
+                                showScanResult = true
                             }
                             refreshJob = null
                         }
 
                         StartScanResult.CODE_SCAN_FAIL -> uiState = ScreenState.Error(
                             start.errorMessage ?: "扫描失败",
-                            ScreenState.ERROR_SCAN_FAIL
+                            StartScanResult.CODE_SCAN_FAIL
                         )
 
                         StartScanResult.CODE_WIFI_NOT_ENABLED -> uiState = ScreenState.Error(
                             "wifi未开启",
-                            ScreenState.ERROR_WIFI_NOT_ENABLED
+                            StartScanResult.CODE_WIFI_NOT_ENABLED
                         )
+
+                        StartScanResult.CODE_LOCATION_NOT_ENABLED -> uiState = ScreenState.Error(
+                            "定位服务未开启",
+                            StartScanResult.CODE_LOCATION_NOT_ENABLED,
+                        )
+
+                        StartScanResult.CODE_LOCATION_NOT_ALLOWED -> uiState = ScreenState.Error(
+                            "未获取定位权限",
+                            StartScanResult.CODE_LOCATION_NOT_ALLOWED,
+                        )
+
 
                         else -> uiState = ScreenState.Error(
                             "未知错误(${start.errorMessage})",
-                            ScreenState.ERROR_UNKNOWN
+                            StartScanResult.CODE_UNKNOWN,
                         )
                     }
                 }
@@ -101,7 +111,7 @@ fun rememberPojieWifiController(
             private fun scanInternal(): StartScanResult {
                 if (settings.scanMode == 0) return StartScanResult(
                     code = StartScanResult.CODE_SCAN_FAIL,
-                    errorMessage = "扫描实现为空"
+                    errorMessage = "扫描实现为空，请先在设置中选择"
                 )
                 if (!ApiUtil.isWifiEnabled(context)) return StartScanResult(
                     code = StartScanResult.CODE_WIFI_NOT_ENABLED
@@ -116,12 +126,11 @@ fun rememberPojieWifiController(
                                         code = StartScanResult.CODE_SUCCESS
                                     )
                                 else StartScanResult(
-                                    code = StartScanResult.CODE_SCAN_FAIL,
-                                    errorMessage = "扫描频率过快，被系统拒绝"
+                                    code = StartScanResult.CODE_SEND_FAIL
                                 )
                             } else StartScanResult(
                                 code = StartScanResult.CODE_SCAN_FAIL,
-                                errorMessage = "未授权"
+                                errorMessage = "未获取到Shizuku权限"
                             )
                         }
 
@@ -133,8 +142,7 @@ fun rememberPojieWifiController(
                                             code = StartScanResult.CODE_SUCCESS
                                         )
                                     else StartScanResult(
-                                        code = StartScanResult.CODE_SCAN_FAIL,
-                                        errorMessage = "扫描频率过快，被系统拒绝"
+                                        code = StartScanResult.CODE_SEND_FAIL
                                     )
                                 } else {
                                     StartScanResult(
@@ -164,12 +172,37 @@ fun rememberPojieWifiController(
             override fun fetchResults(): ScanResult {
                 if (!showScanResult) return ScanResult()
                 return try {
-                    val result = ShizukuUtil.getWifiScanResults()
-                    ScanResult(
-                        ScanResult.CODE_SUCCESS,
-                        null,
-                        result.filter { it.ssid.isNotEmpty() }.distinctBy { it.ssid }
-                    )
+                    when (settings.scanMode) {
+                        0 -> ScanResult(
+                            code = StartScanResult.CODE_SCAN_FAIL,
+                            errorMessage = "扫描实现为空，请先在设置中选择"
+                        )
+
+                        1 ->
+                            ScanResult(
+                                ScanResult.CODE_SUCCESS,
+                                null,
+                                ShizukuUtil.getWifiScanResults()
+                                    .filter { it.ssid.isNotEmpty() }
+                                    .distinctBy { it.ssid }
+                            )
+
+                        2 -> ScanResult(
+                            ScanResult.CODE_SUCCESS,
+                            null,
+                            ApiUtil.getScanResults(context)
+                                .filter { it.ssid.isNotEmpty() }
+                                .distinctBy { it.ssid }
+                        )
+
+                        else ->
+                            ScanResult(
+                                code = StartScanResult.CODE_UNKNOWN,
+                                errorMessage = "前面的区域，以后再来探索吧\n(scanMode=${settings.scanMode})"
+                            )
+
+                    }
+
                 } catch (e: Exception) {
                     ScanResult(errorMessage = e.message)
                 }

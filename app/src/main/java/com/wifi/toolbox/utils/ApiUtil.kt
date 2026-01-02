@@ -86,7 +86,7 @@ object ApiUtil {
         return if (netId != -1) {
             wifiManager.enableNetwork(netId, true)
             true
-        }else false
+        } else false
     }
 
     fun enableLocation(context: Context): Boolean {
@@ -146,6 +146,16 @@ object ApiUtil {
         val wifiManager =
             context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         return wifiManager.isWifiEnabled
+    }
+
+    fun isWifiConnected(context: Context): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val activeNetwork = cm.activeNetwork
+        val capabilities = cm.getNetworkCapabilities(activeNetwork)
+
+        return capabilities != null &&
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     const val REQUEST_LOCATION_CODE = 1001

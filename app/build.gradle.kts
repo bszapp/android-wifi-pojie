@@ -1,3 +1,8 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -21,15 +26,20 @@ android {
         minSdk = 24
         //noinspection ExpiredTargetSdkVersion 注:WifiManager需要
         targetSdk = 28
-        versionCode = 1
-        versionName = "3.0.0"
+        versionCode = 2
+        versionName = "3.0.0_Alpha-03"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    val buildTime = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
 
     buildTypes {
+        val buildNumber = getAndIncrementBuildNumber()
         release {
             isMinifyEnabled = true
+            manifestPlaceholders["shizukuAuthority"] = "com.wifi.toolbox.shizuku"
+            buildConfigField("String", "BUILD_DATE", "\"$buildTime\"")
+            buildConfigField("String", "BUILD_COUNT", "\"${buildNumber}\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -37,6 +47,13 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            manifestPlaceholders["shizukuAuthority"] = "com.wifi.toolbox.shizuku"
+            buildConfigField("String", "BUILD_DATE", "\"$buildTime\"")
+            buildConfigField("String", "BUILD_COUNT", "\"${buildNumber}\"")
+        }
+
+        buildFeatures {
+            buildConfig = true
         }
     }
 
@@ -105,4 +122,21 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+fun getAndIncrementBuildNumber(): Int {
+    val buildPropsFile = file("build.properties")
+    val props = Properties()
+
+    if (buildPropsFile.exists()) {
+        buildPropsFile.inputStream().use { props.load(it) }
+    }
+
+    val currentNumber = props.getProperty("BUILD_COUNT", "0").toInt()
+    val nextNumber = currentNumber + 1
+
+    props.setProperty("BUILD_COUNT", nextNumber.toString())
+    buildPropsFile.outputStream().use { props.store(it, null) }
+
+    return nextNumber
 }

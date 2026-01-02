@@ -55,6 +55,7 @@ jobs:
         with:
           tag_name: ${{ env.VERSION_TAG }}
           body_path: release_body.md
+          discussion_category_name: "Announcements"
           files: |
             release-${{ env.VERSION_TAG }}.apk
             debug-${{ env.VERSION_TAG }}.apk

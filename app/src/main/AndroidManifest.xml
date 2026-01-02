@@ -40,7 +40,7 @@
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="com.wifi.toolbox.shizuku"
+            android:authorities="${shizukuAuthority}"
             android:multiprocess="false"
             android:enabled="true"
             android:exported="true"
