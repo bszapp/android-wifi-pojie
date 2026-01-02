@@ -295,10 +295,10 @@ fun ConfigItems(
         )
     }
     Slider(
-        value = config.retryCountType.toFloat(),
-        onValueChange = { onConfigChange(config.copy(retryCountType = it.toInt())) },
-        valueRange = 0f..6f,
-        steps = 6
+        value = config.retryCountType.toFloat() / 6,
+        onValueChange = { onConfigChange(config.copy(retryCountType = (it * 6).toInt())) },
+        valueRange = 0f..1f,
+        steps = 5
     )
     Spacer(modifier = Modifier.height(8.dp))
     AnimatedVisibility(

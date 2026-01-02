@@ -47,7 +47,7 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
-            manifestPlaceholders["shizukuAuthority"] = "com.wifi.toolbox.shizuku"
+            manifestPlaceholders["shizukuAuthority"] = "com.wifi.toolbox.debug.shizuku"
             buildConfigField("String", "BUILD_DATE", "\"$buildTime\"")
             buildConfigField("String", "BUILD_COUNT", "\"${buildNumber}\"")
         }

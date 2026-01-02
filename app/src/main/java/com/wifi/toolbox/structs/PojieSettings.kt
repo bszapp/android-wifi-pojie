@@ -8,7 +8,6 @@ import kotlinx.parcelize.Parcelize
 data class PojieSettings(
     val readLogMode: Int = READ_LOG_MODE_DEFAULT,
     val connectMode: Int = CONNECT_MODE_DEFAULT,
-    val manageSavedMode: Int = MANAGE_SAVED_MODE_DEFAULT,
     val scanMode: Int = SCAN_MODE_DEFAULT,
     val allowScanUseCommand: Boolean = ALLOW_SCAN_USE_COMMAND_DEFAULT,
     val enableMode: Int = ENABLE_MODE_DEFAULT,
@@ -23,9 +22,6 @@ data class PojieSettings(
 
         const val CONNECT_MODE_KEY = "connect_mode"
         const val CONNECT_MODE_DEFAULT = 0
-
-        const val MANAGE_SAVED_MODE_KEY = "manage_saved_mode"
-        const val MANAGE_SAVED_MODE_DEFAULT = 0
 
         const val SCAN_MODE_KEY = "scan_mode"
         const val SCAN_MODE_DEFAULT = 0
@@ -53,7 +49,6 @@ data class PojieSettings(
             return PojieSettings(
                 readLogMode = prefs.getInt(READ_LOG_MODE_KEY, READ_LOG_MODE_DEFAULT),
                 connectMode = prefs.getInt(CONNECT_MODE_KEY, CONNECT_MODE_DEFAULT),
-                manageSavedMode = prefs.getInt(MANAGE_SAVED_MODE_KEY, MANAGE_SAVED_MODE_DEFAULT),
                 scanMode = prefs.getInt(SCAN_MODE_KEY, SCAN_MODE_DEFAULT),
                 allowScanUseCommand = prefs.getBoolean(ALLOW_SCAN_USE_COMMAND_KEY, ALLOW_SCAN_USE_COMMAND_DEFAULT),
                 enableMode = prefs.getInt(ENABLE_MODE_KEY, ENABLE_MODE_DEFAULT),

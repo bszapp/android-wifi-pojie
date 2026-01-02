@@ -1,5 +1,6 @@
 package com.wifi.toolbox
 
+import android.app.Activity
 import android.app.Application
 import android.content.pm.PackageManager
 import androidx.compose.runtime.getValue
@@ -22,6 +23,7 @@ import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuProvider
 import android.content.Intent
 import com.wifi.toolbox.services.PojieService
+import com.wifi.toolbox.utils.ActivityStack
 import kotlin.text.clear
 
 
@@ -64,6 +66,22 @@ class MyApplication : Application() {
             Shizuku.addRequestPermissionResultListener(shizukuListener)
         } catch (_: Throwable) {
         }
+
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: Activity) {
+                ActivityStack.register(activity)
+            }
+
+            override fun onActivityPaused(activity: Activity) {
+                ActivityStack.unregister()
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
     }
 
     override fun onTerminate() {
@@ -100,7 +118,11 @@ class MyApplication : Application() {
     private val _snackbarState = MutableSharedFlow<SnackbarData>()
     val snackbarState = _snackbarState.asSharedFlow()
 
-    fun snackbar(message: String, actionLabel: String? = "知道了", onActionClick: (() -> Unit)? = null) {
+    fun snackbar(
+        message: String,
+        actionLabel: String? = "知道了",
+        onActionClick: (() -> Unit)? = null
+    ) {
         appScope.launch {
             _snackbarState.emit(SnackbarData(message, actionLabel, onActionClick))
         }

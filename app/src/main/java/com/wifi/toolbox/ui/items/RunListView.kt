@@ -1,5 +1,6 @@
 package com.wifi.toolbox.ui.items
 
+import android.os.Parcelable
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.layout.*
@@ -20,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import com.wifi.toolbox.structs.WifiInfo
 import com.wifi.toolbox.utils.ApiUtil
 import com.wifi.toolbox.utils.PojieWifiController
+import kotlinx.parcelize.Parcelize
 
 data class StartScanResult(
     val code: Int = CODE_UNKNOWN,
@@ -47,10 +49,10 @@ data class ScanResult(
     }
 }
 
-sealed class ScreenState {
-    object Idle : ScreenState()
-    data class Success(val sendSucceed: Boolean) : ScreenState()
-    data class Error(val message: String, val type: Int) : ScreenState()
+sealed class ScreenState : Parcelable {
+    @Parcelize object Idle : ScreenState()
+    @Parcelize data class Success(val sendSucceed: Boolean) : ScreenState()
+    @Parcelize data class Error(val message: String, val type: Int) : ScreenState()
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -63,6 +65,9 @@ fun RunListView(
     var expanded by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val runningTasks = controller.runningTasks
+
+    var showManualInput by remember { mutableStateOf(false) }
+    var manualSsid by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         if (controller.uiState is ScreenState.Idle) controller.reload()
@@ -191,7 +196,8 @@ fun RunListView(
                                 trailingIcon = true,
                                 modifier = Modifier
                                     .padding(8.dp)
-                                    .fillMaxWidth()
+                                    .fillMaxWidth(),
+                                onBannerClick = { showManualInput = true }
                             )
                         }
 
@@ -215,7 +221,10 @@ fun RunListView(
                                             title = "当前已连接wifi",
                                             text = "可能对扫描及运行造成干扰，点击断开",
                                             trailingIcon = true,
-                                            modifier = Modifier.padding(4.dp)
+                                            modifier = Modifier.padding(4.dp),
+                                            onBannerClick = {
+                                                controller.disconnectWifi()
+                                            }
                                         )
                                     }
                                 }
@@ -241,7 +250,8 @@ fun RunListView(
                                         title = "没有找到想要的wifi？",
                                         text = "点击手动输入名称",
                                         trailingIcon = true,
-                                        modifier = Modifier.padding(8.dp)
+                                        modifier = Modifier.padding(8.dp),
+                                        onBannerClick = { showManualInput = true }
                                     )
                                 }
                             }
@@ -299,6 +309,38 @@ fun RunListView(
 
             else -> {}
         }
+    }
+
+    if (showManualInput) {
+        AlertDialog(
+            onDismissRequest = { showManualInput = false },
+            title = { Text("手动输入名称") },
+            text = {
+                OutlinedTextField(
+                    value = manualSsid,
+                    onValueChange = { manualSsid = it },
+                    label = { Text("ssid") },
+                    supportingText = {
+                        Text("注意区分大小写、空格等")
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = manualSsid.isNotBlank(),
+                    onClick = {
+                        onStartClick(manualSsid)
+                        manualSsid = ""
+                        showManualInput = false
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showManualInput = false }) { Text("取消") }
+            }
+        )
     }
 }
 

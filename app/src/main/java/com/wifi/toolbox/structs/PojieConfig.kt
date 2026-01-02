@@ -9,6 +9,6 @@ data class PojieConfig(
     val failureFlag: Int = 2,
     val timeout: Int = 2000,
     val maxHandshakeCount: Int = 1,
-    val retryCountType: Int = 0,
+    val retryCountType: Int = 6,
     val doublingBase: Int = 0
 ) : Parcelable

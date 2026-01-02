@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -23,9 +24,9 @@ fun PojieScreen(onMenuClick: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as MyApplication
 
-    var showPasswordSheet by remember { mutableStateOf(false) }
-    var passwordInputText by remember { mutableStateOf("") }
-    var currentTargetSsid by remember { mutableStateOf("") }
+    var showPasswordSheet by rememberSaveable { mutableStateOf(false) }
+    var passwordInputText by rememberSaveable { mutableStateOf("") }
+    var currentTargetSsid by rememberSaveable { mutableStateOf("") }
     val sheetState = rememberModalBottomSheetState()
 
     var pojieSettings by rememberPojieSettings(context)

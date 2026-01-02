@@ -1,14 +1,17 @@
 package com.wifi.toolbox.services
 
 import android.app.*
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
 import android.os.*
 import androidx.compose.runtime.snapshotFlow
 import androidx.core.app.NotificationCompat
 import com.wifi.toolbox.*
 import com.wifi.toolbox.structs.*
 import com.wifi.toolbox.ui.MainActivity
+import com.wifi.toolbox.utils.ActivityStack
 import com.wifi.toolbox.utils.ApiUtil
 import com.wifi.toolbox.utils.ShizukuUtil
 import kotlinx.coroutines.*
@@ -24,6 +27,7 @@ class PojieService : Service() {
     private var readLogMode = 0
     private var logcatService: WifiLogcatService? = null
 
+    private var connectWifiApi29Callback: ConnectivityManager.NetworkCallback? = null
 
     fun log(log: String) {
         (applicationContext as MyApplication).logState.addLog(log)
@@ -66,14 +70,37 @@ class PojieService : Service() {
         when (connectMode) {
             0 -> throw Exception("连接wifi实现为空，请先去设置中选择")
             1 -> ShizukuUtil.connectToWifi(task.ssid, task.password)
-            2 -> if(!ApiUtil.connectToWifiApi28(this, task.ssid, task.password))throw Exception("请求发送失败，请先忘记此网络")
-            3 -> ApiUtil.connectToWifiApi29(this, task.ssid, task.password)
+            2 -> if (!ApiUtil.connectToWifiApi28(
+                    this,
+                    task.ssid,
+                    task.password
+                )
+            ) throw Exception("请求发送失败，请先忘记此网络")
+
+            3 -> {}
             else -> throw Exception("前面的区域，以后再来探索吧(connectMode=${pojieSettings.connectMode})")
         }
 
         return withTimeoutOrNull(timeMillis = app.pojieConfig.maxTryTime.toLong()) {
             suspendCancellableCoroutine<Int> { continuation ->
+
                 val collectJob = launch {
+
+                    if (connectMode == 3) {
+                        connectWifiApi29Callback =
+                            connectToWifiApi29(task.ssid, task.password) { success ->
+                                if (continuation.isActive) {
+                                    if (success) {
+                                        continuation.resume(SinglePojieTask.RESULT_SUCCESS)
+                                        cancel()
+                                    } else {
+                                        continuation.resume(SinglePojieTask.RESULT_FAILED)
+                                        cancel()
+                                    }
+                                }
+                            }
+                    }
+
                     when (readLogMode) {
                         1 -> logcatService?.logFlow?.collect { data ->
                             if (continuation.isActive) {
@@ -84,8 +111,10 @@ class PojieService : Service() {
 
                                     when (data.event) {
                                         WifiLogData.EVENT_WIFI_CONNECTED -> {
-                                            continuation.resume(SinglePojieTask.RESULT_SUCCESS)
-                                            cancel()
+                                            if (connectMode != 3) {
+                                                continuation.resume(SinglePojieTask.RESULT_SUCCESS)
+                                                cancel()
+                                            }
                                         }
 
                                         WifiLogData.EVENT_CONNECT_FAILED -> {
@@ -165,7 +194,7 @@ class PojieService : Service() {
 
             startForeground(1, notification)
 
-            if (currentWorkerJob == null && currentWorkingSsid == null) {
+            if (currentWorkerJob == null) {
                 app.logState.clear()
                 log(
                     log = """      _      __                 _        
@@ -213,7 +242,8 @@ wifi密码暴力破解工具 v3 for Android
             while (isActive) {
                 //注：专门针对某些设备密码错误就不管什么页面都弹窗的反人类设计
                 //但是运行期间打不开设置应用，所以TODO加个开关
-                ShizukuUtil.executeCommandSync("am force-stop com.android.settings")
+                if (pojieSettings.connectMode != 3)//好像忘了点什么事情，咋不会弹窗确认连接呢
+                    ShizukuUtil.executeCommandSync("am force-stop com.android.settings")
                 delay(100)
             }
         }
@@ -222,7 +252,18 @@ wifi密码暴力破解工具 v3 for Android
             launch {
                 snapshotFlow { app.runningPojieTasks.toList() }.collect { currentList ->
                     val targetSsid = currentWorkingSsid
-                    if (currentList.isEmpty() || (targetSsid != null && currentList.none { it.ssid == targetSsid })) {
+                    if (
+                        currentList.isEmpty() ||
+                        (targetSsid != null && currentList.none { it.ssid == targetSsid })
+                    ) {
+                        currentWorkerJob?.cancel()
+                    }
+                }
+            }
+
+            launch {
+                snapshotFlow { app.runningPojieTasks.size }.collect {
+                    if (currentWorkingSsid == null) {
                         currentWorkerJob?.cancel()
                     }
                 }
@@ -304,14 +345,28 @@ wifi密码暴力破解工具 v3 for Android
                 log("$timeTag 尝试: (${task.ssid}, $currentPass) ...")
 
                 currentWorkerJob?.join()
+                currentWorkingSsid = null
+
                 timeTag = getLogTime()
                 if (currentWorkerJob?.isCancelled == true) {
                     app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: 任务中断")
-                    ShizukuUtil.disconnectWifi()
                 } else {
                     if (taskResult != SinglePojieTask.RESULT_ERROR) app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
-                    ShizukuUtil.disconnectWifi() //干完事情恢复原样可是好习惯
                 }
+
+                if (connectWifiApi29Callback != null) {
+                    connectWifiApi29Callback?.let {
+                        ApiUtil.cancelWifiRequest(
+                            this@PojieService,
+                            it
+                        )
+                    }
+                    connectWifiApi29Callback = null
+                } else when (pojieSettings.enableMode) {
+                    1 -> ShizukuUtil.disconnectWifi()
+                    2 -> ApiUtil.disconnectWifi(this@PojieService)
+                }
+
                 when (taskResult) {
                     SinglePojieTask.RESULT_SUCCESS -> {
                         log("连接成功: (${task.ssid}, $currentPass)")
@@ -377,6 +432,22 @@ wifi密码暴力破解工具 v3 for Android
             )
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(serviceChannel)
+        }
+    }
+
+    private suspend fun connectToWifiApi29(
+        ssid: String,
+        pass: String,
+        callback: (Boolean) -> Unit
+    ): ConnectivityManager.NetworkCallback? {
+        val foregroundActivity = ActivityStack.get()
+
+        return if (foregroundActivity != null) {
+            withContext(Dispatchers.Main) {
+                ApiUtil.connectToWifiApi29(foregroundActivity, ssid, pass, callback)
+            }
+        } else {
+            ApiUtil.connectToWifiApi29(this, ssid, pass, callback)
         }
     }
 }

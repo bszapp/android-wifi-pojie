@@ -28,6 +28,7 @@ object ApiUtil {
     }
 
     fun setWifiEnabled(context: Context, enabled: Boolean): Boolean {
+        if (isWifiEnabled(context) == enabled) return true
         val wifiManager =
             context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         return try {
@@ -43,8 +44,10 @@ object ApiUtil {
         ssid: String,
         password: String,
         onStatus: (Boolean) -> Unit = {}
-    ) {
-        Log.d("ApiUtil", "connectToWifiApi29 ssid: $ssid, password: $password")
+    ): ConnectivityManager.NetworkCallback? {
+        val connectivityManager =
+            context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
         try {
             val builder = WifiNetworkSpecifier.Builder().setSsid(ssid)
             if (password.isNotEmpty()) {
@@ -56,23 +59,45 @@ object ApiUtil {
                 .setNetworkSpecifier(builder.build())
                 .build()
 
-            val connectivityManager =
-                context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val networkCallback = object : ConnectivityManager.NetworkCallback() {
+            val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     onStatus(true)
-                    connectivityManager.unregisterNetworkCallback(this)
+                    clearCallback()
                 }
 
                 override fun onUnavailable() {
                     onStatus(false)
-                    connectivityManager.unregisterNetworkCallback(this)
+                    clearCallback()
+                }
+
+                private fun clearCallback() {
+                    try {
+                        connectivityManager.unregisterNetworkCallback(this)
+                    } catch (_: Exception) {
+                    }
                 }
             }
-            connectivityManager.requestNetwork(networkRequest, networkCallback)
+            connectivityManager.requestNetwork(networkRequest, callback)
+
+            return callback
         } catch (_: Exception) {
             onStatus(false)
+            return null
         }
+    }
+
+    fun cancelWifiRequest(context: Context, callback: ConnectivityManager.NetworkCallback) {
+        val connectivityManager =
+            context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        callback.let {
+            connectivityManager.unregisterNetworkCallback(it)
+        }
+    }
+
+    fun disconnectWifi(context: Context) {
+        val wifiManager =
+            context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiManager.disconnect()
     }
 
     fun connectToWifiApi28(context: Context, ssid: String, password: String): Boolean {

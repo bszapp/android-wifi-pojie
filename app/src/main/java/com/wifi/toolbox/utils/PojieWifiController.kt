@@ -3,6 +3,7 @@ package com.wifi.toolbox.utils
 import android.app.Activity
 import android.content.Context
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.structs.*
 import com.wifi.toolbox.ui.items.*
@@ -18,6 +19,7 @@ interface PojieWifiController {
     fun toggleWifiOn()
     fun applyLocation()
     fun enableLocation()
+    fun disconnectWifi()
 }
 
 @Composable
@@ -27,10 +29,10 @@ fun rememberPojieWifiController(
     settings: PojieSettings
 ): PojieWifiController {
     val scope = rememberCoroutineScope()
-    var uiState by remember { mutableStateOf<ScreenState>(ScreenState.Idle) }
+    var uiState by rememberSaveable { mutableStateOf<ScreenState>(ScreenState.Idle) }
     var refreshJob by remember { mutableStateOf<Job?>(null) }
-    var trigger by remember { mutableIntStateOf(0) }
-    var showScanResult by remember { mutableStateOf(true) }
+    var trigger by rememberSaveable { mutableIntStateOf(0) }
+    var showScanResult by rememberSaveable { mutableStateOf(true) }
 
     val currentRunningTasks = app.runningPojieTasks
 
@@ -63,18 +65,21 @@ fun rememberPojieWifiController(
                             uiState = ScreenState.Success(sendSucceed)
                             if (sendSucceed) {
                                 showScanResult = false
-                                repeat(MIN_SCAN_TIME / SCAN_INTERVAL) {
-                                    trigger += 1
+                                repeat(MIN_SCAN_TIME / SCAN_INTERVAL) { //心理作用？
+                                    trigger++
                                     delay(SCAN_INTERVAL.toLong())
                                 }
                                 showScanResult = true
                                 repeat((MAX_SCAN_TIME - MIN_SCAN_TIME) / SCAN_INTERVAL) {
-                                    trigger += 1
+                                    trigger++
                                     delay(SCAN_INTERVAL.toLong())
                                 }
                             } else {
-                                trigger += 1
+                                showScanResult = false
+                                trigger++
+                                delay(MIN_SCAN_TIME.toLong()) //心理作用？
                                 showScanResult = true
+                                trigger++
                             }
                             refreshJob = null
                         }
@@ -209,13 +214,23 @@ fun rememberPojieWifiController(
             }
 
             override fun toggleWifiOn() {
-                if (settings.enableMode == 1) checkShizukuUI(app) {
-                    ShizukuUtil.setWifiEnabled(
-                        true
+                when (settings.enableMode) {
+                    0 -> app.alert("缺失参数", "开关wifi实现为空")
+                    1 -> checkShizukuUI(app) {
+                        ShizukuUtil.setWifiEnabled(true)
+                        reload()
+                    }
+
+                    2 -> {
+                        ApiUtil.setWifiEnabled(context, true)
+                        reload()
+                    }
+
+                    else -> app.alert(
+                        "缺失参数",
+                        "前面的区域，以后再来探索吧(enableMode=${settings.enableMode})"
                     )
                 }
-                else app.alert("缺失参数", "实现为空")
-                reload()
             }
 
             override fun applyLocation() {
@@ -224,6 +239,21 @@ fun rememberPojieWifiController(
 
             override fun enableLocation() {
                 if (ApiUtil.enableLocation(context)) reload()
+            }
+
+            override fun disconnectWifi() {
+                when (settings.enableMode) {
+                    0 -> app.alert("缺失参数", "管理已保存网络实现为空")
+                    1 -> {
+                        ShizukuUtil.disconnectWifi()
+                        trigger++
+                    }
+
+                    else -> app.alert(
+                        "缺失参数",
+                        "前面的区域，以后再来探索吧(enableMode=${settings.enableMode})"
+                    )
+                }
             }
         }
     }

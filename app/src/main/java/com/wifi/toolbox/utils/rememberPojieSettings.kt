@@ -16,7 +16,6 @@ fun rememberPojieSettings(context: Context): MutableState<PojieSettings> {
             PojieSettings(
                 readLogMode = prefs.getInt(PojieSettings.READ_LOG_MODE_KEY, PojieSettings.READ_LOG_MODE_DEFAULT),
                 connectMode = prefs.getInt(PojieSettings.CONNECT_MODE_KEY, PojieSettings.CONNECT_MODE_DEFAULT),
-                manageSavedMode = prefs.getInt(PojieSettings.MANAGE_SAVED_MODE_KEY, PojieSettings.MANAGE_SAVED_MODE_DEFAULT),
                 scanMode = prefs.getInt(PojieSettings.SCAN_MODE_KEY, PojieSettings.SCAN_MODE_DEFAULT),
                 allowScanUseCommand = prefs.getBoolean(PojieSettings.ALLOW_SCAN_USE_COMMAND_KEY, PojieSettings.ALLOW_SCAN_USE_COMMAND_DEFAULT),
                 enableMode = prefs.getInt(PojieSettings.ENABLE_MODE_KEY, PojieSettings.ENABLE_MODE_DEFAULT),
@@ -37,7 +36,6 @@ fun rememberPojieSettings(context: Context): MutableState<PojieSettings> {
                     prefs.edit {
                         putInt(PojieSettings.READ_LOG_MODE_KEY, s.readLogMode)
                         putInt(PojieSettings.CONNECT_MODE_KEY, s.connectMode)
-                        putInt(PojieSettings.MANAGE_SAVED_MODE_KEY, s.manageSavedMode)
                         putInt(PojieSettings.SCAN_MODE_KEY, s.scanMode)
                         putBoolean(PojieSettings.ALLOW_SCAN_USE_COMMAND_KEY, s.allowScanUseCommand)
                         putInt(PojieSettings.ENABLE_MODE_KEY, s.enableMode)

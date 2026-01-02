@@ -27,18 +27,35 @@ fun SettingsPage(
 
     val app = LocalContext.current.applicationContext as MyApplication
 
-    val readLogValues = listOf("--请选择--", "命令行", "系统API")
+    val readLogValues = listOf(
+        "--请选择--",
+        "[命令行] logcat",
+        "❌[应用API] BroadcastReceiver"
+    )
     val connectValues = listOf(
         "--请选择--",
-        "系统隐藏API（Shizuku）",
-        "系统常规API-WifiManager",
-        "系统常规API-连接到设备",
-        "命令行"
+        "[Shizuku] IWifiManager",
+        "[应用API] WifiManager",
+        "[应用API] 连接到设备",
+        "❌命令行"
     )
-    val manageSavedValues = listOf("空闲", "系统常规API", "命令行")
-    val scanValues = listOf("空闲", "系统隐藏API（Shizuku）", "系统常规API", "命令行")
-    val turnOnValues = listOf("空闲", "系统隐藏API（Shizuku）", "系统常规API", "命令行")
-    val commandMethodValues = listOf("--请选择--", "shizuku", "root")
+    val scanValues = listOf(
+        "空闲",
+        "[Shizuku] IWifiManager",
+        "[应用API] WifiManager",
+        "❌命令行"
+    )
+    val turnOnValues = listOf(
+        "空闲",
+        "[Shizuku] IWifiManager",
+        "[应用API] WifiManager",
+        "❌命令行"
+    )
+    val commandMethodValues = listOf(
+        "--请选择--",
+        "[Shizuku] newProcess",
+        "❌[root] su -c"
+    )
 
     ProvidePreferenceLocals {
         LazyColumn(
@@ -103,25 +120,6 @@ fun SettingsPage(
 
             item {
                 ListPreference(
-                    value = pojieSettings.manageSavedMode,
-                    onValueChange = { newValue ->
-                        onPojieSettingsChange(
-                            pojieSettings.copy(
-                                manageSavedMode = newValue
-                            )
-                        )
-                    },
-                    title = { Text("管理已保存wifi") },
-                    summary = { Text(manageSavedValues[pojieSettings.manageSavedMode]) },
-                    icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
-                    values = manageSavedValues.indices.toList(),
-                    valueToText = { item: Int -> AnnotatedString(manageSavedValues[item]) },
-                    type = ListPreferenceType.DROPDOWN_MENU,
-                )
-            }
-
-            item {
-                ListPreference(
                     value = pojieSettings.scanMode,
                     onValueChange = { newValue -> onPojieSettingsChange(pojieSettings.copy(scanMode = newValue)) },
                     title = { Text("扫描wifi") },
@@ -165,7 +163,7 @@ fun SettingsPage(
                             )
                         )
                     },
-                    title = { Text("开关wifi") },
+                    title = { Text("调整wifi状态") },
                     summary = { Text(turnOnValues[pojieSettings.enableMode]) },
                     icon = { Icon(Icons.Outlined.ToggleOn, contentDescription = null) },
                     values = turnOnValues.indices.toList(),
@@ -176,7 +174,6 @@ fun SettingsPage(
 
             val showCommandMethod = pojieSettings.readLogMode == 1 ||
                     pojieSettings.connectMode == 4 ||
-                    pojieSettings.manageSavedMode == 2 ||
                     pojieSettings.scanMode == 3 ||
                     pojieSettings.enableMode == 3
 

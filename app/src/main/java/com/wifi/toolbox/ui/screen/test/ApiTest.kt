@@ -84,6 +84,13 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                             }
                         })
                     ActionChip(
+                        text = "断开wifi",
+                        icon = Icons.Filled.WifiOff,
+                        onClick = {
+                            ApiUtil.disconnectWifi(context)
+                            logState.addLog("请求已发送")
+                        })
+                    ActionChip(
                         text = "扫描wifi",
                         icon = Icons.Filled.Radar,
                         onClick = {
@@ -129,7 +136,8 @@ fun ApiTest(logState: LogState, modifier: Modifier = Modifier) {
                 Button(
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            ApiUtil.connectToWifiApi29(context, name, password) { success ->
+                            ApiUtil.connectToWifiApi29(context, name, password)
+                            { success ->
                                 logState.addLog(if (success) "连接成功" else "连接失败")
                             }
                         } else {
