@@ -30,7 +30,7 @@ fun SettingsPage(
     val readLogValues = listOf(
         "--请选择--",
         "[命令行] logcat",
-        "❌[应用API] BroadcastReceiver"
+        "[应用API] BroadcastReceiver"
     )
     val connectValues = listOf(
         "--请选择--",

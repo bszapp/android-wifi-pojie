@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -40,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -104,166 +106,82 @@ fun LogView(
                     .then(if (!logState.wordWrap) Modifier.horizontalScroll(horizontalScrollState) else Modifier)
             )
         }
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            LogActionsSplitButton(
-                logState = logState,
-                context = context,
-                verticalScrollState = verticalScrollState
-            )
-        }
+        LogActionsFab(
+            logState = logState,
+            context = context,
+            verticalScrollState = verticalScrollState,
+            fabVisible = true,
+            modifier = Modifier.padding(start = 8.dp, top = 8.dp)
+        )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun LogActionsSplitButton(logState: LogState, context: Context, verticalScrollState: ScrollState) {
-
-    var showMoreActions by remember { mutableStateOf(false) }
+fun BoxScope.LogActionsFab(
+    logState: LogState,
+    context: Context,
+    verticalScrollState: ScrollState,
+    fabVisible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var fabMenuExpanded by rememberSaveable { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
-    Row(
-        Modifier.padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
-    ) {
-
-        val buttonColor = ToggleButtonDefaults.toggleButtonColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            checkedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-            checkedContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    val menuItems = listOf(
+        FabMenuItem(
+            label = "自动滚动",
+            icon = Icons.Default.KeyboardDoubleArrowDown,
+            isSelected = logState.autoScroll,
+            onClick = { logState.autoScroll = !logState.autoScroll }
+        ),
+        FabMenuItem(
+            label = "自动换行",
+            icon = Icons.AutoMirrored.Filled.WrapText,
+            isSelected = logState.wordWrap,
+            onClick = { logState.wordWrap = !logState.wordWrap }
+        ),
+        FabMenuItem(
+            label = "清空日志",
+            icon = Icons.Filled.DeleteSweep,
+            onClick = { logState.clear() }
+        ),
+        FabMenuItem(
+            label = "复制日志",
+            icon = Icons.Filled.ContentCopy,
+            onClick = {
+                val clipboardManager =
+                    context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clipData = ClipData.newPlainText("Log", logState.logs.joinToString("\n"))
+                clipboardManager.setPrimaryClip(clipData)
+            }
+        ),
+        FabMenuItem(
+            label = "滚动到顶部",
+            icon = Icons.Default.VerticalAlignTop,
+            onClick = { coroutineScope.launch { verticalScrollState.animateScrollTo(0) } }
+        ),
+        FabMenuItem(
+            label = "滚动到底部",
+            icon = Icons.Default.VerticalAlignBottom,
+            onClick = {
+                coroutineScope.launch {
+                    verticalScrollState.animateScrollTo(
+                        verticalScrollState.maxValue
+                    )
+                }
+            }
         )
+    )
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
-        ) {
-            ToggleButton(
-                checked = false,
-                onCheckedChange = { logState.clear() },
-                modifier = Modifier,
-                shapes = ButtonGroupDefaults.connectedLeadingButtonShapes(),
-                colors = buttonColor
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.DeleteSweep,
-                    contentDescription = "清空日志",
-                )
-            }
-
-            ToggleButton(
-                checked = false,
-                onCheckedChange = {
-                    val clipboardManager =
-                        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clipData = ClipData.newPlainText("Log", logState.logs.joinToString("\n"))
-                    clipboardManager.setPrimaryClip(clipData)
-                },
-
-                modifier = Modifier,
-                shapes = ButtonGroupDefaults.connectedMiddleButtonShapes(),
-                colors = buttonColor
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.ContentCopy,
-                    contentDescription = "复制日志",
-                )
-            }
-
-            Box {
-                ToggleButton(
-                    checked = showMoreActions,
-                    onCheckedChange = { showMoreActions = it },
-                    modifier = Modifier,
-                    shapes = ButtonGroupDefaults.connectedTrailingButtonShapes(),
-                    colors = buttonColor
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.MoreVert,
-                        contentDescription = "更多操作",
-                    )
-                }
-
-                DropdownMenu(
-                    expanded = showMoreActions,
-                    onDismissRequest = { showMoreActions = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("自动滚动") },
-                        onClick = {
-                            logState.autoScroll = !logState.autoScroll
-                            showMoreActions = false
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.KeyboardDoubleArrowDown,
-                                contentDescription = "自动滚动"
-                            )
-                        },
-                        trailingIcon = {
-                            if (logState.autoScroll) {
-                                Icon(Icons.Filled.Check, contentDescription = null)
-                            }
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("自动换行") },
-                        onClick = {
-                            logState.wordWrap = !logState.wordWrap
-                            showMoreActions = false
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.WrapText,
-                                contentDescription = "自动换行"
-                            )
-                        },
-                        trailingIcon = {
-                            if (logState.wordWrap) {
-                                Icon(Icons.Filled.Check, contentDescription = null)
-                            }
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("滚动到顶部") },
-                        onClick = {
-                            showMoreActions = false
-                            coroutineScope.launch { verticalScrollState.scrollTo(0) }
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.VerticalAlignTop,
-                                contentDescription = "滚动到顶部"
-                            )
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("滚动到底部") },
-                        onClick = {
-                            showMoreActions = false
-                            coroutineScope.launch {
-                                verticalScrollState.animateScrollTo(
-                                    verticalScrollState.maxValue
-                                )
-                            }
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.VerticalAlignBottom,
-                                contentDescription = "滚动到底部"
-                            )
-                        }
-                    )
-                }
-            }
-        }
-
-    }
+    CustomFabMenu(
+        expanded = fabMenuExpanded,
+        onCheckedChange = { fabMenuExpanded = it },
+        items = menuItems,
+        visible = fabVisible,
+        modifier = modifier
+    )
 }
-
 
 @Preview(showBackground = true)
 @Composable
