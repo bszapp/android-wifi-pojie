@@ -22,13 +22,19 @@ fun WifiPojieItem(
     modifier: Modifier,
     wifi: WifiInfo,
     runningInfo: PojieRunInfo?,
+    finishedInfo: String?,
     onStartClick: ((String) -> Unit) = {},
     onStopClick: ((String) -> Unit) = {},
 ) {
     var stableInfo by remember { mutableStateOf<PojieRunInfo?>(null) }
+    var stableFinishedInfo by remember { mutableStateOf<String?>(null) }
     if (runningInfo != null) {
         stableInfo = runningInfo
     }
+    if (finishedInfo != null) {
+        stableFinishedInfo = finishedInfo
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -67,6 +73,17 @@ fun WifiPojieItem(
                             text = if (wifi.level == 0) "未知" else "${wifi.level} dBm",
                             style = MaterialTheme.typography.bodySmall
                         )
+                        AnimatedVisibility(
+                            visible = finishedInfo != null,
+                            enter = expandVertically(),
+                            exit = shrinkVertically()
+                        ) {
+                            Text(
+                                text = stableFinishedInfo ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
 
                     Button(

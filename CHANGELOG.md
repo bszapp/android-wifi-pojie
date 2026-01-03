@@ -1,3 +1,12 @@
+# v3.0.0_Alpha-03
+
+- 所有功能支持无Shizuku模式（纯系统API）
+- 优化运行输出区域布局
+- 增加上次尝试成功失败标记
+- debug版本增加横幅，并修复无法识别Shizuku的问题
+
+- 以后所有版本使用Github Actions构建，同时增加discussion功能
+
 # v3.0.0_Alpha-02
 
 功能更新：

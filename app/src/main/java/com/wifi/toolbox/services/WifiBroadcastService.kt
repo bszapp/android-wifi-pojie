@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.net.NetworkInfo
 import android.net.wifi.SupplicantState
 import android.net.wifi.WifiManager
+import android.util.Log
 import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.structs.WifiLogData
 import kotlinx.coroutines.*
@@ -14,6 +15,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
 class WifiBroadcastService(private val context: Context) : AutoCloseable {
+
+    private val MIN_INTERVAL = 200L
 
     private val app = context.applicationContext as MyApplication
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -30,13 +33,14 @@ class WifiBroadcastService(private val context: Context) : AutoCloseable {
             val action = intent.action ?: return
 
             if (WifiManager.SUPPLICANT_STATE_CHANGED_ACTION == action) {
-                val newState = intent.getParcelableExtra<SupplicantState>(WifiManager.EXTRA_NEW_STATE)
+                val newState =
+                    intent.getParcelableExtra<SupplicantState>(WifiManager.EXTRA_NEW_STATE)
                 val error = intent.getIntExtra(WifiManager.EXTRA_SUPPLICANT_ERROR, -1)
 
-                if (error == WifiManager.ERROR_AUTHENTICATING) {
+                if (error == WifiManager.ERROR_AUTHENTICATING && app.pojieConfig.failureFlag == 0) {
                     cancelTimeout()
                     emitEvent(WifiLogData.EVENT_CONNECT_FAILED)
-                } else if (newState == SupplicantState.FOUR_WAY_HANDSHAKE) {
+                } else if (newState == SupplicantState.FOUR_WAY_HANDSHAKE && app.pojieConfig.failureFlag == 1) {
                     startHandshakeTimeoutMonitor()
                 }
             } else if (WifiManager.NETWORK_STATE_CHANGED_ACTION == action) {

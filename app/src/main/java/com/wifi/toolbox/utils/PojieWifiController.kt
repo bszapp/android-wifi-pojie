@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import com.wifi.toolbox.MyApplication
 import com.wifi.toolbox.structs.*
 import com.wifi.toolbox.ui.items.*
@@ -14,6 +15,7 @@ interface PojieWifiController {
     val isScanning: Boolean
     val trigger: Int
     val runningTasks: List<PojieRunInfo>
+    val finishedInfo: SnapshotStateMap<String, String>
     fun reload()
     fun fetchResults(): ScanResult
     fun toggleWifiOn()
@@ -35,6 +37,8 @@ fun rememberPojieWifiController(
     var showScanResult by rememberSaveable { mutableStateOf(true) }
 
     val currentRunningTasks = app.runningPojieTasks
+    val currentFinishedTasks = app.finishedPojieTasksTip
+
 
     return remember(
         settings,
@@ -49,6 +53,7 @@ fun rememberPojieWifiController(
             override val isScanning = refreshJob?.isActive == true
             override val trigger = trigger
             override val runningTasks = currentRunningTasks
+            override val finishedInfo = currentFinishedTasks
 
             val MIN_SCAN_TIME = 500
             val MAX_SCAN_TIME = 3000

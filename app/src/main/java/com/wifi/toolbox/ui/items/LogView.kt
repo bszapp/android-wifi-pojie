@@ -51,6 +51,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -82,30 +83,40 @@ fun LogView(
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.background)
     ) {
-        SelectionContainer {
-            val allLogs = logState.logs.joinToString("\n")
-
-            Text(
-                text = allLogs,
-                fontFamily = FontFamily(
-                    Font(resId = R.font.mono, weight = FontWeight.Normal)
-                ),
-                fontSize = 14.sp,
-                softWrap = logState.wordWrap,
-                style = TextStyle(
-                    lineHeight = 19.sp,
-                    lineHeightStyle = LineHeightStyle(
-                        alignment = LineHeightStyle.Alignment.Center,
-                        trim = LineHeightStyle.Trim.Both
-                    )
-                ),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(8.dp)
-                    .verticalScroll(verticalScrollState)
-                    .then(if (!logState.wordWrap) Modifier.horizontalScroll(horizontalScrollState) else Modifier)
-            )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(verticalScrollState)
+                .then(if (!logState.wordWrap) Modifier.horizontalScroll(horizontalScrollState) else Modifier)
+        ) {
+            SelectionContainer {
+                val allLogs = logState.logs.joinToString("\n")
+                Text(
+                    text = allLogs,
+                    fontFamily = FontFamily(
+                        Font(resId = R.font.mono, weight = FontWeight.Normal)
+                    ),
+                    fontSize = 14.sp,
+                    softWrap = logState.wordWrap,
+                    style = TextStyle(
+                        lineHeight = 19.sp,
+                        lineHeightStyle = LineHeightStyle(
+                            alignment = LineHeightStyle.Alignment.Center,
+                            trim = LineHeightStyle.Trim.Both
+                        ),
+                        lineBreak = LineBreak(
+                            strategy = LineBreak.Strategy.Simple,
+                            strictness = LineBreak.Strictness.Loose,
+                            wordBreak = LineBreak.WordBreak.Default
+                        )
+                    ),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp)
+                )
+            }
         }
+
         LogActionsFab(
             logState = logState,
             context = context,
@@ -183,7 +194,7 @@ fun BoxScope.LogActionsFab(
     )
 }
 
-@Preview(showBackground = true)
+@Preview(showBackground = true, device = "spec:width=1080px,height=1080px,dpi=480")
 @Composable
 fun LogViewPreview() {
     val logState = rememberLogState()

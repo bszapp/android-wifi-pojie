@@ -50,9 +50,12 @@ data class ScanResult(
 }
 
 sealed class ScreenState : Parcelable {
-    @Parcelize object Idle : ScreenState()
-    @Parcelize data class Success(val sendSucceed: Boolean) : ScreenState()
-    @Parcelize data class Error(val message: String, val type: Int) : ScreenState()
+    @Parcelize
+    object Idle : ScreenState()
+    @Parcelize
+    data class Success(val sendSucceed: Boolean) : ScreenState()
+    @Parcelize
+    data class Error(val message: String, val type: Int) : ScreenState()
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -242,7 +245,8 @@ fun RunListView(
                                         wifi = wifi,
                                         runningInfo = runningTasks.find { it.ssid == wifi.ssid },
                                         onStartClick = onStartClick,
-                                        onStopClick = onStopClick
+                                        onStopClick = onStopClick,
+                                        finishedInfo = controller.finishedInfo[wifi.ssid]
                                     )
                                 }
                                 item {

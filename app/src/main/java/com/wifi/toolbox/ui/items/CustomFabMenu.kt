@@ -38,15 +38,13 @@ fun BoxScope.CustomFabMenu(
                 positionProvider = TooltipDefaults.rememberTooltipPositionProvider(
                     if (expanded) TooltipAnchorPosition.Start else TooltipAnchorPosition.Above
                 ),
-                tooltip = { PlainTooltip { Text("Toggle menu") } },
+                tooltip = { PlainTooltip { Text("更多操作") } },
                 state = rememberTooltipState(),
             ) {
                 ToggleFloatingActionButton(
                     modifier = Modifier
                         .semantics {
                             traversalIndex = -1f
-                            stateDescription = if (expanded) "Expanded" else "Collapsed"
-                            contentDescription = "Toggle menu"
                         }
                         .animateFloatingActionButton(
                             visible = visible || expanded,
@@ -74,7 +72,7 @@ fun BoxScope.CustomFabMenu(
         items.forEachIndexed { i, item ->
             FloatingActionButtonMenuItem(
                 modifier = Modifier
-                    .height(42.dp) // 通过 Modifier 控制高度
+                    .height(42.dp)
                     .semantics {
                         isTraversalGroup = true
                         if (i == items.size - 1) {

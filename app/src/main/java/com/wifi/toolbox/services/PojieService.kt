@@ -380,9 +380,14 @@ wifi密码暴力破解工具 v3 for Android
                 timeTag = getLogTime()
                 if (currentWorkerJob?.isCancelled == true) {
                     app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: 任务中断")
+                    app.finishedPojieTasksTip[task.ssid]="任务中断(index=${task.tryIndex})"
                     forgetLastNetwork()
                 } else {
-                    if (taskResult != SinglePojieTask.RESULT_ERROR) app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
+                    if (taskResult != SinglePojieTask.RESULT_ERROR) {
+                        app.logState.setLine("$timeTag 尝试: (${task.ssid}, $currentPass) 结果: $taskResult")
+                    }else{
+                        app.finishedPojieTasksTip[task.ssid]="执行出错，请查看输出"
+                    }
                 }
 
                 if (connectWifiApi29Callback != null) {
@@ -400,6 +405,7 @@ wifi密码暴力破解工具 v3 for Android
                 when (taskResult) {
                     SinglePojieTask.RESULT_SUCCESS -> {
                         log("连接成功: (${task.ssid}, $currentPass)")
+                        app.finishedPojieTasksTip[task.ssid] = "连接成功：$currentPass"
                         app.stopTaskByName(task.ssid)
                     }
 
@@ -447,6 +453,7 @@ wifi密码暴力破解工具 v3 for Android
 
         if (nextIndex >= task.tryList.size) {
             forgetLastNetwork()
+            app.finishedPojieTasksTip[ssid] = "全部尝试失败(size=${task.tryList.size})"
             app.stopTaskByName(ssid)
         } else {
             app.updateTaskState(ssid) {

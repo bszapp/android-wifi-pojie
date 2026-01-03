@@ -22,9 +22,9 @@ import kotlinx.coroutines.cancel
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuProvider
 import android.content.Intent
+import androidx.compose.runtime.mutableStateMapOf
 import com.wifi.toolbox.services.PojieService
 import com.wifi.toolbox.utils.ActivityStack
-import kotlin.text.clear
 
 
 class MyApplication : Application() {
@@ -142,6 +142,8 @@ class MyApplication : Application() {
     }
 
     val runningPojieTasks = mutableStateListOf<PojieRunInfo>()
+    val finishedPojieTasksTip = mutableStateMapOf<String, String>()
+
     fun startTask(data: PojieRunInfo) {
         if (runningPojieTasks.none { it.ssid == data.ssid }) {
             if (runningPojieTasks.isEmpty()) {
@@ -149,6 +151,7 @@ class MyApplication : Application() {
                 startService(serviceIntent)
             }
             runningPojieTasks.add(data)
+            finishedPojieTasksTip.remove(data.ssid)
         }
     }
 
@@ -162,5 +165,4 @@ class MyApplication : Application() {
             runningPojieTasks[index] = transform(runningPojieTasks[index])
         }
     }
-
 }
