@@ -27,6 +27,7 @@ import io.github.bszapp.wifitoolbox.uidefault.component.SplicedGroupItem
 @Composable
 fun ServiceStatusDialog(
     uidStr: String,
+    versionText: String,
     onDismiss: () -> Unit,
     onExit: () -> Unit,
     onReselect: () -> Unit,
@@ -54,6 +55,22 @@ fun ServiceStatusDialog(
                 )
                 Text(
                     text = uidStr,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = "启动版本",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                Text(
+                    text = versionText,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurface,

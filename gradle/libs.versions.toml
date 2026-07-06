@@ -1,6 +1,5 @@
 [versions]
-agp = "9.1.1"
-androidappprocess = "1.4.3"
+agp = "9.2.1"
 api = "13.1.5"
 coreKtx = "1.19.0"
 junit = "4.13.2"
@@ -9,15 +8,14 @@ espressoCore = "3.7.0"
 lifecycleRuntimeKtx = "2.11.0"
 activityCompose = "1.13.0"
 kotlin = "2.4.0"
-composeBom = "2026.06.00"
+composeBom = "2026.06.01"
 appcompat = "1.7.1"
 material = "1.14.0"
 materialKolor = "4.1.1"
-runtime = "1.11.3"
-material3-experimental = "1.5.0-alpha22"
+runtime = "1.11.4"
+material3-experimental = "1.5.0-alpha23"
 
 [libraries]
-androidappprocess = { module = "io.github.iamr0s:AndroidAppProcess", version.ref = "androidappprocess" }
 androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
 androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }

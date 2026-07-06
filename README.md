@@ -1,0 +1,4 @@
+一键打包：
+```powershell
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); $OutputEncoding=[System.Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.IO.Compression.FileSystem; $zipName="$(Get-Date -Format 'yyyyMMddHHmmss').zip"; $zip=(Join-Path $PWD $zipName); Remove-Item $zip -ErrorAction SilentlyContinue; $archive=[System.IO.Compression.ZipFile]::Open($zip,'Create'); try { git -c core.quotepath=false ls-files --cached --others --exclude-standard | ? { $_ -and ($_ -notmatch '^[^\\/]+\.zip$') -and (Test-Path -LiteralPath $_ -PathType Leaf) } | % { [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive,(Resolve-Path -LiteralPath $_).Path,($_ -replace '\\','/')) > $null } } finally { $archive.Dispose() }
+```

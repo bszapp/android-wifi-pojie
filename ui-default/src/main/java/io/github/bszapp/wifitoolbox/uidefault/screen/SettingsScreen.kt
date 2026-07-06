@@ -22,6 +22,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ServiceStatusDialog
 
@@ -31,6 +32,8 @@ fun SettingsScreen(viewModel: DefaultViewModel = viewModel()) {
     val uid by viewModel.startup.uid.collectAsStateWithLifecycle()
     val pid by viewModel.startup.pid.collectAsStateWithLifecycle()
     val mode by viewModel.startup.mode.collectAsStateWithLifecycle()
+    val versionName by viewModel.startup.serviceVersionName.collectAsStateWithLifecycle()
+    val versionCode by viewModel.startup.serviceVersionCode.collectAsStateWithLifecycle()
     val scrollBehavior =
         TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
@@ -44,11 +47,14 @@ fun SettingsScreen(viewModel: DefaultViewModel = viewModel()) {
     else MaterialTheme.colorScheme.onErrorContainer
     val icon = if (isActive) Icons.Rounded.CheckCircle else Icons.Rounded.ErrorOutline
     val title = if (isActive) "服务运行中" else "未激活"
-    val subtitle = if (isActive) "$mode  UID:$uid  PID:$pid" else "点击选择工作模式"
+    val modeText = mode.displayName()
+    val versionText = formatVersion(versionName, versionCode)
+    val subtitle = if (isActive) "$modeText  $versionText  UID:$uid  PID:$pid" else "点击选择工作模式"
 
     if (showDialog) {
         ServiceStatusDialog(
             uidStr = uidStr ?: "获取失败",
+            versionText = versionText,
             onDismiss = { showDialog = false },
             onExit = {
                 showDialog = false
@@ -130,4 +136,18 @@ fun SettingsScreen(viewModel: DefaultViewModel = viewModel()) {
             }
         }
     }
+}
+
+
+private fun StartupMode?.displayName(): String = when (this) {
+    StartupMode.SHIZUKU -> "Shizuku"
+    StartupMode.SHIZUKU_TERMINAL -> "Terminal"
+    StartupMode.ROOT -> "Root"
+    null -> "未知"
+}
+
+private fun formatVersion(name: String?, code: Long?): String {
+    val versionName = name?.takeIf { it.isNotBlank() } ?: "unknown"
+    val versionCode = code?.takeIf { it >= 0 }?.toString() ?: "-1"
+    return "$versionName($versionCode)"
 }

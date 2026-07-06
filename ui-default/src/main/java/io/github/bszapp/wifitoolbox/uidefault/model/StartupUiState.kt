@@ -15,12 +15,21 @@ class StartupUiState(private val controller: IAppController, scope: CoroutineSco
     val pid = controller.startup.state
         .map { it.servicePid }
         .stateIn(scope, SharingStarted.Eagerly, null)
+
     val uidStr = controller.startup.state
         .map { it.serviceUidStr }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
     val mode = controller.startup.state
         .map { it.selectedMode }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    val serviceVersionName = controller.startup.state
+        .map { it.serviceVersionName }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    val serviceVersionCode = controller.startup.state
+        .map { it.serviceVersionCode }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
     fun stop(exit: Boolean) = controller.startup.stop(exit)

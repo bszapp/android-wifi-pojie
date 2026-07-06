@@ -63,6 +63,7 @@ class ToolboxApp : Application(), IAppController {
         super.onCreate()
         processLauncher = ProcessLauncher(this)
         AppControllerProvider.register(this)
+        processLauncher.tryAutoReconnect()
 
         appScope.launch {
             startup.state.collect { state ->

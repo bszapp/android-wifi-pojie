@@ -6,5 +6,7 @@ data class StartupState(
     val errorException: Exception? = null,
     val serviceUid: Int? = null,
     val serviceUidStr: String? = null,
-    val servicePid: Int? = null
+    val servicePid: Int? = null,
+    val serviceVersionName: String? = null,
+    val serviceVersionCode: Long? = null
 )

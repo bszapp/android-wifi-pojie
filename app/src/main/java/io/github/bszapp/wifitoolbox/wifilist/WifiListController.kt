@@ -7,7 +7,7 @@ import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.contract.wifilist.ScanState
 import io.github.bszapp.wifitoolbox.contract.wifilist.ScanStatus
-import io.github.bszapp.wifitoolbox.services.mainservice.IMainService
+import io.github.bszapp.wifitoolbox.service.IMainService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

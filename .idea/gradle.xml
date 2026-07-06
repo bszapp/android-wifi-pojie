@@ -11,8 +11,7 @@
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/app" />
             <option value="$PROJECT_DIR$/contract" />
-            <option value="$PROJECT_DIR$/services" />
-            <option value="$PROJECT_DIR$/services/mainservice" />
+            <option value="$PROJECT_DIR$/service" />
             <option value="$PROJECT_DIR$/ui-default" />
           </set>
         </option>

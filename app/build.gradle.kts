@@ -36,13 +36,14 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
 dependencies {
     implementation(project(":ui-default"))
     implementation(project(":contract"))
-    implementation(project(":services:mainservice"))
+    implementation(project(":service"))
 
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.core.ktx)
@@ -60,7 +61,6 @@ dependencies {
 
     implementation(libs.api)
     implementation(libs.provider)
-    implementation(libs.androidappprocess)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

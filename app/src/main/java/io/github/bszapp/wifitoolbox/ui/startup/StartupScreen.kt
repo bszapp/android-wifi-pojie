@@ -17,6 +17,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.bszapp.wifitoolbox.contract.startup.RunningException
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus.*
+import io.github.bszapp.wifitoolbox.ui.component.TaggedLinkText
 import io.github.bszapp.wifitoolbox.uidefault.component.SplicedGroupItem
 
 
@@ -61,7 +62,7 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                                 imageVector = Icons.TwoTone.Construction,
                                 contentDescription = "Done",
                                 modifier = Modifier
-                                     .size(120.dp)
+                                    .size(120.dp)
                                     .padding(bottom = 16.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )
@@ -149,10 +150,12 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                                 fontWeight = FontWeight.SemiBold,
                                 textAlign = TextAlign.Center
                             )
-                            Text(
+                            TaggedLinkText(
                                 text = state.errorException?.message.toString(),
                                 style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(bottom = 8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 8.dp),
                                 textAlign = TextAlign.Center
                             )
                         }
@@ -172,8 +175,8 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                         StartupMode.ROOT -> "Root"
                     },
                     description = when (mode) {
-                        StartupMode.SHIZUKU -> "需要额外安装并启动Shizuku，有无root均支持，启动速度最快"
-                        StartupMode.SHIZUKU_TERMINAL -> "如果上一种方式无法启动，可尝试此方法，启动速度较慢"
+                        StartupMode.SHIZUKU -> "绑定Shizuku用户服务，需要额外安装并启动Shizuku，有无root均支持"
+                        StartupMode.SHIZUKU_TERMINAL -> "利用Shizuku完成服务启动，上一种方式无法启动可尝试此方法"
                         StartupMode.ROOT -> "适合已root的设备，不需要额外安装应用"
                     },
                     icon = when (mode) {

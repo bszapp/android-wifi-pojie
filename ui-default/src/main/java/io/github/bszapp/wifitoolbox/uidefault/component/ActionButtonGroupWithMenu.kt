@@ -205,7 +205,7 @@ fun ActionButtonGroupWithMenu(
                     ) {
                         // icon 或 title 任意非空才渲染标题区域
                         if (group.icon != null || group.title != null) {
-                            MenuDefaults.Label {
+                            MenuDefaults.DropdownMenuGroupLabel {
                                 Row {
                                     if (group.icon != null) {
                                         Icon(

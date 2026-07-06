@@ -2,6 +2,10 @@
 <manifest xmlns:tools="http://schemas.android.com/tools"
     xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
     <application
         android:name=".ToolboxApp"
         android:allowBackup="true"
@@ -25,6 +29,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <provider
+            android:name=".launcher.ToolboxServiceProvider"
+            android:authorities="io.github.bszapp.wifitoolbox.provider"
+            android:exported="true" />
 
         <!-- Shizuku -->
         <provider
