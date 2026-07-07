@@ -54,7 +54,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.github.bszapp.wifitoolbox.contract.wifilist.ScanStatus
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.widget.WifiList
 import kotlinx.coroutines.launch
@@ -62,8 +61,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun HomeScreen(vm: DefaultViewModel = viewModel()) {
-    val scanStatus by vm.wifiList.status.collectAsStateWithLifecycle()
-    val isScanning = scanStatus == ScanStatus.SCANNING
+    val isScanning by vm.wifiList.isScanning.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()

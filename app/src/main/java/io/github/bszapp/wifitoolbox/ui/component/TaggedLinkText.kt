@@ -2,70 +2,100 @@ package io.github.bszapp.wifitoolbox.ui.component
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TaggedLinkText(
     text: String,
     modifier: Modifier = Modifier,
     style: TextStyle = MaterialTheme.typography.bodyMedium,
-    textAlign: TextAlign = TextAlign.Start
+    color: Color = Color.Unspecified,
+    textAlign: TextAlign? = null,
+    verticalAlignment: Alignment.Vertical = Alignment.Top,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+    minLines: Int = 1,
+    onTextLayout: (TextLayoutResult) -> Unit = {},
 ) {
     val context = LocalContext.current
-    val segments = remember(text) { parseTaggedLinks(text) }
-    val arrangement = when (textAlign) {
-        TextAlign.Center -> Arrangement.Center
-        TextAlign.End, TextAlign.Right -> Arrangement.End
-        else -> Arrangement.Start
-    }
+    val linkColor = MaterialTheme.colorScheme.primary
+    val annotatedText = remember(text, linkColor) { buildTaggedAnnotatedString(text, linkColor) }
+    var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
 
-    FlowRow(
+    Box(
         modifier = modifier,
-        horizontalArrangement = arrangement
+        contentAlignment = combinedAlignment(textAlign.toHorizontalAlignment(), verticalAlignment)
     ) {
-        segments.forEach { segment ->
-            if (segment.isLink) {
-                Text(
-                    text = segment.text,
-                    style = style.copy(
-                        color = MaterialTheme.colorScheme.primary,
-                        textDecoration = TextDecoration.Underline
-                    ),
-                    modifier = Modifier.clickable {
-                        segment.href?.let { url ->
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        Text(
+            text = annotatedText,
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(annotatedText) {
+                    detectTapGestures { position: Offset ->
+                        val layout = layoutResult ?: return@detectTapGestures
+                        val offset = layout.getOffsetForPosition(position)
+                        annotatedText.getStringAnnotations(TAG_HREF, offset, offset)
+                            .firstOrNull()
+                            ?.item
+                            ?.let { url ->
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }
+                                return@detectTapGestures
                             }
-                        }
-                        segment.openPackage?.let { packageName ->
-                            runCatching {
-                                context.packageManager
-                                    .getLaunchIntentForPackage(packageName)
-                                    ?.let { context.startActivity(it) }
+
+                        annotatedText.getStringAnnotations(TAG_OPEN, offset, offset)
+                            .firstOrNull()
+                            ?.item
+                            ?.let { packageName ->
+                                runCatching {
+                                    context.packageManager
+                                        .getLaunchIntentForPackage(packageName)
+                                        ?.let { context.startActivity(it) }
+                                }
                             }
-                        }
                     }
-                )
-            } else {
-                Text(
-                    text = segment.text,
-                    style = style
-                )
+                },
+            style = style,
+            color = color,
+            textAlign = textAlign,
+            overflow = overflow,
+            softWrap = softWrap,
+            maxLines = maxLines,
+            minLines = minLines,
+            onTextLayout = { result ->
+                layoutResult = result
+                onTextLayout(result)
             }
-        }
+        )
     }
 }
 
@@ -75,6 +105,30 @@ private data class TaggedSegment(
     val openPackage: String? = null
 ) {
     val isLink: Boolean get() = href != null || openPackage != null
+}
+
+private fun buildTaggedAnnotatedString(input: String, linkColor: Color): AnnotatedString {
+    val segments = parseTaggedLinks(input)
+    return buildAnnotatedString {
+        segments.forEach { segment ->
+            val start = length
+            if (segment.isLink) {
+                withStyle(
+                    SpanStyle(
+                        color = linkColor,
+                        textDecoration = TextDecoration.Underline
+                    )
+                ) {
+                    append(segment.text)
+                }
+                val end = length
+                segment.href?.let { addStringAnnotation(TAG_HREF, it, start, end) }
+                segment.openPackage?.let { addStringAnnotation(TAG_OPEN, it, start, end) }
+            } else {
+                append(segment.text)
+            }
+        }
+    }
 }
 
 private fun parseTaggedLinks(input: String): List<TaggedSegment> {
@@ -106,3 +160,24 @@ private fun parseTaggedLinks(input: String): List<TaggedSegment> {
 
     return result
 }
+
+private fun TextAlign?.toHorizontalAlignment(): Alignment.Horizontal = when (this) {
+    TextAlign.Center -> Alignment.CenterHorizontally
+    TextAlign.End, TextAlign.Right -> Alignment.End
+    else -> Alignment.Start
+}
+
+private fun combinedAlignment(
+    horizontal: Alignment.Horizontal,
+    vertical: Alignment.Vertical,
+): Alignment = object : Alignment {
+    override fun align(size: IntSize, space: IntSize, layoutDirection: LayoutDirection): IntOffset {
+        return IntOffset(
+            x = horizontal.align(size.width, space.width, layoutDirection),
+            y = vertical.align(size.height, space.height)
+        )
+    }
+}
+
+private const val TAG_HREF = "href"
+private const val TAG_OPEN = "open"

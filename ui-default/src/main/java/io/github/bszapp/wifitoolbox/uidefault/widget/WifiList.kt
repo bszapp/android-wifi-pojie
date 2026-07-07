@@ -65,7 +65,7 @@ import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
 
-private enum class ListUiState { LOADING, EMPTY, CONTENT, WIFI_DISABLED }
+private enum class ListUiState { IDLE, LOADING, EMPTY, CONTENT, WIFI_DISABLED, ERROR }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -77,7 +77,8 @@ fun WifiList(
     val scanResults by vm.wifiList.results.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
     val scanStatus by vm.wifiList.status.collectAsStateWithLifecycle()
-    val isScanning = scanStatus == ScanStatus.SCANNING
+    val errorMessage by vm.wifiList.errorMessage.collectAsStateWithLifecycle()
+    val isScanning by vm.wifiList.isScanning.collectAsStateWithLifecycle()
     var selectedIndex by rememberSaveable { mutableStateOf<Int?>(null) }
 
     // 每次 scanResults 变化时重建分组
@@ -87,9 +88,11 @@ fun WifiList(
 
     // 决定当前应显示哪种状态
     val uiState: ListUiState = when {
-        scanStatus == ScanStatus.ERROR_NOT_ENABLED -> ListUiState.WIFI_DISABLED
-        isScanning && groups.isEmpty() -> ListUiState.LOADING
-        !isScanning && groups.isEmpty() -> ListUiState.EMPTY
+        scanStatus == null -> ListUiState.IDLE
+        scanStatus == ScanStatus.NOT_ENABLED -> ListUiState.WIFI_DISABLED
+        scanStatus == ScanStatus.ERROR -> ListUiState.ERROR
+        scanStatus == ScanStatus.LIST && isScanning && groups.isEmpty() -> ListUiState.LOADING
+        scanStatus == ScanStatus.LIST && groups.isEmpty() -> ListUiState.EMPTY
         else -> ListUiState.CONTENT
     }
 
@@ -101,6 +104,11 @@ fun WifiList(
             modifier = Modifier.fillMaxSize()
         ) { state ->
             when (state) {
+
+                // ── 未初始化：不显示任何扫描状态 ─────────────────────────────
+                ListUiState.IDLE -> {
+                    Box(modifier = Modifier.fillMaxSize())
+                }
 
                 // ── 加载中：居中转圈 ──────────────────────────────────────
                 ListUiState.LOADING -> {
@@ -228,6 +236,22 @@ fun WifiList(
                     }
                 }
 
+                // ── 错误：显示原因 ─────────────────────────────────────
+                ListUiState.ERROR -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = errorMessage ?: "未知",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 32.dp)
+                        )
+                    }
+                }
+
                 // ── 有内容：卡片列表 ─────────────────────────────────────
                 ListUiState.CONTENT -> {
                     LazyColumn(
@@ -238,7 +262,7 @@ fun WifiList(
                     ) {
                         itemsIndexed(
                             items = groups,
-                            key = { _, item -> item.strongest.BSSID ?: item.hashCode() }
+                            key = { _, item -> item.strongest.BSSID!! }
                         ) { index, group ->
                             WifiGroupCard(
                                 vm = vm,

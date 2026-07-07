@@ -2,9 +2,12 @@ package io.github.bszapp.wifitoolbox.launcher
 
 import android.content.Context
 import android.os.IBinder
+import android.os.Process
 import android.util.Log
-import io.github.bszapp.wifitoolbox.BuildConfig
+import io.github.bszapp.wifitoolbox.contract.startup.AppVersion
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
+import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
+import io.github.bszapp.wifitoolbox.contract.startup.StartupInfoParcelCodec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -77,7 +80,11 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
         if (finishedHolder[0]) {
             val exit = exitHolder[0]
             if (exit != 0) {
-                throw Exception("su命令执行失败，情在管理器授权本应用")
+                throw Exception(buildString {
+                    append("su命令执行失败，请在管理器授权本应用")
+                    val detail = output.toString().trim()
+                    if (detail.isNotEmpty()) append("：").append(detail)
+                })
             }
             Log.d(TAG, "root 启动命令已返回，等待服务 Binder")
         } else {
@@ -93,20 +100,19 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
         val classPathQuoted = shellQuote(classPath)
         val niceNameQuoted = shellQuote(niceName)
         val classNameQuoted = shellQuote(className)
-        val modeQuoted = shellQuote(StartupMode.ROOT.name)
-        val versionCodeQuoted = shellQuote(BuildConfig.VERSION_CODE.toString())
-        val versionNameQuoted = shellQuote(BuildConfig.VERSION_NAME)
+        val startupInfo = StartupInfo.forAppLaunch(
+            mode = StartupMode.ROOT,
+            uid = Process.myUid(),
+            versionName = AppVersion.VERSION_NAME,
+            versionCode = AppVersion.VERSION_CODE,
+        )
+        val startupInfoQuoted = shellQuote(StartupInfoParcelCodec.encode(startupInfo))
 
         return """
             CLASSPATH=$classPathQuoted
             export CLASSPATH
-            (
-              if command -v nohup >/dev/null 2>&1; then
-                nohup $appProcess /system/bin --nice-name=$niceNameQuoted $classNameQuoted $modeQuoted $versionCodeQuoted $versionNameQuoted >/dev/null 2>&1 < /dev/null
-              else
-                $appProcess /system/bin --nice-name=$niceNameQuoted $classNameQuoted $modeQuoted $versionCodeQuoted $versionNameQuoted >/dev/null 2>&1 < /dev/null
-              fi
-            ) &
+            command -v nohup >/dev/null 2>&1 || { echo "nohup 不存在，无法启动独立服务"; exit 127; }
+            nohup $appProcess /system/bin --nice-name=$niceNameQuoted $classNameQuoted $startupInfoQuoted >/dev/null 2>&1 < /dev/null &
         """.trimIndent()
     }
 

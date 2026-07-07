@@ -5,9 +5,12 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.os.Process
 import android.util.Log
-import io.github.bszapp.wifitoolbox.BuildConfig
+import io.github.bszapp.wifitoolbox.contract.startup.AppVersion
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
+import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
+import io.github.bszapp.wifitoolbox.contract.startup.StartupInfoParcelCodec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -171,7 +174,11 @@ class ShizukuProcessLauncher(private val context: Context) : AutoCloseable {
         if (finishedHolder[0]) {
             val exit = exitHolder[0]
             if (exit != 0) {
-                throw Exception("Shizuku Terminal进程启动失败")
+                throw Exception(buildString {
+                    append("Shizuku Terminal进程启动失败")
+                    val detail = output.toString().trim()
+                    if (detail.isNotEmpty()) append("：").append(detail)
+                })
             }
             Log.d(TAG, "Shizuku Terminal 发射命令已返回，等待服务 Binder")
         } else {
@@ -184,29 +191,26 @@ class ShizukuProcessLauncher(private val context: Context) : AutoCloseable {
         val appProcess = "/system/bin/app_process"
         val niceName = shellQuote(ServiceConfig.serviceProcessName(context))
         val starter = shellQuote(className)
-        val mode = shellQuote(StartupMode.SHIZUKU_TERMINAL.name)
-        val versionCode = shellQuote(BuildConfig.VERSION_CODE.toString())
-        val versionName = shellQuote(BuildConfig.VERSION_NAME)
+        val startupInfo = StartupInfo.forAppLaunch(
+            mode = StartupMode.SHIZUKU_TERMINAL,
+            uid = Process.myUid(),
+            versionName = AppVersion.VERSION_NAME,
+            versionCode = AppVersion.VERSION_CODE,
+        )
+        val startupInfoArg = shellQuote(StartupInfoParcelCodec.encode(startupInfo))
 
         /*
          * 不能 exec app_process。
          * exec 会让 app_process 成为 ShizukuRemoteProcess 本身，App 被强杀时
          * remote process 控制链路断开，服务也可能一起被清理。
          *
-         * 这里让 sh 只负责启动后台 app_process 后退出。优先使用 setsid，
-         * 其次 nohup，最后退化为普通后台进程。stdio 全部重定向，避免
-         * 服务进程继续持有 remote process 管道。
+         * 这里只允许 nohup 后台启动；没有 nohup 就让启动命令失败并把原因返回给 UI。
          */
         return """
             CLASSPATH=$classPath
             export CLASSPATH
-            if command -v setsid >/dev/null 2>&1; then
-              setsid $appProcess /system/bin --nice-name=$niceName $starter $mode $versionCode $versionName >/dev/null 2>&1 < /dev/null &
-            elif command -v nohup >/dev/null 2>&1; then
-              nohup $appProcess /system/bin --nice-name=$niceName $starter $mode $versionCode $versionName >/dev/null 2>&1 < /dev/null &
-            else
-              $appProcess /system/bin --nice-name=$niceName $starter $mode $versionCode $versionName >/dev/null 2>&1 < /dev/null &
-            fi
+            command -v nohup >/dev/null 2>&1 || { echo "nohup 不存在，无法启动独立服务"; exit 127; }
+            nohup $appProcess /system/bin --nice-name=$niceName $starter $startupInfoArg >/dev/null 2>&1 < /dev/null &
         """.trimIndent()
     }
 

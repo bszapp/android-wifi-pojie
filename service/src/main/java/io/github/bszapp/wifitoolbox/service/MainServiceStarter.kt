@@ -3,29 +3,26 @@ package io.github.bszapp.wifitoolbox.service
 import android.os.Looper
 import android.util.Log
 import androidx.annotation.Keep
+import io.github.bszapp.wifitoolbox.contract.startup.StartupInfoParcelCodec
 
-/**
- * 独立 app_process 入口。
- *
- * 该入口只创建一次 MainService，然后进入 Looper 保持进程存活。
- * 服务 Binder 会由 MainService 自己通过 Provider 投递给当前应用进程。
- */
+/** 独立 app_process 入口。启动参数只有一个：StartupInfo 的 Parcel/Base64 字符串。 */
 @Keep
 object MainServiceStarter {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val startupMode = args.getOrNull(0)?.takeIf { it.isNotBlank() }
-        val versionCode = args.getOrNull(1)?.toLongOrNull()
-        val versionName = args.getOrNull(2)?.takeIf { it.isNotBlank() }
+        val startupInfoArg = args.getOrNull(0)
+            ?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("缺少启动信息参数")
+        val startupInfo = StartupInfoParcelCodec.decode(startupInfoArg).requireLaunchInfo()
 
-        Log.d(TAG, "独立服务进程入口启动 mode=$startupMode version=${versionName ?: "?"}(${versionCode ?: -1})")
-
-        val service = MainService(
-            startupMode = startupMode,
-            startupVersionName = versionName,
-            startupVersionCode = versionCode
+        Log.d(
+            TAG,
+            "独立服务进程入口启动 mode=${startupInfo.startupMode} trustedUid=${startupInfo.trustedUid} " +
+                    "version=${startupInfo.versionName}(${startupInfo.versionCode})"
         )
+
+        val service = MainService(startupInfo)
         ServiceHolder.service = service
 
         prepareLooperIfNeeded()
@@ -35,12 +32,7 @@ object MainServiceStarter {
 
     private fun prepareLooperIfNeeded() {
         if (Looper.myLooper() != null) return
-
-        runCatching {
-            Looper.prepareMainLooper()
-        }.onFailure {
-            Looper.prepare()
-        }
+        runCatching { Looper.prepareMainLooper() }.onFailure { Looper.prepare() }
     }
 
     private object ServiceHolder {

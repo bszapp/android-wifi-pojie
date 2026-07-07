@@ -7,10 +7,12 @@ import android.net.Uri
 import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Process
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import io.github.bszapp.wifitoolbox.service.IMainService
 
 /**
  * 进程内 Binder 入口。
@@ -49,15 +51,23 @@ class ToolboxServiceProvider : ContentProvider() {
         if (method != ServiceConfig.PROVIDER_METHOD) return null
 
         val callerUid = Binder.getCallingUid()
-        if (callerUid != 0 && callerUid != 1000 && callerUid != 2000) {
-            Log.w(TAG, "拒绝 uid=$callerUid 的 Binder 投递")
-            return null
-        }
-
         val binder = extras?.getBinder(ServiceConfig.PROVIDER_BINDER_KEY)
         return if (binder?.isBinderAlive == true) {
-            storeBinderInternal(binder)
-            Log.d(TAG, "收到服务 Binder（uid=$callerUid）")
+            // 预连接：先让投递方看到本次投递已被处理，但只有启动信息可信时才正式保存 Binder。
+            val trusted = runCatching {
+                val service = IMainService.Stub.asInterface(binder)
+                val info = service.getStartupInfo()
+                info.trustedUid == Process.myUid() && info.trustedUid > 0
+            }.onFailure {
+                Log.w(TAG, "收到服务 Binder 但启动信息不可验证（uid=$callerUid）：${it.message}")
+            }.getOrDefault(false)
+
+            if (trusted) {
+                storeBinderInternal(binder)
+                Log.d(TAG, "收到可信服务 Binder（uid=$callerUid）")
+            } else {
+                Log.w(TAG, "忽略不可信服务 Binder（uid=$callerUid），不影响后续新服务启动")
+            }
             Bundle().apply { putBoolean(ServiceConfig.PROVIDER_RESULT_OK, true) }
         } else {
             Log.w(TAG, "收到无效 Binder")

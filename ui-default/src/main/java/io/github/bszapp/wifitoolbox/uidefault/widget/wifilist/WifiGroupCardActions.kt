@@ -59,10 +59,10 @@ fun WifiGroupCardActions(
             val isEnabled = config.status == WifiConfiguration.Status.ENABLED
                     || config.status == WifiConfiguration.Status.CURRENT
 
-            // 自动连接：API 30+ 才有 allowAutojoin 字段
+            // 自动连接：API 30+ 才有 allowAutojoin 字段；读不到就返回 null，不显示该项。
             val isAutoJoin = if (supportsAutoJoin) {
-                config.getAllowAutojoin()
-            } else false
+                config.getAllowAutojoinOrNull()
+            } else null
 
             add(
                 MenuGroupConfig(
@@ -88,7 +88,7 @@ fun WifiGroupCardActions(
                                 },
                             )
                         )
-                        if (supportsAutoJoin) {
+                        if (isAutoJoin != null) {
                             // 自动连接
                             add(
                                 MenuItemConfig(
@@ -137,10 +137,10 @@ fun WifiGroupCardActions(
 }
 
 @RequiresApi(Build.VERSION_CODES.R)
-private fun WifiConfiguration.getAllowAutojoin(): Boolean = try {
+private fun WifiConfiguration.getAllowAutojoinOrNull(): Boolean? = try {
     WifiConfiguration::class.java
         .getField("allowAutojoin")
         .getBoolean(this)
 } catch (_: Exception) {
-    true
+    null
 }

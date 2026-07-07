@@ -2,14 +2,17 @@ package io.github.bszapp.wifitoolbox.launcher
 
 import android.content.Context
 import android.os.IBinder
+import android.os.Process
 import android.util.Log
+import io.github.bszapp.wifitoolbox.contract.startup.AppVersion
 import io.github.bszapp.wifitoolbox.contract.startup.RunningException
+import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupState
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.service.IMainService
-import io.github.bszapp.wifitoolbox.service.MainService
 import io.github.bszapp.wifitoolbox.service.MainServiceStarter
+import io.github.bszapp.wifitoolbox.tools.AndroidApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +38,9 @@ class ProcessLauncher(private val context: Context) {
     var mainService: IMainService? = null
         private set
 
+    var androidApiClient: AndroidApiClient? = null
+        private set
+
     private fun cleanupActive() {
         cleanupDeathRecipientOnly()
         activeLauncher?.closeQuietly()
@@ -48,21 +54,28 @@ class ProcessLauncher(private val context: Context) {
         deathRecipient = null
         activeBinder = null
         mainService = null
+        androidApiClient = null
     }
 
     fun tryAutoReconnect() {
         ensureBrokerWatcher()
 
-        ToolboxServiceProvider.getAliveBinder()?.let { binder ->
-            launchJob?.cancel()
-            launchJob = scope.launch {
-                if (canAcceptBrokerBinder()) {
-                    Log.d(TAG, "发现已存在的服务 Binder，直接恢复连接")
-                    connectWithBinder(binder, null)
-                }
-            }
-        } ?: run {
+        val binder = ToolboxServiceProvider.getAliveBinder()
+        if (binder == null) {
             _state.value = StartupState(status = StartupStatus.IDLE)
+            return
+        }
+
+        launchJob?.cancel()
+        launchJob = scope.launch {
+            if (!canAcceptBrokerBinder()) return@launch
+            val info = validateBrokerBinder(binder) ?: run {
+                ToolboxServiceProvider.clearBinder()
+                _state.value = StartupState(status = StartupStatus.IDLE)
+                return@launch
+            }
+            Log.d(TAG, "发现可信的已存在服务 Binder，直接恢复连接")
+            connectWithBinder(binder, info.startupMode.toStartupMode(), startupInfoOverride = info)
         }
     }
 
@@ -75,25 +88,52 @@ class ProcessLauncher(private val context: Context) {
                 .collect { binder ->
                     val aliveBinder = binder ?: return@collect
                     if (!canAcceptBrokerBinder()) return@collect
-                    val currentMode = _state.value.selectedMode
-                    Log.d(TAG, "收到服务主动投递的 Binder，恢复连接")
-                    connectWithBinder(aliveBinder, currentMode)
+                    val info = validateBrokerBinder(aliveBinder) ?: return@collect
+                    Log.d(TAG, "收到服务主动投递的可信 Binder，恢复连接")
+                    connectWithBinder(aliveBinder, info.startupMode.toStartupMode(), startupInfoOverride = info)
                 }
         }
     }
 
-    private fun canAcceptBrokerBinder(): Boolean {
-        return !(activeBinder?.isBinderAlive == true && mainService != null)
+    private fun canAcceptBrokerBinder(): Boolean =
+        !(activeBinder?.isBinderAlive == true && mainService != null)
+
+    /**
+     * 预连接校验：只读取 StartupInfo，不更新 App 自己的连接状态。
+     * 如果 UID 不匹配或服务未初始化，就把它当作不存在的旧服务。
+     */
+    private fun validateBrokerBinder(binder: IBinder): StartupInfo? {
+        if (!binder.isBinderAlive) return null
+        return runCatching {
+            val service = IMainService.Stub.asInterface(binder)
+            val info = service.getStartupInfo()
+            if (!info.isTrustedForAppUid(Process.myUid())) {
+                Log.w(TAG, "忽略服务 Binder：trustedUid=${info.trustedUid} appUid=${Process.myUid()}")
+                return null
+            }
+            if (info.startupMode.toStartupMode() == null) {
+                Log.w(TAG, "忽略服务 Binder：未知启动模式 ${info.startupMode}")
+                return null
+            }
+            info
+        }.onFailure {
+            Log.w(TAG, "忽略无法验证的服务 Binder：${it.message}")
+        }.getOrNull()
     }
 
-    private fun connectWithBinder(binder: IBinder, requestedMode: StartupMode?) {
+    private fun connectWithBinder(
+        binder: IBinder,
+        requestedMode: StartupMode?,
+        startupInfoOverride: StartupInfo? = null,
+    ) {
         try {
             if (!binder.isBinderAlive) {
                 Log.w(TAG, "connectWithBinder 收到死亡 Binder")
                 cleanupActive()
                 _state.value = StartupState(
-                    status = StartupStatus.IDLE,
-                    selectedMode = requestedMode
+                    status = StartupStatus.ERROR,
+                    selectedMode = requestedMode,
+                    errorException = Exception("服务 Binder 已死亡")
                 )
                 return
             }
@@ -101,12 +141,22 @@ class ProcessLauncher(private val context: Context) {
             if (activeBinder?.isBinderAlive == true && mainService != null) return
 
             val service = IMainService.Stub.asInterface(binder)
+            val launchInfo = startupInfoOverride ?: requestedMode?.let { createStartupInfo(it) }
+            launchInfo?.let { service.initializeStartupInfo(it) }
+
+            val startupInfo = startupInfoOverride ?: service.getStartupInfo()
+            if (!startupInfo.isTrustedForAppUid(Process.myUid())) {
+                throw SecurityException("服务启动信息 trustedUid=${startupInfo.trustedUid} 与 App UID=${Process.myUid()} 不一致")
+            }
+
+            val serviceMode = startupInfo.startupMode.toStartupMode()
             if (!service.connect()) {
                 Log.w(TAG, "connect() 被服务拒绝")
                 cleanupActive()
                 _state.value = StartupState(
-                    status = StartupStatus.IDLE,
-                    selectedMode = requestedMode
+                    status = StartupStatus.ERROR,
+                    selectedMode = serviceMode ?: requestedMode,
+                    errorException = Exception("connect() 被服务拒绝")
                 )
                 return
             }
@@ -115,15 +165,7 @@ class ProcessLauncher(private val context: Context) {
 
             activeBinder = binder
             mainService = service
-
-            runCatching { service.watchApp(android.os.Binder()) }
-
-            val uid = service.getUid()
-            val uidStr = service.getUidStr()
-            val pid = service.getPid()
-            val serviceMode = service.getStartupMode().toStartupMode() ?: requestedMode
-            val versionName = service.getStartupVersionName().takeIf { it.isNotBlank() }
-            val versionCode = service.getStartupVersionCode().takeIf { it >= 0 }
+            androidApiClient = AndroidApiClient(service)
 
             val recipient = IBinder.DeathRecipient {
                 Log.e(TAG, "${serviceMode.displayName()} 服务进程崩溃或被终止")
@@ -145,23 +187,26 @@ class ProcessLauncher(private val context: Context) {
             _state.value = StartupState(
                 status = StartupStatus.RUNNING,
                 selectedMode = serviceMode,
-                serviceUid = uid,
-                serviceUidStr = uidStr,
-                servicePid = pid,
-                serviceVersionName = versionName,
-                serviceVersionCode = versionCode
+                serviceUid = startupInfo.serviceUid,
+                serviceUidStr = startupInfo.serviceUidText,
+                servicePid = startupInfo.servicePid,
+                serviceVersionName = startupInfo.versionName,
+                serviceVersionCode = startupInfo.versionCode
             )
 
             Log.d(
                 TAG,
-                "${serviceMode.displayName()} 服务启动成功，uid=$uid uidStr=$uidStr pid=$pid version=${versionName ?: "?"}(${versionCode ?: -1})"
+                "${serviceMode.displayName()} 服务启动成功，uid=${startupInfo.serviceUid} " +
+                        "uidStr=${startupInfo.serviceUidText} pid=${startupInfo.servicePid} " +
+                        "version=${startupInfo.versionName}(${startupInfo.versionCode})"
             )
         } catch (e: Exception) {
             Log.e(TAG, "connectWithBinder 失败: ${e.message}")
             cleanupActive()
             _state.value = StartupState(
-                status = StartupStatus.IDLE,
-                selectedMode = requestedMode
+                status = StartupStatus.ERROR,
+                selectedMode = requestedMode,
+                errorException = Exception("服务连接失败：${e.message ?: e::class.java.name}", e)
             )
         }
     }
@@ -192,9 +237,7 @@ class ProcessLauncher(private val context: Context) {
                     connectWithBinder(binder, mode)
                 }
             }.onFailure { e ->
-                if (e is kotlinx.coroutines.CancellationException && e !is TimeoutCancellationException) {
-                    return@onFailure
-                }
+                if (e is kotlinx.coroutines.CancellationException && e !is TimeoutCancellationException) return@onFailure
 
                 if (_state.value.status == StartupStatus.RUNNING &&
                     activeBinder?.isBinderAlive == true &&
@@ -238,7 +281,7 @@ class ProcessLauncher(private val context: Context) {
             runCatching {
                 when (launcher) {
                     is RootProcessLauncher -> launcher.forceStopService()
-                    is ShizukuProcessLauncher -> launcher.forceStopService()
+                    is ShizukuProcessLauncher -> launcher.forceStopService(mode)
                     else -> launcher?.close()
                 }
             }
@@ -271,6 +314,7 @@ class ProcessLauncher(private val context: Context) {
         activeBinder = null
         activeLauncher = null
         mainService = null
+        androidApiClient = null
 
         _state.value = StartupState()
 
@@ -303,6 +347,13 @@ class ProcessLauncher(private val context: Context) {
         return launcher to launcher.getServiceBinder(MainServiceStarter::class.java.name)
     }
 
+    private fun createStartupInfo(mode: StartupMode): StartupInfo = StartupInfo.forAppLaunch(
+        mode = mode,
+        uid = Process.myUid(),
+        versionName = AppVersion.VERSION_NAME,
+        versionCode = AppVersion.VERSION_CODE,
+    )
+
     companion object {
         private const val TAG = "ProcessLauncher"
     }
@@ -312,7 +363,7 @@ internal fun StartupMode?.displayName(): String = when (this) {
     StartupMode.SHIZUKU -> "Shizuku"
     StartupMode.SHIZUKU_TERMINAL -> "Shizuku Terminal"
     StartupMode.ROOT -> "Root"
-    null -> "已存在"
+    null -> "未知"
 }
 
 internal fun String?.toStartupMode(): StartupMode? = when (this) {

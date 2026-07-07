@@ -318,7 +318,7 @@ private fun ApCard(ap: ScanResult) {
 
             // BSSID
             Text(
-                text = ap.BSSID ?: "<Unknown>",
+                text = ap.BSSID!!,
                 style = MaterialTheme.typography.labelMedium,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurface,

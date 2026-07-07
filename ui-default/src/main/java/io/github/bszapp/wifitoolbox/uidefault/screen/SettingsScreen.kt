@@ -147,7 +147,7 @@ private fun StartupMode?.displayName(): String = when (this) {
 }
 
 private fun formatVersion(name: String?, code: Long?): String {
-    val versionName = name?.takeIf { it.isNotBlank() } ?: "unknown"
-    val versionCode = code?.takeIf { it >= 0 }?.toString() ?: "-1"
+    val versionName = name?.takeIf { it.isNotBlank() } ?: return "未知"
+    val versionCode = code?.takeIf { it >= 0 } ?: return "未知"
     return "$versionName($versionCode)"
 }
