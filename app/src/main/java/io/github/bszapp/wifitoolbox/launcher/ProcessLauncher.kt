@@ -21,6 +21,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlin.time.Duration.Companion.seconds
 
 class ProcessLauncher(private val context: Context) {
 
@@ -225,7 +226,7 @@ class ProcessLauncher(private val context: Context) {
             cleanupActive()
 
             runCatching {
-                withTimeout(5_000L) {
+                withTimeout(5.seconds) {
                     val (launcher, binder) = createLauncherAndBinder(mode)
                     activeLauncher = launcher
                     if (_state.value.status == StartupStatus.RUNNING &&

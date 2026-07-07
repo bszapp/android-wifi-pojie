@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -43,7 +44,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,15 +68,22 @@ import top.yukonga.miuix.kmp.basic.SliderDefaults
 import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.MenuOpen
+import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.BlurOn
+import androidx.compose.material.icons.rounded.CallToAction
+import androidx.compose.material.icons.rounded.Colorize
+import androidx.compose.material.icons.rounded.DesignServices
+import androidx.compose.material.icons.rounded.Style
+import androidx.compose.material.icons.rounded.Wallpaper
+import androidx.compose.material.icons.rounded.WaterDrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.icon.extended.Background
-import top.yukonga.miuix.kmp.icon.extended.GridView
-import top.yukonga.miuix.kmp.icon.extended.Settings
-import top.yukonga.miuix.kmp.icon.extended.Theme
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
@@ -190,7 +197,7 @@ fun ColorPaletteScreen() {
                             title = "动态取色",
                             startAction = {
                                 Icon(
-                                    MiuixIcons.Background,
+                                    Icons.Rounded.Wallpaper,
                                     modifier = Modifier.padding(end = 6.dp),
                                     contentDescription = "动态取色",
                                     tint = colorScheme.onBackground,
@@ -217,7 +224,7 @@ fun ColorPaletteScreen() {
                                     items = colorNames,
                                     startAction = {
                                         Icon(
-                                            MiuixIcons.Theme,
+                                            Icons.Rounded.Colorize,
                                             modifier = Modifier.padding(end = 6.dp),
                                             contentDescription = "强调色",
                                             tint = colorScheme.onBackground,
@@ -226,36 +233,40 @@ fun ColorPaletteScreen() {
                                     selectedIndex = colors.indexOf(keyColor).coerceAtLeast(0),
                                     onSelectedIndexChange = { theme.keyColor.set(colors[it]) },
                                 )
-                                val styles = PaletteStyle.entries
-                                OverlayDropdownPreference(
-                                    title = "色彩风格",
-                                    items = styles.map { it.name },
-                                    startAction = {
-                                        Icon(
-                                            MiuixIcons.GridView,
-                                            modifier = Modifier.padding(end = 6.dp),
-                                            contentDescription = "色彩风格",
-                                            tint = colorScheme.onBackground,
+                                AnimatedVisibility(visible = keyColor != 0) {
+                                    Column {
+                                        val styles = PaletteStyle.entries
+                                        OverlayDropdownPreference(
+                                            title = "色彩风格",
+                                            items = styles.map { it.name },
+                                            startAction = {
+                                                Icon(
+                                                    Icons.Rounded.Style,
+                                                    modifier = Modifier.padding(end = 6.dp),
+                                                    contentDescription = "色彩风格",
+                                                    tint = colorScheme.onBackground,
+                                                )
+                                            },
+                                            selectedIndex = styles.indexOf(currentPaletteStyle).coerceAtLeast(0),
+                                            onSelectedIndexChange = { theme.colorStyle.set(styles[it].name) },
                                         )
-                                    },
-                                    selectedIndex = styles.indexOf(currentPaletteStyle).coerceAtLeast(0),
-                                    onSelectedIndexChange = { theme.colorStyle.set(styles[it].name) },
-                                )
-                                val specs = ColorSpec.SpecVersion.entries
-                                OverlayDropdownPreference(
-                                    title = "色彩标准",
-                                    items = specs.map { it.name },
-                                    startAction = {
-                                        Icon(
-                                            MiuixIcons.Settings,
-                                            modifier = Modifier.padding(end = 6.dp),
-                                            contentDescription = "色彩标准",
-                                            tint = colorScheme.onBackground,
+                                        val specs = ColorSpec.SpecVersion.entries
+                                        OverlayDropdownPreference(
+                                            title = "色彩标准",
+                                            items = specs.map { it.name },
+                                            startAction = {
+                                                Icon(
+                                                    Icons.Rounded.DesignServices,
+                                                    modifier = Modifier.padding(end = 6.dp),
+                                                    contentDescription = "色彩标准",
+                                                    tint = colorScheme.onBackground,
+                                                )
+                                            },
+                                            selectedIndex = specs.indexOf(currentColorSpec).coerceAtLeast(0),
+                                            onSelectedIndexChange = { theme.colorSpec.set(specs[it].name) },
                                         )
-                                    },
-                                    selectedIndex = specs.indexOf(currentColorSpec).coerceAtLeast(0),
-                                    onSelectedIndexChange = { theme.colorSpec.set(specs[it].name) },
-                                )
+                                    }
+                                }
                             }
                         }
                     }
@@ -271,7 +282,7 @@ fun ColorPaletteScreen() {
                                 summary = "启用顶栏和底栏的模糊效果",
                                 startAction = {
                                     Icon(
-                                        MiuixIcons.Theme,
+                                        Icons.Rounded.BlurOn,
                                         modifier = Modifier.padding(end = 6.dp),
                                         contentDescription = "模糊",
                                         tint = colorScheme.onBackground,
@@ -286,7 +297,7 @@ fun ColorPaletteScreen() {
                             summary = "使用 Apple 风格的悬浮底栏",
                             startAction = {
                                 Icon(
-                                    MiuixIcons.GridView,
+                                    Icons.Rounded.CallToAction,
                                     modifier = Modifier.padding(end = 6.dp),
                                     contentDescription = "悬浮底栏",
                                     tint = colorScheme.onBackground,
@@ -301,7 +312,7 @@ fun ColorPaletteScreen() {
                                 summary = "启用悬浮底栏的液态玻璃效果",
                                 startAction = {
                                     Icon(
-                                        MiuixIcons.Theme,
+                                        Icons.Rounded.WaterDrop,
                                         modifier = Modifier.padding(end = 6.dp),
                                         contentDescription = "液态玻璃",
                                         tint = colorScheme.onBackground,
@@ -324,7 +335,7 @@ fun ColorPaletteScreen() {
                                 summary = "启用对预测性返回手势的支持",
                                 startAction = {
                                     Icon(
-                                        MiuixIcons.Basic.ArrowRight,
+                                        Icons.AutoMirrored.Rounded.MenuOpen,
                                         modifier = Modifier.padding(end = 6.dp),
                                         contentDescription = "预测性返回手势",
                                         tint = colorScheme.onBackground,
@@ -341,7 +352,7 @@ fun ColorPaletteScreen() {
                             summary = "调整全局显示比例",
                             startAction = {
                                 Icon(
-                                    MiuixIcons.Settings,
+                                    Icons.Rounded.AspectRatio,
                                     modifier = Modifier.padding(end = 6.dp),
                                     contentDescription = "界面缩放",
                                     tint = colorScheme.onBackground,
@@ -370,9 +381,9 @@ fun ColorPaletteScreen() {
                         )
                         ScaleDialog(
                             show = showScaleDialog.value,
-                            value = pageScale,
                             onDismissRequest = { showScaleDialog.value = false },
-                            onValueChange = { theme.pageScale.set(it) },
+                            volumeState = { pageScale },
+                            onVolumeChange = { theme.pageScale.set(it) },
                         )
                     }
                 }
@@ -534,57 +545,57 @@ private fun ThemePreviewCard(
 @Composable
 private fun ScaleDialog(
     show: Boolean,
-    value: Float,
     onDismissRequest: () -> Unit,
-    onValueChange: (Float) -> Unit,
+    volumeState: () -> Float,
+    onVolumeChange: (Float) -> Unit,
 ) {
-    if (!show) return
-    var sliderValue by remember(value) { mutableFloatStateOf(value.coerceIn(0.8f, 1.1f)) }
     OverlayDialog(
         show = show,
-        onDismissRequest = onDismissRequest,
         title = "界面缩放",
-        summary = "调整全局显示比例",
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = "${(sliderValue * 100).toInt()}%",
-                textAlign = TextAlign.Center,
-                color = colorScheme.onSurface,
+        summary = "80% - 110%",
+        onDismissRequest = onDismissRequest,
+        content = {
+            var text by remember(show) {
+                mutableStateOf((volumeState() * 100).toInt().toString())
+            }
+            TextField(
+                modifier = Modifier.padding(bottom = 16.dp),
+                value = text,
+                maxLines = 1,
+                trailingIcon = {
+                    Text(
+                        text = "%",
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = colorScheme.onSurfaceVariantActions,
+                    )
+                },
+                onValueChange = { newValue ->
+                    if (newValue.isEmpty()) {
+                        text = ""
+                    } else if (newValue.all { it.isDigit() }) {
+                        text = newValue
+                    }
+                },
             )
-            Slider(
-                value = sliderValue,
-                onValueChange = { sliderValue = it },
-                valueRange = 0.8f..1.1f,
-                showKeyPoints = true,
-                keyPoints = listOf(0.8f, 0.9f, 1f, 1.1f),
-                magnetThreshold = 0.01f,
-                hapticEffect = SliderDefaults.SliderHapticEffect.Step,
-            )
-            Spacer(Modifier.height(20.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
+            Row(horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton(
                     text = "取消",
                     onClick = onDismissRequest,
                     modifier = Modifier.weight(1f),
                 )
+                Spacer(Modifier.width(20.dp))
                 TextButton(
                     text = "确定",
                     onClick = {
-                        onValueChange(sliderValue)
+                        val parsed = text.toIntOrNull()
+                        val clamped = parsed?.coerceIn(80, 110) ?: (volumeState() * 100).toInt()
+                        onVolumeChange(clamped / 100f)
                         onDismissRequest()
                     },
                     modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
                 )
             }
-        }
-    }
+        },
+    )
 }

@@ -1,20 +1,27 @@
 package io.github.bszapp.wifitoolbox.uidefault
 
 import android.annotation.SuppressLint
-import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
+import androidx.navigation3.runtime.entryProvider
+import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
+import androidx.navigation3.ui.NavDisplay
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.bszapp.wifitoolbox.uidefault.component.bottombar.BottomBarMiuix
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MainScreenState
+import io.github.bszapp.wifitoolbox.uidefault.model.rememberMainScreenState
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.navigation.rememberNavigator
@@ -35,12 +42,22 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
 @Composable
 fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
+    val navigator = rememberNavigator(Route.Main)
     WifiToolboxMiuixTheme {
-        val navigator = rememberNavigator(Route.Main)
         CompositionLocalProvider(LocalNavigator provides navigator) {
-            when (navigator.current) {
-                Route.Main -> MainPager(viewModel = viewModel)
-                Route.ColorPalette -> ColorPaletteScreen()
+            Scaffold {
+                NavDisplay(
+                    backStack = navigator.backStack,
+                    entryDecorators = listOf(
+                        rememberSaveableStateHolderNavEntryDecorator(),
+                        rememberViewModelStoreNavEntryDecorator(),
+                    ),
+                    onBack = { navigator.pop() },
+                    entryProvider = entryProvider {
+                        entry<Route.Main> { MainPager(viewModel = viewModel) }
+                        entry<Route.ColorPalette> { ColorPaletteScreen() }
+                    },
+                )
             }
         }
     }
@@ -48,8 +65,9 @@ fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
 
 @Composable
 private fun MainPager(viewModel: DefaultViewModel) {
+    val navigator = LocalNavigator.current
     val pagerState = rememberPagerState(pageCount = { 3 })
-    val mainState = MainScreenState(pagerState, rememberCoroutineScope())
+    val mainState = rememberMainScreenState(pagerState)
     val enableBlur = LocalEnableBlur.current
     val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
     val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current
@@ -60,14 +78,19 @@ private fun MainPager(viewModel: DefaultViewModel) {
         drawContent()
     }
 
+    val currentPage = mainState.pagerState.currentPage
+    LaunchedEffect(currentPage) {
+        mainState.syncPage()
+    }
+
+    MainScreenBackHandler(mainState = mainState, navigator = navigator)
 
     val pagerContent = @Composable { bottomInnerPadding: androidx.compose.ui.unit.Dp ->
         Box(modifier = if (blurBackdrop != null) Modifier.layerBackdrop(blurBackdrop) else Modifier) {
             HorizontalPager(
                 modifier = Modifier
-                    .fillMaxSize()
                     .then(if (enableFloatingBottomBar && enableFloatingBottomBarBlur) Modifier.layerBackdrop(backdrop) else Modifier),
-                state = pagerState,
+                state = mainState.pagerState,
                 beyondViewportPageCount = 3,
             ) { page ->
                 when (page) {
@@ -93,4 +116,17 @@ private fun MainPager(viewModel: DefaultViewModel) {
     Scaffold(bottomBar = bottomBar) { innerPadding ->
         pagerContent(innerPadding.calculateBottomPadding())
     }
+}
+
+@Composable
+private fun MainScreenBackHandler(
+    mainState: MainScreenState,
+    navigator: io.github.bszapp.wifitoolbox.uidefault.navigation.Navigator,
+) {
+    val navEventState = rememberNavigationEventState(NavigationEventInfo.None)
+    NavigationBackHandler(
+        state = navEventState,
+        isBackEnabled = navigator.current() is Route.Main && navigator.backStackSize() == 1 && mainState.selectedPage != 0,
+        onBackCompleted = { mainState.animateToPage(0) },
+    )
 }

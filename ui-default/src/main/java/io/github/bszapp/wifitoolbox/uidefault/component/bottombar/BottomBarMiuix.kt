@@ -28,10 +28,10 @@ import top.yukonga.miuix.kmp.basic.NavigationItem
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
-import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Home
-import top.yukonga.miuix.kmp.icon.extended.ListView
-import top.yukonga.miuix.kmp.icon.extended.Settings
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cottage
+import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Settings
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
@@ -108,7 +108,7 @@ private enum class BottomBarDestination(
     val label: String,
     val icon: ImageVector,
 ) {
-    Home("主页", MiuixIcons.Home),
-    List("列表", MiuixIcons.ListView),
-    Setting("设置", MiuixIcons.Settings),
+    Home("主页", Icons.Rounded.Cottage),
+    List("列表", Icons.Rounded.Security),
+    Setting("设置", Icons.Rounded.Settings),
 }

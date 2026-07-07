@@ -1,14 +1,13 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.compose)
+    id("kotlin-parcelize")
 }
 
 android {
     namespace = "io.github.bszapp.wifitoolbox.uidefault"
     compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
+        version = release(37)
     }
 
     defaultConfig {
@@ -44,11 +43,16 @@ dependencies {
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.compose.material3)
     implementation(libs.material.kolor)
-    implementation("top.yukonga.miuix.kmp:miuix-preference:0.9.3")
-    implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.3")
-    implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.3")
-    implementation("top.yukonga.miuix.kmp:miuix-blur:0.9.3")
+    implementation(libs.miuix.preference)
+    implementation(libs.miuix.ui)
+    implementation(libs.miuix.icons)
+    implementation(libs.miuix.blur)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+    implementation(libs.miuix.navigation3.ui)
+    implementation(libs.androidx.navigationevent.compose)
+    implementation(libs.androidx.navigation3.runtime)
+    implementation(libs.androidx.activity.compose)
 
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.compose.material.icons.extended)

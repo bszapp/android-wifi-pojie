@@ -54,7 +54,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.style.TextAlign
 import io.github.bszapp.wifitoolbox.contract.wifilist.ScanStatus
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
@@ -72,7 +71,8 @@ private enum class ListUiState { IDLE, LOADING, EMPTY, CONTENT, WIFI_DISABLED, E
 fun WifiList(
     modifier: Modifier = Modifier,
     vm: DefaultViewModel = viewModel(),
-    listState: LazyListState = rememberLazyListState()
+    listState: LazyListState = rememberLazyListState(),
+    contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
 ) {
     val scanResults by vm.wifiList.results.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
@@ -257,7 +257,7 @@ fun WifiList(
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        contentPadding = contentPadding,
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         itemsIndexed(

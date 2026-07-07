@@ -8,9 +8,8 @@ import androidx.compose.foundation.layout.add
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.only
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
@@ -67,7 +66,7 @@ fun ListScreen(
             BlurredBar(backdrop) {
                 TopAppBar(
                     color = barColor,
-                    title = "连接",
+                    title = "系统模式",
                     navigationIcon = {
                         Box {
                             val showTopPopup = remember { mutableStateOf(false) }
@@ -136,18 +135,18 @@ fun ListScreen(
             Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
                 WifiList(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxHeight()
                         .scrollEndHaptic()
                         .overScrollVertical()
-                        .nestedScroll(scrollBehavior.nestedScrollConnection)
-                        .padding(
-                            top = innerPadding.calculateTopPadding() + 6.dp,
-                            start = innerPadding.calculateStartPadding(layoutDirection),
-                            end = innerPadding.calculateEndPadding(layoutDirection),
-                            bottom = bottomInnerPadding,
-                        ),
+                        .nestedScroll(scrollBehavior.nestedScrollConnection),
                     vm = viewModel,
                     listState = listState,
+                    contentPadding = PaddingValues(
+                        top = innerPadding.calculateTopPadding() + 14.dp,
+                        start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
+                        end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
+                        bottom = bottomInnerPadding + 8.dp,
+                    ),
                 )
             }
         }

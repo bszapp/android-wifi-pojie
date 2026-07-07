@@ -5,9 +5,7 @@ plugins {
 android {
     namespace = "io.github.bszapp.wifitoolbox.service"
     compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
+        version = release(37)
     }
 
     defaultConfig {

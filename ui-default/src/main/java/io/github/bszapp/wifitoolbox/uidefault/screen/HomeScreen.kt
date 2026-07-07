@@ -52,9 +52,9 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
-import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Close
-import top.yukonga.miuix.kmp.icon.extended.Ok
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CheckCircleOutline
+import androidx.compose.material.icons.rounded.ErrorOutline
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
@@ -78,7 +78,7 @@ fun HomeScreen(
     val modeText = mode.displayName()
     val versionText = formatVersion(versionName, versionCode)
     val pidText = pid?.toString() ?: "未知"
-    val shortVersion = versionName?.takeIf { it.isNotBlank() } ?: "未知"
+    val permissionText = permissionName(uid)
 
     if (showSheet) {
         ServiceStatusDialog(
@@ -138,7 +138,8 @@ fun HomeScreen(
                             active = active,
                             modeText = modeText,
                             pidText = pidText,
-                            versionName = shortVersion,
+                            permissionText = permissionText,
+                            versionText = versionText,
                             onClick = { showSheet = true },
                         )
                     }
@@ -154,10 +155,11 @@ private fun ServiceStatusCard(
     active: Boolean,
     modeText: String,
     pidText: String,
-    versionName: String,
+    permissionText: String,
+    versionText: String,
     onClick: () -> Unit,
 ) {
-    val isDynamicColor = MiuixTheme.colorScheme.primary != Color.Unspecified
+    val isDynamicColor = colorScheme.primary != Color.Unspecified
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -171,11 +173,9 @@ private fun ServiceStatusCard(
                 .fillMaxHeight(),
             colors = CardDefaults.defaultColors(
                 color = when {
-                    active && isDynamicColor -> colorScheme.secondaryContainer
-                    active && isInDarkTheme() -> Color(0xFF1A3825)
-                    active -> Color(0xFFDFFAE4)
-                    isInDarkTheme() -> Color(0xFF3B2424)
-                    else -> Color(0xFFFFE1E1)
+                    isDynamicColor -> colorScheme.secondaryContainer
+                    isInDarkTheme() -> Color(0xFF1A3825)
+                    else -> Color(0xFFDFFAE4)
                 },
             ),
             onClick = onClick,
@@ -191,11 +191,11 @@ private fun ServiceStatusCard(
                 ) {
                     Icon(
                         modifier = Modifier.size(170.dp),
-                        imageVector = if (active) MiuixIcons.Ok else MiuixIcons.Close,
-                        tint = if (active) {
-                            if (isDynamicColor) colorScheme.primary.copy(alpha = 0.8f) else Color(0xFF36D167)
+                        imageVector = if (active) Icons.Rounded.CheckCircleOutline else Icons.Rounded.ErrorOutline,
+                        tint = if (isDynamicColor) {
+                            colorScheme.primary.copy(alpha = 0.8f)
                         } else {
-                            colorScheme.error.copy(alpha = 0.78f)
+                            Color(0xFF36D167)
                         },
                         contentDescription = null,
                     )
@@ -215,7 +215,7 @@ private fun ServiceStatusCard(
                     Spacer(Modifier.height(2.dp))
                     Text(
                         modifier = Modifier.fillMaxWidth(),
-                        text = if (active) "服务版本 $versionName" else "点击重新选择工作模式",
+                        text = if (active) "版本：$versionText" else "点击重新选择工作模式",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
                         color = colorScheme.onSurface,
@@ -232,16 +232,14 @@ private fun ServiceStatusCard(
         ) {
             InfoNumberCard(
                 modifier = Modifier.weight(1f),
-                title = "PID",
-                value = pidText,
-                onClick = onClick,
+                title = "权限",
+                value = permissionText,
             )
             Spacer(Modifier.height(12.dp))
             InfoNumberCard(
                 modifier = Modifier.weight(1f),
-                title = "版本",
-                value = versionName,
-                onClick = onClick,
+                title = "PID",
+                value = pidText,
             )
         }
     }
@@ -252,15 +250,11 @@ private fun InfoNumberCard(
     modifier: Modifier = Modifier,
     title: String,
     value: String,
-    onClick: () -> Unit,
 ) {
     Card(
         modifier = modifier
             .fillMaxWidth(),
         insideMargin = PaddingValues(16.dp),
-        onClick = onClick,
-        showIndication = true,
-        pressFeedbackType = PressFeedbackType.Tilt,
     ) {
         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
             Text(
@@ -294,4 +288,12 @@ internal fun formatVersion(name: String?, code: Long?): String {
     val versionName = name?.takeIf { it.isNotBlank() } ?: return "未知"
     val versionCode = code?.takeIf { it >= 0 } ?: return "未知"
     return "$versionName($versionCode)"
+}
+
+internal fun permissionName(uid: Int?): String = when (uid) {
+    0 -> "ROOT"
+    1000 -> "System"
+    2000 -> "Shell"
+    null -> "未知"
+    else -> "未知"
 }

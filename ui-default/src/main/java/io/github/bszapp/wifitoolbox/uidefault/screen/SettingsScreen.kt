@@ -32,11 +32,9 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
-import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.GridView
-import top.yukonga.miuix.kmp.icon.extended.Theme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Palette
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -81,27 +79,12 @@ fun SettingsScreen(
                             .padding(top = 12.dp)
                             .fillMaxWidth(),
                     ) {
-                        OverlayDropdownPreference(
-                            title = "界面风格",
-                            summary = "选择应用的界面风格",
-                            items = listOf("Miuix"),
-                            startAction = {
-                                Icon(
-                                    MiuixIcons.GridView,
-                                    modifier = Modifier.padding(end = 6.dp),
-                                    contentDescription = "界面风格",
-                                    tint = colorScheme.onBackground,
-                                )
-                            },
-                            selectedIndex = 0,
-                            onSelectedIndexChange = { },
-                        )
                         ArrowPreference(
                             title = "主题设置",
                             summary = "自定义更多主题选项",
                             startAction = {
                                 Icon(
-                                    MiuixIcons.Theme,
+                                    Icons.Rounded.Palette,
                                     modifier = Modifier.padding(end = 6.dp),
                                     contentDescription = "主题设置",
                                     tint = colorScheme.onBackground,
