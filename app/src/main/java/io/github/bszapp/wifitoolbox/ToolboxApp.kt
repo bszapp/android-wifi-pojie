@@ -15,6 +15,7 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
+import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,8 @@ import kotlinx.coroutines.launch
 class ToolboxApp : Application(), IAppController {
 
     private lateinit var processLauncher: ProcessLauncher
+    override lateinit var settings: SettingsManager
+        private set
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val _isExiting = MutableStateFlow(false)
@@ -63,6 +66,7 @@ class ToolboxApp : Application(), IAppController {
 
     override fun onCreate() {
         super.onCreate()
+        settings = SettingsManager(this)
         processLauncher = ProcessLauncher(this)
         AppControllerProvider.register(this)
         processLauncher.tryAutoReconnect()

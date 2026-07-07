@@ -1,153 +1,118 @@
 package io.github.bszapp.wifitoolbox.uidefault.screen
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.add
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
-import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ServiceStatusDialog
+import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
+import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
+import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
+import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
+import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.GridView
+import top.yukonga.miuix.kmp.icon.extended.Theme
+import top.yukonga.miuix.kmp.preference.ArrowPreference
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+import top.yukonga.miuix.kmp.utils.overScrollVertical
+import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: DefaultViewModel = viewModel()) {
-    val uid by viewModel.startup.uid.collectAsStateWithLifecycle()
-    val pid by viewModel.startup.pid.collectAsStateWithLifecycle()
-    val mode by viewModel.startup.mode.collectAsStateWithLifecycle()
-    val versionName by viewModel.startup.serviceVersionName.collectAsStateWithLifecycle()
-    val versionCode by viewModel.startup.serviceVersionCode.collectAsStateWithLifecycle()
-    val scrollBehavior =
-        TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
-
-    var showDialog by rememberSaveable { mutableStateOf(false) }
-    val uidStr by viewModel.startup.uidStr.collectAsStateWithLifecycle()
-
-    val isActive = uid != null
-    val containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer
-    else MaterialTheme.colorScheme.errorContainer
-    val contentColor = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer
-    else MaterialTheme.colorScheme.onErrorContainer
-    val icon = if (isActive) Icons.Rounded.CheckCircle else Icons.Rounded.ErrorOutline
-    val title = if (isActive) "服务运行中" else "未激活"
-    val modeText = mode.displayName()
-    val versionText = formatVersion(versionName, versionCode)
-    val subtitle = if (isActive) "$modeText  $versionText  UID:$uid  PID:$pid" else "点击选择工作模式"
-
-    if (showDialog) {
-        ServiceStatusDialog(
-            uidStr = uidStr ?: "获取失败",
-            versionText = versionText,
-            onDismiss = { showDialog = false },
-            onExit = {
-                showDialog = false
-                viewModel.startup.stop(true)
-            },
-            onReselect = {
-                showDialog = false
-                viewModel.startup.stop(false)
-            }
-        )
-    }
+fun SettingsScreen(
+    viewModel: DefaultViewModel = viewModel(),
+    bottomInnerPadding: Dp = 0.dp,
+) {
+    val navigator = LocalNavigator.current
+    val scrollBehavior = MiuixScrollBehavior()
+    val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
+    val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
 
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            LargeTopAppBar(
-                title = {
-                    Text(
-                        text = "设置",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                },
-                scrollBehavior = scrollBehavior,
-            )
+            BlurredBar(backdrop) {
+                TopAppBar(
+                    color = barColor,
+                    title = "设置",
+                    scrollBehavior = scrollBehavior,
+                )
+            }
         },
+        popupHost = { },
+        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal),
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            Box(
+        Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
+            LazyColumn(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(containerColor)
-                    .clickable {
-                        if (isActive) showDialog = true
-                        else viewModel.startup.stop(false)
-                    }
-                    .padding(horizontal = 20.dp, vertical = 20.dp),
+                    .fillMaxHeight()
+                    .scrollEndHaptic()
+                    .overScrollVertical()
+                    .nestedScroll(scrollBehavior.nestedScrollConnection)
+                    .padding(horizontal = 12.dp),
+                contentPadding = innerPadding,
+                overscrollEffect = null,
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = contentColor,
-                    )
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                item {
+                    Card(
+                        modifier = Modifier
+                            .padding(top = 12.dp)
+                            .fillMaxWidth(),
                     ) {
-                        Text(
-                            text = title,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = contentColor,
+                        OverlayDropdownPreference(
+                            title = "界面风格",
+                            summary = "选择应用的界面风格",
+                            items = listOf("Miuix"),
+                            startAction = {
+                                Icon(
+                                    MiuixIcons.GridView,
+                                    modifier = Modifier.padding(end = 6.dp),
+                                    contentDescription = "界面风格",
+                                    tint = colorScheme.onBackground,
+                                )
+                            },
+                            selectedIndex = 0,
+                            onSelectedIndexChange = { },
                         )
-                        Text(
-                            text = subtitle,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = contentColor.copy(alpha = 0.7f),
+                        ArrowPreference(
+                            title = "主题设置",
+                            summary = "自定义更多主题选项",
+                            startAction = {
+                                Icon(
+                                    MiuixIcons.Theme,
+                                    modifier = Modifier.padding(end = 6.dp),
+                                    contentDescription = "主题设置",
+                                    tint = colorScheme.onBackground,
+                                )
+                            },
+                            onClick = { navigator.push(Route.ColorPalette) },
                         )
                     }
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                        contentDescription = null,
-                        tint = contentColor.copy(alpha = 0.7f),
-                    )
+                    Spacer(Modifier.height(bottomInnerPadding))
                 }
             }
         }
     }
-}
-
-
-private fun StartupMode?.displayName(): String = when (this) {
-    StartupMode.SHIZUKU -> "Shizuku"
-    StartupMode.SHIZUKU_TERMINAL -> "Terminal"
-    StartupMode.ROOT -> "Root"
-    null -> "未知"
-}
-
-private fun formatVersion(name: String?, code: Long?): String {
-    val versionName = name?.takeIf { it.isNotBlank() } ?: return "未知"
-    val versionCode = code?.takeIf { it >= 0 } ?: return "未知"
-    return "$versionName($versionCode)"
 }

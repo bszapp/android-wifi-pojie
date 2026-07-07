@@ -44,6 +44,10 @@ dependencies {
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.compose.material3)
     implementation(libs.material.kolor)
+    implementation("top.yukonga.miuix.kmp:miuix-preference:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-blur:0.9.3")
     implementation(libs.androidx.lifecycle.viewmodel.compose)
 
     implementation(libs.androidx.compose.material.icons.core)
