@@ -13,7 +13,6 @@ class ThemeSettings : SettingGroup("theme") {
     val enableBlur = BooleanSetting("enableBlur", false)
     val enableFloatingBottomBar = BooleanSetting("enableFloatingBottomBar", false)
     val enableFloatingBottomBarBlur = BooleanSetting("enableFloatingBottomBarBlur", false)
-    val enablePredictiveBack = BooleanSetting("enablePredictiveBack", false)
     val pageScale = FloatSetting("pageScale", 1.0f)
 
     override val children: List<SettingItem> = listOf(
@@ -25,7 +24,6 @@ class ThemeSettings : SettingGroup("theme") {
         enableBlur,
         enableFloatingBottomBar,
         enableFloatingBottomBarBlur,
-        enablePredictiveBack,
         pageScale,
     )
 }

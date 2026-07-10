@@ -119,7 +119,7 @@ fun ListScreen(
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal),
     ) { innerPadding ->
         val layoutDirection = LocalLayoutDirection.current
-        val refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新", "刷新完成")
+        val refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "刷新成功")
         PullToRefresh(
             isRefreshing = isScanning,
             pullToRefreshState = pullState,

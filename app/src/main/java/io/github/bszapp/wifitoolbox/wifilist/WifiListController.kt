@@ -95,6 +95,14 @@ class WifiListController(
 
         Log.d(TAG, "获取到服务实例，准备启动扫描协程")
         scanJob?.cancel()
+        // PullToRefresh requires the external refreshing flag to become true in the same
+        // interaction frame. Waiting for the service IPC to return first makes it briefly
+        // enter the completed state and then jump back to refreshing.
+        _state.value = _state.value.copy(
+            status = ScanStatus.LIST,
+            isScanning = true,
+            errorException = null,
+        )
         scanJob = scope.launch(Dispatchers.IO) {
             try {
                 val startResult = androidApi.startScan()
@@ -105,11 +113,6 @@ class WifiListController(
                     throw IllegalStateException("startScan 返回 false")
                 }
 
-                _state.value = ScanState(
-                    status = ScanStatus.LIST,
-                    scanResults = _state.value.scanResults,
-                    isScanning = true
-                )
                 delay(500.milliseconds)
 
                 while (System.currentTimeMillis() - startTime < 3_000L) {

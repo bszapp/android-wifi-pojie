@@ -1,6 +1,8 @@
 package io.github.bszapp.wifitoolbox.uidefault.screen.settings
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -51,6 +55,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamiccolor.ColorSpec
 import com.materialkolor.rememberDynamicColorScheme
+import io.github.bszapp.wifitoolbox.uidefault.component.LegacyTabRow
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.theme.ColorMode
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -65,7 +70,6 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SliderDefaults
-import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
@@ -105,7 +109,6 @@ fun ColorPaletteScreen() {
     val enableBlur by theme.enableBlur.value.collectAsStateWithLifecycle()
     val enableFloatingBottomBar by theme.enableFloatingBottomBar.value.collectAsStateWithLifecycle()
     val enableFloatingBottomBarBlur by theme.enableFloatingBottomBarBlur.value.collectAsStateWithLifecycle()
-    val enablePredictiveBack by theme.enablePredictiveBack.value.collectAsStateWithLifecycle()
     val pageScale by theme.pageScale.value.collectAsStateWithLifecycle()
 
     val colorMode = ColorMode.fromName(colorModeName).let { mode ->
@@ -122,6 +125,22 @@ fun ColorPaletteScreen() {
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
     val showScaleDialog = rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val predictiveBackPreferences = remember(context) {
+        context.applicationContext.getSharedPreferences(PREDICTIVE_BACK_PREFERENCES, Context.MODE_PRIVATE)
+    }
+    var enablePredictiveBack by remember {
+        mutableStateOf(predictiveBackPreferences.getBoolean(PREDICTIVE_BACK_KEY, false))
+    }
+    DisposableEffect(predictiveBackPreferences) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { preferences, key ->
+            if (key == PREDICTIVE_BACK_KEY) {
+                enablePredictiveBack = preferences.getBoolean(PREDICTIVE_BACK_KEY, false)
+            }
+        }
+        predictiveBackPreferences.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { predictiveBackPreferences.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
 
     Scaffold(
         topBar = {
@@ -174,7 +193,7 @@ fun ColorPaletteScreen() {
                     Spacer(modifier = Modifier.height(72.dp))
 
                     val themeItems = listOf("跟随系统", "浅色", "深色")
-                    TabRow(
+                    LegacyTabRow(
                         tabs = themeItems,
                         selectedTabIndex = colorMode.baseIndex.coerceIn(0, 2),
                         onTabSelected = { index ->
@@ -194,12 +213,12 @@ fun ColorPaletteScreen() {
                             .fillMaxWidth(),
                     ) {
                         SwitchPreference(
-                            title = "动态取色",
+                            title = "启用 Monet 颜色",
                             startAction = {
                                 Icon(
                                     Icons.Rounded.Wallpaper,
                                     modifier = Modifier.padding(end = 6.dp),
-                                    contentDescription = "动态取色",
+                                    contentDescription = "启用 Monet 颜色",
                                     tint = colorScheme.onBackground,
                                 )
                             },
@@ -216,7 +235,7 @@ fun ColorPaletteScreen() {
                             Column {
                                 val colors = listOf(0) + keyColorOptions
                                 val colorNames = listOf(
-                                    "默认", "红色", "粉红", "紫色", "深紫", "靛青", "蓝色", "青色", "青绿", "绿色",
+                                    "默认", "红色", "粉色", "紫色", "深紫", "靛青", "蓝色", "青色", "青绿", "绿色",
                                     "黄色", "琥珀", "橙色", "棕色", "灰蓝", "樱花",
                                 )
                                 OverlayDropdownPreference(
@@ -342,11 +361,15 @@ fun ColorPaletteScreen() {
                                     )
                                 },
                                 checked = enablePredictiveBack,
-                                onCheckedChange = { theme.enablePredictiveBack.set(it) },
+                                onCheckedChange = { enabled ->
+                                    predictiveBackPreferences.edit()
+                                        .putBoolean(PREDICTIVE_BACK_KEY, enabled)
+                                        .apply()
+                                },
                             )
                         }
 
-                        var sliderValue by remember(pageScale) { mutableFloatStateOf(pageScale.coerceIn(0.8f, 1.1f)) }
+                        var sliderValue by remember(pageScale) { mutableFloatStateOf(pageScale) }
                         ArrowPreference(
                             title = "界面缩放",
                             summary = "调整全局显示比例",
@@ -413,7 +436,14 @@ private fun ThemePreviewCard(
     colorSpec: ColorSpec.SpecVersion = ColorSpec.SpecVersion.SPEC_2021,
 ) {
     val configuration = LocalConfiguration.current
-    val screenRatio = configuration.screenWidthDp.toFloat() / configuration.screenHeightDp.toFloat()
+    val screenWidth = configuration.screenWidthDp.toFloat()
+    val screenHeight = configuration.screenHeightDp.toFloat()
+    val screenRatio = screenWidth / screenHeight
+    val context = LocalContext.current
+    val appName = remember(context) {
+        context.applicationInfo.loadLabel(context.packageManager).toString()
+    }
+
     val seedColor = if (keyColor == 0) colorScheme.primary else Color(keyColor)
     val effectiveStyle = if (keyColor == 0) PaletteStyle.TonalSpot else paletteStyle
     val effectiveSpec = if (keyColor == 0) ColorSpec.SpecVersion.Default else colorSpec
@@ -423,6 +453,7 @@ private fun ThemePreviewCard(
         style = effectiveStyle,
         specVersion = effectiveSpec,
     )
+
     val bgColor = if (miuixMonet) dynamicCs.background else colorScheme.surface
     val textColor = if (miuixMonet) dynamicCs.onSurface else colorScheme.onBackground
     val accentCardColor = when {
@@ -458,8 +489,13 @@ private fun ThemePreviewCard(
                         .padding(start = 12.dp, top = 24.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(text = "Wi-Fi Toolbox", fontSize = 12.sp, color = textColor)
+                    Text(
+                        text = appName,
+                        fontSize = 12.sp,
+                        color = textColor,
+                    )
                 }
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -496,43 +532,93 @@ private fun ThemePreviewCard(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                if (enableFloatingBottomBar) {
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(0.8f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(cardColor),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(.1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(cardColor),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(.1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(cardColor),
+                    )
+                }
+            }
+
+            if (enableFloatingBottomBar) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp),
+                ) {
                     Row(
                         modifier = Modifier
-                            .align(Alignment.CenterHorizontally)
-                            .padding(bottom = 8.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(if (enableFloatingBottomBarBlur) navBarColor.copy(alpha = 0.55f) else navBarColor)
-                            .padding(horizontal = 12.dp, vertical = 5.dp),
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                if (enableFloatingBottomBarBlur) navBarColor.copy(alpha = 0.5f)
+                                else navBarColor,
+                            )
+                            .border(0.5.dp, textColor.copy(alpha = 0.1f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        repeat(3) { index ->
+                        repeat(4) {
                             Box(
                                 modifier = Modifier
-                                    .size(if (index == 0) 10.dp else 8.dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(if (index == 0) iconColor else navUnselectedColor),
+                                    .size(13.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(if (it == 0) iconColor else textColor),
                             )
                         }
                     }
-                } else {
-                    Row(
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth(),
+                ) {
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(26.dp)
+                            .height(0.5.dp)
+                            .background(textColor.copy(alpha = 0.1f)),
+                    )
+                    Row(
+                        modifier = Modifier
+                            .height(36.dp)
+                            .fillMaxWidth()
                             .background(navBarColor)
-                            .padding(horizontal = 20.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                            .padding(top = 2.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        repeat(3) { index ->
+                        repeat(4) {
                             Box(
                                 modifier = Modifier
-                                    .size(if (index == 0) 7.dp else 6.dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(if (index == 0) iconColor else navSelectedColor.copy(alpha = 0.35f)),
+                                    .size(15.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(if (it == 0) navSelectedColor else navUnselectedColor),
                             )
                         }
                     }
@@ -541,6 +627,9 @@ private fun ThemePreviewCard(
         }
     }
 }
+
+private const val PREDICTIVE_BACK_PREFERENCES = "android_ui_preferences"
+private const val PREDICTIVE_BACK_KEY = "enable_predictive_back"
 
 @Composable
 private fun ScaleDialog(

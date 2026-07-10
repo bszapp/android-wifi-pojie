@@ -57,6 +57,7 @@ import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -80,25 +81,23 @@ fun HomeScreen(
     val pidText = pid?.toString() ?: "未知"
     val permissionText = permissionName(uid)
 
-    if (showSheet) {
-        ServiceStatusDialog(
-            show = showSheet,
-            title = if (active) "服务运行中" else "服务未激活",
-            modeText = modeText,
-            pidText = pidText,
-            uidStr = uidStr ?: "未知",
-            versionText = versionText,
-            onDismiss = { showSheet = false },
-            onExit = {
-                showSheet = false
-                viewModel.startup.stop(true)
-            },
-            onReselect = {
-                showSheet = false
-                viewModel.startup.stop(false)
-            },
-        )
-    }
+    ServiceStatusDialog(
+        show = showSheet,
+        title = if (active) "服务运行中" else "服务未激活",
+        modeText = modeText,
+        pidText = pidText,
+        uidStr = uidStr ?: "未知",
+        versionText = versionText,
+        onDismiss = { showSheet = false },
+        onExit = {
+            showSheet = false
+            viewModel.startup.stop(true)
+        },
+        onReselect = {
+            showSheet = false
+            viewModel.startup.stop(false)
+        },
+    )
 
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
@@ -159,7 +158,6 @@ private fun ServiceStatusCard(
     versionText: String,
     onClick: () -> Unit,
 ) {
-    val isDynamicColor = colorScheme.primary != Color.Unspecified
     Row(
         modifier = Modifier
             .fillMaxWidth()

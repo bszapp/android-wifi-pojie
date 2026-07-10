@@ -1,8 +1,6 @@
 package io.github.bszapp.wifitoolbox.uidefault.theme
 
 import android.app.Activity
-import android.content.Context
-import android.content.pm.ApplicationInfo
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
@@ -72,20 +70,8 @@ val LocalColorMode = staticCompositionLocalOf { ColorMode.SYSTEM }
 val LocalEnableBlur = staticCompositionLocalOf { false }
 val LocalEnableFloatingBottomBar = staticCompositionLocalOf { false }
 val LocalEnableFloatingBottomBarBlur = staticCompositionLocalOf { false }
-val LocalEnablePredictiveBack = staticCompositionLocalOf { false }
 
 
-private fun setEnableOnBackInvokedCallback(context: Context, enable: Boolean) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
-    runCatching {
-        val method = ApplicationInfo::class.java.getDeclaredMethod(
-            "setEnableOnBackInvokedCallback",
-            Boolean::class.javaPrimitiveType,
-        )
-        method.isAccessible = true
-        method.invoke(context.applicationInfo, enable)
-    }
-}
 
 val keyColorOptions = listOf(
     0xFFF44336.toInt(),
@@ -122,7 +108,6 @@ fun WifiToolboxMiuixTheme(
     val enableBlur by theme.enableBlur.value.collectAsState()
     val enableFloatingBottomBar by theme.enableFloatingBottomBar.value.collectAsState()
     val enableFloatingBottomBarBlur by theme.enableFloatingBottomBarBlur.value.collectAsState()
-    val enablePredictiveBack by theme.enablePredictiveBack.value.collectAsState()
     val pageScale by theme.pageScale.value.collectAsState()
 
     val colorMode = ColorMode.fromName(colorModeName).let { mode ->
@@ -161,9 +146,6 @@ fun WifiToolboxMiuixTheme(
                 isAppearanceLightNavigationBars = !dark
             }
         }
-        LaunchedEffect(enablePredictiveBack) {
-            setEnableOnBackInvokedCallback(context, enablePredictiveBack)
-        }
         val density = LocalDensity.current
         val scaledDensity = remember(density, pageScale) {
             Density(
@@ -178,7 +160,6 @@ fun WifiToolboxMiuixTheme(
             LocalEnableBlur provides (enableBlur && blurSupported),
             LocalEnableFloatingBottomBar provides enableFloatingBottomBar,
             LocalEnableFloatingBottomBarBlur provides (enableFloatingBottomBarBlur && blurSupported),
-            LocalEnablePredictiveBack provides enablePredictiveBack,
             LocalDensity provides scaledDensity,
         ) {
             content()

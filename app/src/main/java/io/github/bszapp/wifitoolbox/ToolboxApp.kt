@@ -15,6 +15,7 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
+import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
 import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +24,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +37,7 @@ class ToolboxApp : Application(), IAppController {
         private set
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private lateinit var predictiveBackController: PredictiveBackController
     private val _isExiting = MutableStateFlow(false)
     override val isExiting: StateFlow<Boolean> = _isExiting.asStateFlow()
 
@@ -67,6 +70,9 @@ class ToolboxApp : Application(), IAppController {
     override fun onCreate() {
         super.onCreate()
         settings = SettingsManager(this)
+        predictiveBackController = PredictiveBackController(
+            application = this,
+        ).also { it.start() }
         processLauncher = ProcessLauncher(this)
         AppControllerProvider.register(this)
         processLauncher.tryAutoReconnect()
@@ -115,8 +121,10 @@ class ToolboxApp : Application(), IAppController {
         }
     }
 
+
     override fun onTerminate() {
         super.onTerminate()
+        predictiveBackController.stop()
         wifiStateReceiver?.let {
             unregisterReceiver(it)
             wifiStateReceiver = null
@@ -125,7 +133,7 @@ class ToolboxApp : Application(), IAppController {
         appScope.cancel()
     }
 
-    companion object {
-        private const val TAG = "ToolboxApp"
+    private companion object {
+        const val TAG = "ToolboxApp"
     }
 }

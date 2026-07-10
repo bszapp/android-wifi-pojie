@@ -7,19 +7,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.runtime.*
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import com.materialkolor.DynamicMaterialTheme
-import com.materialkolor.PaletteStyle
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.ui.startup.StartupScreen
+import io.github.bszapp.wifitoolbox.ui.theme.WifiToolboxMaterialTheme
 import io.github.bszapp.wifitoolbox.uidefault.DefaultUI
 
 class MainActivity : ComponentActivity() {
@@ -34,31 +31,20 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            val context = LocalContext.current
-            val isDark = isSystemInDarkTheme()
-            val seedColor = remember {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-                    dynamicLightColorScheme(context).primary
-                else Color(0xFF6750A4)
-            }
             val state by controller.startup.state.collectAsState()
             val isExiting by controller.isExiting.collectAsState()
 
             LaunchedEffect(isExiting) {
-                if (isExiting) {
-                    finish()
-                }
+                if (isExiting) finish()
             }
 
-            DynamicMaterialTheme(
-                seedColor = seedColor,
-                isDark = isDark,
-                style = PaletteStyle.TonalSpot,
-                animate = true
-            ) {
+            WifiToolboxMaterialTheme(settingsManager = controller.settings) {
                 @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
-                Scaffold(modifier = Modifier.fillMaxSize()) { _ ->
-                    AnimatedContent(targetState = state.status == StartupStatus.RUNNING) { isRunning ->
+                Scaffold(modifier = Modifier.fillMaxSize()) {
+                    AnimatedContent(
+                        targetState = state.status == StartupStatus.RUNNING,
+                        label = "startup_state",
+                    ) { isRunning ->
                         if (isRunning) {
                             DefaultUI()
                         } else {
