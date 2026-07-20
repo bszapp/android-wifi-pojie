@@ -2,219 +2,292 @@
 
 package io.github.bszapp.wifitoolbox.wifilist
 
-import android.net.wifi.ScanResult
-import android.net.wifi.WifiConfiguration
-import android.os.Parcel
-import android.os.Parcelable
+import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
-import io.github.bszapp.wifitoolbox.contract.wifilist.ScanState
-import io.github.bszapp.wifitoolbox.contract.wifilist.ScanStatus
+import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.service.IMainService
+import io.github.bszapp.wifitoolbox.service.IMainServiceCallback
 import io.github.bszapp.wifitoolbox.tools.AndroidApiClient
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
+/**
+ * App 侧只保存 Service 数据的只读镜像并转发用户命令。
+ *
+ * 所有错误都交给 ToolboxApp 的统一错误广播源；本控制器不再拥有独立扫描错误流。
+ */
 class WifiListController(
     private val scope: CoroutineScope,
-    private val getAndroidApi: () -> AndroidApiClient?,
+    private val getMainService: () -> IMainService?,
+    private val getAndroidApiClient: () -> AndroidApiClient?,
+    private val reportError: (
+        source: String,
+        operation: String,
+        error: Throwable,
+        remoteDetails: String?,
+    ) -> Unit,
 ) : IWifiListController {
 
-    private var scanJob: Job? = null
+    private val _state = MutableStateFlow<WifiState?>(null)
+    override val state: StateFlow<WifiState?> = _state.asStateFlow()
 
-    private val _state = MutableStateFlow(ScanState())
-    override val state: StateFlow<ScanState> = _state.asStateFlow()
+    private val _savedWifiList = MutableStateFlow<SavedWifiList?>(null)
+    override val savedWifiList: StateFlow<SavedWifiList?> = _savedWifiList.asStateFlow()
 
-    private val _savedWifiList = MutableStateFlow<List<WifiConfiguration>>(emptyList())
-    override val savedWifiList: StateFlow<List<WifiConfiguration>> = _savedWifiList.asStateFlow()
+    @Volatile
+    private var registeredService: IMainService? = null
+    private var registeredBinder: IBinder? = null
 
-    private var previousResults: Map<String, ScanResult> = emptyMap()
+    private val callback = object : IMainServiceCallback.Stub() {
+        override fun onWifiStateChanged(payload: ParcelFileDescriptor) {
+            scope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    WifiParcelTransport.decodeWifiState(payload)
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    result
+                        .onSuccess { _state.value = it }
+                        .onFailure {
+                            report(
+                                operation = "解码 WifiState",
+                                error = it,
+                            )
+                        }
+                }
+                acknowledgeWifiState()
+            }
+        }
 
-    private var isWifiEnabled = true
+        override fun onSavedWifiListChanged(payload: ParcelFileDescriptor) {
+            scope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    WifiParcelTransport.decodeSavedWifiList(payload)
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    result
+                        .onSuccess { _savedWifiList.value = it }
+                        .onFailure {
+                            report(
+                                operation = "解码 SavedWifiList",
+                                error = it,
+                            )
+                        }
+                }
+                acknowledgeSavedWifiList()
+            }
+        }
 
-    fun updateWifiEnabled(enabled: Boolean) {
-        isWifiEnabled = enabled
-        if (!enabled) {
-            scanJob?.cancel()
-            scanJob = null
-            _state.value = ScanState(status = ScanStatus.NOT_ENABLED)
+        override fun onServiceError(
+            source: String,
+            operation: String,
+            message: String,
+            details: String,
+        ) {
+            reportError(
+                source,
+                operation,
+                IllegalStateException(message),
+                details,
+            )
         }
     }
 
-    fun refreshScanResults() {
-        if (!isWifiEnabled) {
-            Log.w(TAG, "refreshScanResults() 失败：wifi未开启")
-            _state.value = ScanState(status = ScanStatus.NOT_ENABLED)
-            return
-        }
-
-        val androidApi = getAndroidApi() ?: run {
-            setScanError(Exception("服务未运行"), "refreshScanResults() 失败：服务未运行")
-            return
-        }
-
-        scanJob?.cancel()
-        scanJob = scope.launch(Dispatchers.IO) {
-            try {
-                val results = readScanResults(androidApi)
-                diffAndLog(results)
-                previousResults = results.associateBy { requireBssid(it) }
-                _state.value = ScanState(
-                    status = ScanStatus.LIST,
-                    scanResults = results,
-                    isScanning = false
+    override fun initialize() {
+        scope.launch(Dispatchers.IO) {
+            val service = getMainService()
+            if (service == null) {
+                report(
+                    operation = "注册 Wi-Fi 数据回调",
+                    error = IllegalStateException("service 未连接"),
                 )
-                refreshSavedWifiList()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                setScanError(e, "读取扫描结果失败：${e.message}")
+                return@launch
+            }
+
+            val binder = service.asBinder()
+            if (registeredBinder !== binder) {
+                registeredService?.let { old ->
+                    runCatching { old.unregisterCallback(callback) }
+                        .onFailure {
+                            report(
+                                operation = "注销旧 Wi-Fi 数据回调",
+                                error = it,
+                            )
+                        }
+                }
+
+                registeredService = service
+                registeredBinder = binder
+                withContext(Dispatchers.Main.immediate) {
+                    _state.value = null
+                    _savedWifiList.value = null
+                }
+
+                runCatching { service.registerCallback(callback) }
+                    .onFailure {
+                        report(
+                            operation = "注册 Wi-Fi 数据回调",
+                            error = it,
+                        )
+                    }
             }
         }
     }
 
+    override fun updateSavedNetworks() {
+        callService("请求刷新已保存 Wi-Fi 列表") {
+            it.refreshSavedWifiNetworks()
+        }
+    }
+
+    /**
+     * 同步等待 Service 的 WifiScanner.onSuccess/onFailure。
+     * 调用线程由 ViewModel 决定；失败在这里进入 App 的统一错误广播后继续抛给调用者。
+     */
+    @Throws(Exception::class)
     override fun startScan() {
-        if (!isWifiEnabled) {
-            Log.w(TAG, "startScan() 失败：wifi未开启")
-            _state.value = ScanState(status = ScanStatus.NOT_ENABLED)
-            return
-        }
-
-        val androidApi = getAndroidApi() ?: run {
-            setScanError(Exception("服务未运行"), "startScan() 失败：服务未运行")
-            return
-        }
-
-        Log.d(TAG, "获取到服务实例，准备启动扫描协程")
-        scanJob?.cancel()
-        // PullToRefresh requires the external refreshing flag to become true in the same
-        // interaction frame. Waiting for the service IPC to return first makes it briefly
-        // enter the completed state and then jump back to refreshing.
-        _state.value = _state.value.copy(
-            status = ScanStatus.LIST,
-            isScanning = true,
-            errorException = null,
-        )
-        scanJob = scope.launch(Dispatchers.IO) {
-            try {
-                val startResult = androidApi.startScan()
-                val startTime = System.currentTimeMillis()
-                Log.d(TAG, "androidApi.startScan() 返回 $startResult，开始时间：$startTime")
-
-                if (!startResult) {
-                    throw IllegalStateException("startScan 返回 false")
-                }
-
-                delay(500.milliseconds)
-
-                while (System.currentTimeMillis() - startTime < 3_000L) {
-                    val results = readScanResults(androidApi)
-                    diffAndLog(results)
-                    previousResults = results.associateBy { requireBssid(it) }
-                    val elapsed = System.currentTimeMillis() - startTime
-                    Log.d(TAG, "轮询拉取：结果数=${results.size}，已用时=${elapsed}ms")
-                    _state.value = ScanState(
-                        status = ScanStatus.LIST,
-                        scanResults = results,
-                        isScanning = true
-                    )
-                    delay(250.milliseconds)
-                }
-
-                val finalResults = readScanResults(androidApi)
-                diffAndLog(finalResults)
-                previousResults = finalResults.associateBy { requireBssid(it) }
-                Log.d(TAG, "扫描结束，最终结果数=${finalResults.size}")
-                _state.value = ScanState(
-                    status = ScanStatus.LIST,
-                    scanResults = finalResults,
-                    isScanning = false
-                )
-                refreshSavedWifiList()
-
-            } catch (e: CancellationException) {
-                Log.d(TAG, "扫描协程被取消（用户重新发起扫描）")
-                throw e
-            } catch (e: Exception) {
-                setScanError(e, "扫描过程中发生异常：${e.message}")
-            }
-        }
-    }
-
-    private fun readScanResults(androidApi: AndroidApiClient): List<ScanResult> {
-        return androidApi.getScanResults().filterIndexed { index, result ->
-            val keep = !result.BSSID.isNullOrBlank()
-            if (!keep) Log.w(TAG, "丢弃第 $index 项扫描结果：BSSID 为空")
-            keep
-        }
-    }
-
-    private fun requireBssid(result: ScanResult): String = result.BSSID!!
-
-    private fun diffAndLog(newList: List<ScanResult>) {
-        if (previousResults.isEmpty()) return
-        val newMap = newList.associateBy { requireBssid(it) }
-        val appeared = newMap.keys - previousResults.keys
-        val disappeared = previousResults.keys - newMap.keys
-        appeared.forEach { Log.d(TAG, "新增 AP: ${newMap[it]?.SSID} [$it]") }
-        disappeared.forEach { Log.d(TAG, "消失 AP: ${previousResults[it]?.SSID} [$it]") }
-    }
-
-    @Suppress("DEPRECATION", "UNCHECKED_CAST")
-    override fun refreshSavedWifiList() {
-        val androidApi = getAndroidApi() ?: return
-        val parcel = Parcel.obtain()
         try {
-            val bytes = androidApi.getSavedWifiList()
-            if (bytes.isEmpty()) {
-                throw IllegalStateException("服务返回的 Wi-Fi 配置序列化数据为空")
+            val service = registeredService ?: getMainService()
+                ?: throw IllegalStateException("service 未连接")
+
+            Log.d(TAG, "向 Service 同步请求启动 Wi-Fi 扫描")
+            val started = service.startWifiScan()
+            if (!started) {
+                throw IllegalStateException("Service 未确认扫描已开始")
             }
-            parcel.unmarshall(bytes, 0, bytes.size)
-            parcel.setDataPosition(0)
-            val creator = WifiConfiguration::class.java
-                .getField("CREATOR").get(null) as Parcelable.Creator<WifiConfiguration>
-            _savedWifiList.value = parcel.createTypedArrayList(creator)
-                ?: throw IllegalStateException("反序列化 Wi-Fi 配置列表返回 null")
-        } catch (e: Exception) {
-            setScanError(e, "refreshSavedWifiList() 失败: ${e.message}")
-        } finally {
-            parcel.recycle()
+            Log.d(TAG, "Service 已确认 Wi-Fi 扫描开始")
+        } catch (error: Throwable) {
+            report(
+                operation = "发起 Wi-Fi 扫描",
+                error = error,
+            )
+            throw error
         }
     }
 
-    override fun updateWifiConfig(networkId: Int, patch: WifiConfigPatch) {
-        val androidApi = getAndroidApi() ?: return
-        scope.launch(Dispatchers.IO) {
-            val success = androidApi.updateWifiConfig(networkId, patch)
-            if (success) refreshSavedWifiList()
-        }
-    }
-
+    /** 单次系统命令只走 AndroidApi，不要求 Service 顺带刷新 WifiState。 */
     override fun setWifiEnabled(enabled: Boolean) {
-        val androidApi = getAndroidApi() ?: return
         scope.launch(Dispatchers.IO) {
-            androidApi.setWifiEnabled(enabled)
+            val client = getAndroidApiClient()
+            if (client == null) {
+                report(
+                    operation = "设置 Wi-Fi 开关为 $enabled",
+                    error = IllegalStateException("AndroidApiClient 不可用"),
+                )
+                return@launch
+            }
+
+            // AndroidApiClient 已负责把所有异常送入统一错误广播；这里仅终止协程异常传播。
+            runCatching { client.setWifiEnabled(enabled) }
+                .onFailure {
+                    Log.e(TAG, "设置 Wi-Fi 开关失败：${it.message}", it)
+                }
         }
     }
 
-    private fun setScanError(e: Exception, logMessage: String) {
-        Log.e(TAG, logMessage, e)
-        _state.value = ScanState(
-            status = ScanStatus.ERROR,
-            isScanning = false,
-            errorException = e
+    /** 修改系统配置成功后，由 App 单独请求 Service 刷新 SavedWifiList。 */
+    override fun updateWifiConfig(networkId: Int, patch: WifiConfigPatch) {
+        scope.launch(Dispatchers.IO) {
+            val client = getAndroidApiClient()
+            if (client == null) {
+                report(
+                    operation = "更新 Wi-Fi 配置 networkId=$networkId",
+                    error = IllegalStateException("AndroidApiClient 不可用"),
+                )
+                return@launch
+            }
+
+            val updated = runCatching {
+                client.updateWifiConfig(networkId, patch)
+            }.onFailure {
+                // AndroidApiClient 已广播详细错误。
+                Log.e(TAG, "更新 Wi-Fi 配置失败：${it.message}", it)
+            }.isSuccess
+
+            if (updated) {
+                callServiceNow("请求刷新已保存 Wi-Fi 列表") {
+                    it.refreshSavedWifiNetworks()
+                }
+            }
+        }
+    }
+
+    private fun acknowledgeWifiState() {
+        val service = registeredService ?: getMainService() ?: return
+        runCatching { service.acknowledgeWifiState(callback) }
+            .onFailure {
+                report(
+                    operation = "确认 WifiState 接收完成",
+                    error = it,
+                )
+            }
+    }
+
+    private fun acknowledgeSavedWifiList() {
+        val service = registeredService ?: getMainService() ?: return
+        runCatching { service.acknowledgeSavedWifiList(callback) }
+            .onFailure {
+                report(
+                    operation = "确认 SavedWifiList 接收完成",
+                    error = it,
+                )
+            }
+    }
+
+    private fun callService(
+        operation: String,
+        block: (IMainService) -> Unit,
+    ) {
+        scope.launch(Dispatchers.IO) {
+            callServiceNow(operation, block)
+        }
+    }
+
+    private fun callServiceNow(
+        operation: String,
+        block: (IMainService) -> Unit,
+    ) {
+        val service = registeredService ?: getMainService()
+        if (service == null) {
+            report(
+                operation = operation,
+                error = IllegalStateException("service 未连接"),
+            )
+            return
+        }
+
+        runCatching { block(service) }
+            .onFailure {
+                report(
+                    operation = operation,
+                    error = it,
+                )
+            }
+    }
+
+    private fun report(
+        operation: String,
+        error: Throwable,
+        remoteDetails: String? = null,
+    ) {
+        reportError(
+            "App.WifiListController",
+            operation,
+            error,
+            remoteDetails,
         )
     }
 
-    companion object {
-        private const val TAG = "WifiListController"
+    private companion object {
+        const val TAG = "WifiListController"
     }
 }

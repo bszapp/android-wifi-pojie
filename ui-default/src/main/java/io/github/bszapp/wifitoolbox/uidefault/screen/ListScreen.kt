@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.bszapp.wifitoolbox.contract.wifilist.isScanning
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -54,7 +55,10 @@ fun ListScreen(
     viewModel: DefaultViewModel = viewModel(),
     bottomInnerPadding: Dp = 0.dp,
 ) {
-    val isScanning by viewModel.wifiList.isScanning.collectAsStateWithLifecycle()
+    val wifiState by viewModel.wifiList.state.collectAsStateWithLifecycle()
+    val isSendingScanRequest by
+        viewModel.wifiList.isSendingScanRequest.collectAsStateWithLifecycle()
+    val isScanning = wifiState.isScanning || isSendingScanRequest
     val listState = rememberLazyListState()
     val pullState = rememberPullToRefreshState()
     val scrollBehavior = MiuixScrollBehavior()

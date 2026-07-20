@@ -2,8 +2,9 @@
 
 package io.github.bszapp.wifitoolbox.uidefault.widget
 
+import android.net.wifi.ScanResult
+import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,12 +24,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.rounded.Inbox
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -46,16 +50,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.rounded.Wifi
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.ui.text.style.TextAlign
-import io.github.bszapp.wifitoolbox.contract.wifilist.ScanStatus
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
 import io.github.bszapp.wifitoolbox.uidefault.component.WifiIcon
@@ -63,8 +64,6 @@ import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
-
-private enum class ListUiState { IDLE, LOADING, EMPTY, CONTENT, WIFI_DISABLED, ERROR }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -74,214 +73,192 @@ fun WifiList(
     listState: LazyListState = rememberLazyListState(),
     contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
 ) {
-    val scanResults by vm.wifiList.results.collectAsStateWithLifecycle()
+    val wifiState by vm.wifiList.state.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
-    val scanStatus by vm.wifiList.status.collectAsStateWithLifecycle()
-    val errorMessage by vm.wifiList.errorMessage.collectAsStateWithLifecycle()
-    val isScanning by vm.wifiList.isScanning.collectAsStateWithLifecycle()
     var selectedIndex by rememberSaveable { mutableStateOf<Int?>(null) }
 
-    // 每次 scanResults 变化时重建分组
-    val groups = remember(scanResults, savedWifiList) {
-        MergedWifiGroup.buildFrom(scanResults, savedWifiList)
+    // WifiState 与 SavedWifiList 是两种同级数据：
+    // 扫描结果只来自 Enabled，已保存配置只来自独立的 SavedWifiList。
+    val scanResults: List<ScanResult> = when (val state = wifiState) {
+        is WifiState.Data.Enabled -> state.scanResults
+        else -> emptyList()
     }
+    val savedNetworks: List<WifiConfiguration> =
+        savedWifiList?.networks ?: emptyList()
 
-    // 决定当前应显示哪种状态
-    val uiState: ListUiState = when {
-        scanStatus == null -> ListUiState.IDLE
-        scanStatus == ScanStatus.NOT_ENABLED -> ListUiState.WIFI_DISABLED
-        scanStatus == ScanStatus.ERROR -> ListUiState.ERROR
-        scanStatus == ScanStatus.LIST && isScanning && groups.isEmpty() -> ListUiState.LOADING
-        scanStatus == ScanStatus.LIST && groups.isEmpty() -> ListUiState.EMPTY
-        else -> ListUiState.CONTENT
+    val groups = remember(scanResults, savedNetworks) {
+        MergedWifiGroup.buildFrom(
+            results = scanResults,
+            savedWifiList = savedNetworks,
+        )
     }
 
     Column(modifier = modifier.fillMaxSize()) {
+        when (val state = wifiState) {
+            null -> Box(modifier = Modifier.fillMaxSize())
 
-        AnimatedContent(
-            targetState = uiState,
-            label = "WifiListContent",
-            modifier = Modifier.fillMaxSize()
-        ) { state ->
-            when (state) {
+            is WifiState.Data.Disabled -> WifiDisabledContent(
+                onEnableWifi = { vm.wifiList.setWifiEnabled(true) },
+            )
 
-                // ── 未初始化：不显示任何扫描状态 ─────────────────────────────
-                ListUiState.IDLE -> {
-                    Box(modifier = Modifier.fillMaxSize())
-                }
+            is WifiState.Error -> WifiErrorContent(
+                message = state.exception.message ?: "未知错误",
+            )
 
-                // ── 加载中：居中转圈 ──────────────────────────────────────
-                ListUiState.LOADING -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        ContainedLoadingIndicator(Modifier.size(60.dp))
-                    }
-                }
-
-                // ── 空列表：图标 + 提示文字 ───────────────────────────────
-                ListUiState.EMPTY -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                imageVector = Icons.Rounded.Inbox,
-                                contentDescription = null,
-                                modifier = Modifier.size(96.dp),
-                                tint = MaterialTheme.colorScheme.outlineVariant
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                text = "空空如也",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-
-                ListUiState.WIFI_DISABLED -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.padding(horizontal = 32.dp)
-                        ) {
-
-                            // ── 图标容器：双层渐进式圆角背景 ──────────────────────
-                            Box(contentAlignment = Alignment.Center) {
-                                // 外层光晕圈
-                                Box(
-                                    modifier = Modifier
-                                        .size(144.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)
-                                        )
-                                )
-                                // 内层填充圈
-                                Box(
-                                    modifier = Modifier
-                                        .size(104.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.errorContainer),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.WifiOff,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(52.dp),
-                                        tint = MaterialTheme.colorScheme.onErrorContainer
-                                    )
-                                }
-                            }
-
-                            Spacer(Modifier.height(32.dp))
-
-                            // ── 标题 ───────────────────────────────────────────────
-                            Text(
-                                text = "Wi-Fi 未开启",
-                                style = MaterialTheme.typography.headlineMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                textAlign = TextAlign.Center,
-                            )
-
-                            Spacer(Modifier.height(8.dp))
-
-                            // ── 副文案 ─────────────────────────────────────────────
-                            Text(
-                                text = "开启 Wi-Fi 后即可扫描附近的无线网络",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                                lineHeight = 22.sp,
-                            )
-
-                            Spacer(Modifier.height(40.dp))
-
-                            // ── 主操作按钮：Expressive 大号填充按钮 ───────────────
-                            Button(
-                                onClick = { vm.wifiList.setWifiEnabled(true) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(56.dp),
-                                shape = RoundedCornerShape(28.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                ),
-                                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Wifi,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = "开启 Wi-Fi",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
-
-                            Spacer(Modifier.height(12.dp))
-                        }
-                    }
-                }
-
-                // ── 错误：显示原因 ─────────────────────────────────────
-                ListUiState.ERROR -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = errorMessage ?: "未知",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 32.dp)
+            is WifiState.Data.Enabled -> LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = contentPadding,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (groups.isEmpty()) {
+                    item(key = "wifi-empty") {
+                        // 空状态仍放在可滚动容器中，保证 PullToRefresh 能收到 nested scroll。
+                        WifiEmptyContent(
+                            modifier = Modifier.fillParentMaxSize(),
                         )
                     }
-                }
-
-                // ── 有内容：卡片列表 ─────────────────────────────────────
-                ListUiState.CONTENT -> {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = contentPadding,
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        itemsIndexed(
-                            items = groups,
-                            key = { _, item -> item.strongest.BSSID!! }
-                        ) { index, group ->
-                            WifiGroupCard(
-                                vm = vm,
-                                group = group,
-                                modifier = Modifier.animateItem(),
-                                onClick = { selectedIndex = index }
-                            )
-                        }
+                } else {
+                    itemsIndexed(
+                        items = groups,
+                        key = { _, item -> item.strongest.BSSID!! },
+                    ) { index, group ->
+                        WifiGroupCard(
+                            vm = vm,
+                            group = group,
+                            modifier = Modifier.animateItem(),
+                            onClick = { selectedIndex = index },
+                        )
                     }
                 }
             }
         }
     }
 
-    // 详情底部弹窗
     selectedIndex?.let { index ->
         groups.getOrNull(index)?.let { group ->
             WifiDetailSheet(group = group, onDismiss = { selectedIndex = null })
         }
+    }
+}
+
+@Composable
+private fun WifiEmptyContent(
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = Icons.Rounded.Inbox,
+                contentDescription = null,
+                modifier = Modifier.size(96.dp),
+                tint = MaterialTheme.colorScheme.outlineVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "空空如也",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun WifiDisabledContent(onEnableWifi: () -> Unit) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 32.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .size(144.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)),
+                )
+                Box(
+                    modifier = Modifier
+                        .size(104.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.errorContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.WifiOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(52.dp),
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(32.dp))
+            Text(
+                text = "Wi-Fi 未开启",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "开启 Wi-Fi 后即可扫描附近的无线网络",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                lineHeight = 22.sp,
+            )
+            Spacer(Modifier.height(40.dp))
+            Button(
+                onClick = onEnableWifi,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                shape = RoundedCornerShape(28.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Wifi,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "开启 Wi-Fi",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun WifiErrorContent(message: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 32.dp),
+        )
     }
 }
 
@@ -375,3 +352,4 @@ private fun WifiGroupCard(
         }
     }
 }
+

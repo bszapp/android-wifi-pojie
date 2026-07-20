@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 class StartupUiState(private val controller: IAppController, scope: CoroutineScope) {
-
+//TODO:太散了！
     val uid = controller.startup.state
         .map { it.serviceUid }
         .stateIn(scope, SharingStarted.Eagerly, null)

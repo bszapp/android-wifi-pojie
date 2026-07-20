@@ -6,6 +6,7 @@ import androidx.annotation.Keep
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfoParcelCodec
 
 /** 独立 app_process 入口。启动参数只有一个：StartupInfo 的 Parcel/Base64 字符串。 */
+//TODO:Base64？是不是写错了
 @Keep
 object MainServiceStarter {
 
@@ -22,10 +23,10 @@ object MainServiceStarter {
                     "version=${startupInfo.versionName}(${startupInfo.versionCode})"
         )
 
+        prepareLooperIfNeeded()
+
         val service = MainService(startupInfo)
         ServiceHolder.service = service
-
-        prepareLooperIfNeeded()
         Log.d(TAG, "独立服务进程进入 Looper")
         Looper.loop()
     }

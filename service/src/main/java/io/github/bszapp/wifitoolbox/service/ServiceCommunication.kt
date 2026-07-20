@@ -12,7 +12,12 @@ import android.os.Process
 import android.os.RemoteCallbackList
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
+import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.lang.reflect.InvocationTargetException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 /**
  * 统一处理 App 与 service 之间的通信：调用方校验、Provider 投递 Binder、callback 预留通道。
@@ -22,7 +27,15 @@ class ServiceCommunication(
     private val startupInfoProvider: () -> StartupInfo,
     private val serviceBinderProvider: () -> IBinder,
 ) {
-    private val callbacks = RemoteCallbackList<IMainServiceCallback>()
+    private val clientStates = ConcurrentHashMap<IBinder, ClientDeliveryState>()
+    private val callbacks = object : RemoteCallbackList<IMainServiceCallback>() {
+        override fun onCallbackDied(callback: IMainServiceCallback) {
+            clientStates.remove(callback.asBinder())
+        }
+    }
+    private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
+    }
     private val publisherLock = Any()
     private val sdk = Build.VERSION.SDK_INT
 
@@ -54,22 +67,186 @@ class ServiceCommunication(
 
     fun isAlive(): Boolean = callFromApp { true }
 
-    fun registerCallback(callback: IMainServiceCallback) = callFromApp {
-        callbacks.register(callback)
+    fun registerCallback(callback: IMainServiceCallback) {
+        callFromApp {
+            clientStates.putIfAbsent(callback.asBinder(), ClientDeliveryState())
+            callbacks.register(callback)
+            Unit
+        }
     }
 
-    fun unregisterCallback(callback: IMainServiceCallback) = callFromApp {
+    fun unregisterCallback(callback: IMainServiceCallback) {
+        callFromApp {
+            callbacks.unregister(callback)
+            clientStates.remove(callback.asBinder())
+            Unit
+        }
+    }
+
+    fun broadcastWifiState(state: WifiState) {
+        forEachCallback { callback -> pushWifiState(callback, state) }
+    }
+
+    fun broadcastSavedWifiList(value: SavedWifiList) {
+        forEachCallback { callback -> pushSavedWifiList(callback, value) }
+    }
+
+    fun pushWifiState(callback: IMainServiceCallback, state: WifiState) {
+        val delivery = clientStates.getOrPut(callback.asBinder()) { ClientDeliveryState() }
+        val shouldSend = synchronized(delivery) {
+            if (delivery.wifiStateInFlight) {
+                delivery.pendingWifiState = state
+                false
+            } else {
+                delivery.wifiStateInFlight = true
+                true
+            }
+        }
+        if (shouldSend) deliverWifiState(callback, delivery, state)
+    }
+
+    fun pushSavedWifiList(callback: IMainServiceCallback, value: SavedWifiList) {
+        val delivery = clientStates.getOrPut(callback.asBinder()) { ClientDeliveryState() }
+        val shouldSend = synchronized(delivery) {
+            if (delivery.savedWifiListInFlight) {
+                delivery.pendingSavedWifiList = value
+                false
+            } else {
+                delivery.savedWifiListInFlight = true
+                true
+            }
+        }
+        if (shouldSend) deliverSavedWifiList(callback, delivery, value)
+    }
+
+    fun acknowledgeWifiState(callback: IMainServiceCallback) = callFromApp {
+        val delivery = clientStates[callback.asBinder()] ?: return@callFromApp
+        val next = synchronized(delivery) {
+            delivery.wifiStateInFlight = false
+            delivery.pendingWifiState.also {
+                delivery.pendingWifiState = null
+                if (it != null) delivery.wifiStateInFlight = true
+            }
+        }
+        if (next != null) deliverWifiState(callback, delivery, next)
+    }
+
+    fun acknowledgeSavedWifiList(callback: IMainServiceCallback) = callFromApp {
+        val delivery = clientStates[callback.asBinder()] ?: return@callFromApp
+        val next = synchronized(delivery) {
+            delivery.savedWifiListInFlight = false
+            delivery.pendingSavedWifiList.also {
+                delivery.pendingSavedWifiList = null
+                if (it != null) delivery.savedWifiListInFlight = true
+            }
+        }
+        if (next != null) deliverSavedWifiList(callback, delivery, next)
+    }
+
+    private fun deliverWifiState(
+        callback: IMainServiceCallback,
+        delivery: ClientDeliveryState,
+        state: WifiState,
+    ) {
+        deliveryExecutor.execute {
+            val result = runCatching {
+                val payload = WifiParcelTransport.encodeWifiState(state)
+                try {
+                    callback.onWifiStateChanged(payload)
+                } finally {
+                    payload.close()
+                }
+            }
+            result.onFailure {
+                Log.w(TAG, "推送 WifiState 失败：${it.message}", it)
+                failWifiStateDelivery(callback, delivery)
+            }
+        }
+    }
+
+    private fun deliverSavedWifiList(
+        callback: IMainServiceCallback,
+        delivery: ClientDeliveryState,
+        value: SavedWifiList,
+    ) {
+        deliveryExecutor.execute {
+            val result = runCatching {
+                val payload = WifiParcelTransport.encodeSavedWifiList(value)
+                try {
+                    callback.onSavedWifiListChanged(payload)
+                } finally {
+                    payload.close()
+                }
+            }
+            result.onFailure {
+                Log.w(TAG, "推送 SavedWifiList 失败：${it.message}", it)
+                failSavedWifiListDelivery(callback, delivery)
+            }
+        }
+    }
+
+    private fun failWifiStateDelivery(
+        callback: IMainServiceCallback,
+        delivery: ClientDeliveryState,
+    ) {
+        synchronized(delivery) {
+            delivery.wifiStateInFlight = false
+            delivery.pendingWifiState = null
+        }
         callbacks.unregister(callback)
+        clientStates.remove(callback.asBinder())
     }
 
-    fun startBinderPublisher(reason: String) {
+    private fun failSavedWifiListDelivery(
+        callback: IMainServiceCallback,
+        delivery: ClientDeliveryState,
+    ) {
+        synchronized(delivery) {
+            delivery.savedWifiListInFlight = false
+            delivery.pendingSavedWifiList = null
+        }
+        callbacks.unregister(callback)
+        clientStates.remove(callback.asBinder())
+    }
+
+    fun broadcastServiceError(
+        source: String,
+        operation: String,
+        error: Throwable,
+    ) {
+        val message = error.message ?: error.javaClass.name
+        val details = error.stackTraceToString()
+        forEachCallback { callback ->
+            runCatching {
+                callback.onServiceError(
+                    source,
+                    operation,
+                    message,
+                    details,
+                )
+            }.onFailure {
+                Log.w(TAG, "推送 Service 错误失败：${it.message}", it)
+            }
+        }
+    }
+
+    private inline fun forEachCallback(block: (IMainServiceCallback) -> Unit) {
+        val count = callbacks.beginBroadcast()
+        try {
+            for (index in 0 until count) block(callbacks.getBroadcastItem(index))
+        } finally {
+            callbacks.finishBroadcast()
+        }
+    }
+
+    fun startBinderPublisher() {
         synchronized(publisherLock) {
             if (binderPublisherRunning) return
             binderPublisherRunning = true
         }
 
         Thread({
-            Log.d(TAG, "Binder 投递器启动：$reason")
+            Log.d(TAG, "启动 Binder 投递器")
             try {
                 var deliveredInCurrentAppRun = false
                 while (true) {
@@ -81,7 +258,7 @@ class ServiceCommunication(
                     } else {
                         deliveredInCurrentAppRun = false
                     }
-                    Thread.sleep(1000L)
+                    Thread.sleep(500L)
                 }
             } catch (_: InterruptedException) {
             } catch (e: Throwable) {
@@ -302,6 +479,13 @@ class ServiceCommunication(
     private fun providerCallerPackage(): String = when (Process.myUid()) {
         0, 1000 -> "android"
         else -> "com.android.shell"
+    }
+
+    private class ClientDeliveryState {
+        var wifiStateInFlight: Boolean = false
+        var pendingWifiState: WifiState? = null
+        var savedWifiListInFlight: Boolean = false
+        var pendingSavedWifiList: SavedWifiList? = null
     }
 
     companion object {

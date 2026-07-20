@@ -9,6 +9,7 @@ abstract class SettingsManagerBase(
     final override val settings: ApplicationSettings = ApplicationSettings(),
 ) : ISettingsManager {
     private val _revision = MutableStateFlow(0L)
+    //TODO:这是什么东西
     final override val revision: StateFlow<Long> = _revision.asStateFlow()
 
     protected fun bindAutoSave() {

@@ -23,7 +23,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlin.time.Duration.Companion.seconds
 
-class ProcessLauncher(private val context: Context) {
+class ProcessLauncher(
+    private val context: Context,
+    private val onAndroidApiError: (operation: String, error: Throwable) -> Unit,
+) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var launchJob: Job? = null
@@ -166,7 +169,10 @@ class ProcessLauncher(private val context: Context) {
 
             activeBinder = binder
             mainService = service
-            androidApiClient = AndroidApiClient(service)
+            androidApiClient = AndroidApiClient(
+                service = service,
+                onError = onAndroidApiError,
+            )
 
             val recipient = IBinder.DeathRecipient {
                 Log.e(TAG, "${serviceMode.displayName()} 服务进程崩溃或被终止")

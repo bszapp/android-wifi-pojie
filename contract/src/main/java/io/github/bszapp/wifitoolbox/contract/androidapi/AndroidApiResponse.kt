@@ -10,10 +10,15 @@ data class AndroidApiResponse(
     val data: Bundle = Bundle.EMPTY,
     val errorClass: String? = null,
     val errorMessage: String? = null,
+    val errorStackTrace: String? = null,
 ) : Parcelable {
     fun requireSuccess(): Bundle {
         if (!success) {
-            throw IllegalStateException(errorMessage ?: errorClass ?: "AndroidApi 调用失败")
+            throw AndroidApiException(
+                remoteErrorClass = errorClass,
+                remoteErrorMessage = errorMessage,
+                remoteStackTrace = errorStackTrace,
+            )
         }
         return data
     }
@@ -25,6 +30,7 @@ data class AndroidApiResponse(
             success = false,
             errorClass = error::class.java.name,
             errorMessage = error.message,
+            errorStackTrace = error.stackTraceToString(),
         )
     }
 }

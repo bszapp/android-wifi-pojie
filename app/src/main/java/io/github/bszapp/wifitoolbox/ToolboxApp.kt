@@ -1,15 +1,12 @@
 package io.github.bszapp.wifitoolbox
 
-import android.os.Process
 import android.app.Application
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.net.wifi.WifiManager
+import android.os.Process
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.IAppController
+import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiException
+import io.github.bszapp.wifitoolbox.contract.error.AppError
 import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
@@ -18,17 +15,22 @@ import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
 import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
 import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlin.time.Duration.Companion.milliseconds
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 
 class ToolboxApp : Application(), IAppController {
 
@@ -38,11 +40,14 @@ class ToolboxApp : Application(), IAppController {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var predictiveBackController: PredictiveBackController
-    private val _isExiting = MutableStateFlow(false)
+    private val _isExiting = kotlinx.coroutines.flow.MutableStateFlow(false)
     override val isExiting: StateFlow<Boolean> = _isExiting.asStateFlow()
 
-    private var wifiStateReceiver: BroadcastReceiver? = null
-    private var lastWifiEnabled: Boolean? = null
+    private val _errors = MutableSharedFlow<AppError>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+    override val errors: SharedFlow<AppError> = _errors.asSharedFlow()
 
     override val startup = object : IStartupController {
         override val state get() = processLauncher.state
@@ -63,7 +68,9 @@ class ToolboxApp : Application(), IAppController {
     override val wifiList: IWifiListController by lazy {
         WifiListController(
             scope = appScope,
-            getAndroidApi = { processLauncher.androidApiClient }
+            getMainService = { processLauncher.mainService },
+            getAndroidApiClient = { processLauncher.androidApiClient },
+            reportError = ::publishError,
         )
     }
 
@@ -73,63 +80,94 @@ class ToolboxApp : Application(), IAppController {
         predictiveBackController = PredictiveBackController(
             application = this,
         ).also { it.start() }
-        processLauncher = ProcessLauncher(this)
+        processLauncher = ProcessLauncher(
+            context = this,
+            onAndroidApiError = { operation, error ->
+                publishError(
+                    source = "App.AndroidApiClient",
+                    operation = operation,
+                    error = error,
+                    remoteDetails = null,
+                )
+            },
+        )
         AppControllerProvider.register(this)
         processLauncher.tryAutoReconnect()
 
         appScope.launch {
             startup.state.collect { state ->
                 if (state.status == StartupStatus.RUNNING) {
-                    val receiver = object : BroadcastReceiver() {
-                        override fun onReceive(context: Context, intent: Intent) {
-                            if (intent.action != WifiManager.WIFI_STATE_CHANGED_ACTION) return
-                            // 广播只作为“状态可能变化/数据可能更新”的提示。
-                            // 不读取也不信任广播携带的 Wi-Fi 状态，向服务确认当前真实状态。
-                            val enabled = processLauncher.androidApiClient?.isWifiEnabled() ?: return
-                            val previousEnabled = lastWifiEnabled
-                            lastWifiEnabled = enabled
-
-                            Log.d(TAG, "Wi-Fi 状态变化: previous=$previousEnabled, current=$enabled")
-                            val wifiController = wifiList as WifiListController
-                            wifiController.updateWifiEnabled(enabled)
-
-                            when {
-                                previousEnabled == false && enabled -> wifiController.startScan()
-                                enabled -> wifiController.refreshScanResults()
-                            }
-                        }
-                    }
-                    registerReceiver(receiver, IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION))
-                    wifiStateReceiver = receiver
-
-                    // 先同步一次真实状态。首次进入不主动扫描，只读取系统已有扫描结果。
-                    val enabled = processLauncher.androidApiClient?.isWifiEnabled() ?: false
-                    lastWifiEnabled = enabled
-                    Log.d(TAG, "服务就绪，Wi-Fi 当前状态: $enabled")
-                    val wifiController = wifiList as WifiListController
-                    wifiController.updateWifiEnabled(enabled)
-                    if (enabled) wifiController.refreshScanResults()
-                } else {
-                    wifiStateReceiver?.let {
-                        unregisterReceiver(it)
-                        wifiStateReceiver = null
-                        lastWifiEnabled = null
-                        Log.d(TAG, "服务停止，注销 Wi-Fi 广播")
-                    }
+                    // App 只注册 Service 数据回调，不主动请求刷新 WifiState。
+                    wifiList.initialize()
                 }
             }
         }
     }
 
+    /** App 内唯一错误发布入口。UI 只监听 [errors]。 */
+    private fun publishError(
+        source: String,
+        operation: String,
+        error: Throwable,
+        remoteDetails: String?,
+    ) {
+        val now = System.currentTimeMillis()
+        val conciseMessage = error.message
+            ?.substringBefore("\n\nService ")
+            ?.takeIf { it.isNotBlank() }
+            ?: error.javaClass.name
+
+        val details = buildString {
+            appendLine("时间：${formatTimestamp(now)}")
+            appendLine("来源：$source")
+            appendLine("操作：$operation")
+            appendLine(
+                "线程：${Thread.currentThread().name} " +
+                    "(id=${Thread.currentThread().id})",
+            )
+            appendLine("异常类型：${error.javaClass.name}")
+            appendLine("异常消息：${error.message ?: "<无>"}")
+
+            val androidApiRemoteStack =
+                (error as? AndroidApiException)?.remoteStackTrace
+            if (!androidApiRemoteStack.isNullOrBlank()) {
+                appendLine()
+                appendLine("Service AndroidApi 调用栈：")
+                appendLine(androidApiRemoteStack)
+            }
+
+            if (!remoteDetails.isNullOrBlank()) {
+                appendLine()
+                appendLine("Service 远端调用栈：")
+                appendLine(remoteDetails)
+            }
+
+            appendLine()
+            appendLine("App 调用栈：")
+            append(error.stackTraceToString())
+        }
+
+        val appError = AppError(
+            source = source,
+            operation = operation,
+            message = "$operation：$conciseMessage",
+            details = details,
+            timestampMillis = now,
+        )
+
+        Log.e(TAG, "发布统一错误：${appError.message}\n${appError.details}")
+        if (!_errors.tryEmit(appError)) {
+            appScope.launch { _errors.emit(appError) }
+        }
+    }
+
+    private fun formatTimestamp(timestampMillis: Long): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
+            .format(Date(timestampMillis))
 
     override fun onTerminate() {
         super.onTerminate()
         predictiveBackController.stop()
-        wifiStateReceiver?.let {
-            unregisterReceiver(it)
-            wifiStateReceiver = null
-            lastWifiEnabled = null
-        }
         appScope.cancel()
     }
 

@@ -1,6 +1,9 @@
 package io.github.bszapp.wifitoolbox.uidefault
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.util.Log
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.pager.HorizontalPager
@@ -8,7 +11,9 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
@@ -35,36 +40,83 @@ import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableFloatingBottomBar
 import io.github.bszapp.wifitoolbox.uidefault.theme.WifiToolboxMiuixTheme
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.SnackbarDuration
+import top.yukonga.miuix.kmp.basic.SnackbarHost
+import top.yukonga.miuix.kmp.basic.SnackbarHostState
+import top.yukonga.miuix.kmp.basic.SnackbarResult
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+
+private const val TAG = "DefaultUI"
 
 @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
 @Composable
 fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
     val navigator = rememberNavigator(Route.Main)
+    val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+
+    LaunchedEffect(viewModel, snackbarHostState, context) {
+        coroutineScope {
+            viewModel.errors.collect { error ->
+                // 每条错误使用独立协程进入 MIUIX SnackbarHostState，允许同时排队/堆叠显示。
+                launch {
+                    Log.e(
+                        TAG,
+                        "收到 App 统一错误广播：${error.message}\n${error.details}",
+                    )
+                    val result = snackbarHostState.showSnackbar(
+                        message = error.message,
+                        actionLabel = "复制",
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        val clipboard =
+                            context.getSystemService(ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(
+                            ClipData.newPlainText(
+                                "Wi-Fi Toolbox 错误详情",
+                                error.details,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     WifiToolboxMiuixTheme {
         CompositionLocalProvider(LocalNavigator provides navigator) {
-            Scaffold {
-                NavDisplay(
-                    backStack = navigator.backStack,
-                    entryDecorators = listOf(
-                        rememberSaveableStateHolderNavEntryDecorator(),
-                        rememberViewModelStoreNavEntryDecorator(),
-                    ),
-                    onBack = { navigator.pop() },
-                    entryProvider = entryProvider {
-                        entry<Route.Main> { MainPager(viewModel = viewModel) }
-                        entry<Route.ColorPalette> { ColorPaletteScreen() }
-                    },
-                )
-            }
+            NavDisplay(
+                backStack = navigator.backStack,
+                entryDecorators = listOf(
+                    rememberSaveableStateHolderNavEntryDecorator(),
+                    rememberViewModelStoreNavEntryDecorator(),
+                ),
+                onBack = { navigator.pop() },
+                entryProvider = entryProvider {
+                    entry<Route.Main> {
+                        MainPager(
+                            viewModel = viewModel,
+                            snackbarHostState = snackbarHostState,
+                        )
+                    }
+                    entry<Route.ColorPalette> { ColorPaletteScreen() }
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun MainPager(viewModel: DefaultViewModel) {
+private fun MainPager(
+    viewModel: DefaultViewModel,
+    snackbarHostState: SnackbarHostState,
+) {
     val navigator = LocalNavigator.current
     val pagerState = rememberPagerState(pageCount = { 3 })
     val mainState = rememberMainScreenState(pagerState)
@@ -96,7 +148,7 @@ private fun MainPager(viewModel: DefaultViewModel) {
                 when (page) {
                     0 -> HomeScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                     1 -> ListScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
-                    2 -> SettingsScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
+                    2 -> SettingsScreen()
                 }
             }
         }
@@ -113,7 +165,12 @@ private fun MainPager(viewModel: DefaultViewModel) {
         }
     }
 
-    Scaffold(bottomBar = bottomBar) { innerPadding ->
+    Scaffold(
+        bottomBar = bottomBar,
+        snackbarHost = {
+            SnackbarHost(state = snackbarHostState)
+        },
+    ) { innerPadding ->
         pagerContent(innerPadding.calculateBottomPadding())
     }
 }

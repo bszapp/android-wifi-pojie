@@ -11,6 +11,13 @@ interface IMainService {
     boolean isAlive();
     StartupInfo getStartupInfo();
     AndroidApiResponse executeAndroidApi(in AndroidApiRequest request);
+
+    void refreshSavedWifiNetworks();
+    boolean startWifiScan();
+
+    oneway void acknowledgeWifiState(IMainServiceCallback cb);
+    oneway void acknowledgeSavedWifiList(IMainServiceCallback cb);
+
     void shutdown();
     void registerCallback(IMainServiceCallback cb);
     void unregisterCallback(IMainServiceCallback cb);

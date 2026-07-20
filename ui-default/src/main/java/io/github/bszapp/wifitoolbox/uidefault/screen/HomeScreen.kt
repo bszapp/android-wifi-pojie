@@ -55,6 +55,8 @@ import top.yukonga.miuix.kmp.blur.layerBackdrop
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
@@ -74,6 +76,12 @@ fun HomeScreen(
     val versionCode by viewModel.startup.serviceVersionCode.collectAsStateWithLifecycle()
     val uidStr by viewModel.startup.uidStr.collectAsStateWithLifecycle()
     var showSheet by rememberSaveable { mutableStateOf(false) }
+    //TODO:上面这些太散了，这里应该直接配合vm改成viewModel.startup.serviceInfo
+
+    val context = LocalContext.current
+    val appName = remember(context) {
+        context.applicationInfo.loadLabel(context.packageManager).toString()
+    }
 
     val active = uid != null
     val modeText = mode.displayName()
@@ -108,7 +116,7 @@ fun HomeScreen(
             BlurredBar(backdrop) {
                 TopAppBar(
                     color = barColor,
-                    title = "WifiToolbox",
+                    title = appName,
                     scrollBehavior = scrollBehavior,
                 )
             }
@@ -249,6 +257,7 @@ private fun InfoNumberCard(
     title: String,
     value: String,
 ) {
+    //TODO:我要点击效果！
     Card(
         modifier = modifier
             .fillMaxWidth(),

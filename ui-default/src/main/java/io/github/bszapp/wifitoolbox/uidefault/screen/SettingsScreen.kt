@@ -41,7 +41,6 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 @Composable
 fun SettingsScreen(
-    viewModel: DefaultViewModel = viewModel(),
     bottomInnerPadding: Dp = 0.dp,
 ) {
     val navigator = LocalNavigator.current

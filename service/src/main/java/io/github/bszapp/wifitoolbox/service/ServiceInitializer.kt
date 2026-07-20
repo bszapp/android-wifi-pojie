@@ -15,7 +15,7 @@ class ServiceInitializer {
     var androidApi: AndroidApi? = null
         private set
 
-    fun initialize(input: StartupInfo, source: String): StartupInfo {
+    fun initialize(input: StartupInfo): StartupInfo {
         val launchInfo = input.requireLaunchInfo()
         synchronized(lock) {
             startupInfo?.let { old ->
@@ -49,7 +49,7 @@ class ServiceInitializer {
                 TAG,
                 "启动信息：mode=${completed.startupMode} trustedUid=${completed.trustedUid} " +
                         "serviceUid=${completed.serviceUid} servicePid=${completed.servicePid} " +
-                        "version=${completed.versionName}(${completed.versionCode}) source=$source"
+                        "version=${completed.versionName}(${completed.versionCode})"
             )
 
             return completed
@@ -73,45 +73,67 @@ class ServiceInitializer {
         else -> "com.android.shell"
     }
 
+    /**
+     * 强制清理当前包名下的其他服务进程。
+     *
+     * 不根据 PID 大小推断新旧；PID 只用于排除当前进程。匹配到固定的
+     * `包名:service` 进程名，或者命令行中包含本包的 MainServiceStarter，
+     * 就直接发送 SIGKILL。普通 App 主进程名仅为包名本身，不在匹配范围内。
+     */
     private fun killOlderInstances() {
         val myPid = Process.myPid()
+        val procRoot = java.io.File("/proc")
+        val processDirectories = procRoot.listFiles()
+            ?: throw IllegalStateException("/proc 列表为空")
 
-        val myName = try {
-            java.io.File("/proc/self/cmdline")
-                .readBytes()
-                .takeWhile { it != 0.toByte() }
-                .toByteArray()
-                .toString(Charsets.UTF_8)
-                .trim()
-        } catch (e: Exception) {
-            throw IllegalStateException("读取当前进程名失败", e)
-        }
+        processDirectories.forEach { processDirectory ->
+            val pid = processDirectory.name.toIntOrNull() ?: return@forEach
+            if (pid == myPid) return@forEach
 
-        if (myName.isEmpty()) throw IllegalStateException("当前进程名为空")
-
-        (java.io.File("/proc").listFiles() ?: throw IllegalStateException("/proc 列表为空")).forEach { dir ->
-            val pid = dir.name.toIntOrNull() ?: return@forEach
-            if (pid >= myPid) return@forEach
-
-            try {
-                val name = java.io.File(dir, "cmdline")
+            val commandLine = runCatching {
+                java.io.File(processDirectory, "cmdline")
                     .readBytes()
-                    .takeWhile { it != 0.toByte() }
-                    .toByteArray()
                     .toString(Charsets.UTF_8)
-                    .trim()
+            }.getOrElse { exception ->
+                // /proc 中的进程可能在遍历期间退出；这种情况不需要当作启动失败。
+                Log.v(TAG, "读取进程命令行失败 pid=$pid: ${exception.message}")
+                return@forEach
+            }
 
-                if (name == myName) {
-                    Log.w(TAG, "kill 旧实例 pid=$pid")
-                    Process.killProcess(pid)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "检查旧实例 pid=$pid 失败", e)
+            val processName = commandLine
+                .substringBefore('\u0000')
+                .trim()
+            val printableCommandLine = commandLine
+                .replace('\u0000', ' ')
+                .trim()
+
+            val samePackageService =
+                processName.startsWith(SERVICE_PROCESS_PREFIX) ||
+                    (
+                        printableCommandLine.contains(APP_PACKAGE) &&
+                            printableCommandLine.contains(SERVICE_STARTER_CLASS)
+                    )
+
+            if (!samePackageService) return@forEach
+
+            Log.w(
+                TAG,
+                "强制结束同包名旧服务 pid=$pid name=$processName cmd=$printableCommandLine",
+            )
+
+            runCatching {
+                Process.killProcess(pid)
+            }.onFailure { exception ->
+                Log.w(TAG, "强制结束同包名旧服务失败 pid=$pid", exception)
             }
         }
     }
 
     companion object {
         private const val TAG = "ServiceInitializer"
+        private const val APP_PACKAGE = "io.github.bszapp.wifitoolbox"
+        private const val SERVICE_PROCESS_PREFIX = "$APP_PACKAGE:"
+        private const val SERVICE_STARTER_CLASS =
+            "io.github.bszapp.wifitoolbox.service.MainServiceStarter"
     }
 }

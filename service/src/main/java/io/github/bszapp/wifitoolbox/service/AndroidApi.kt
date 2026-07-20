@@ -13,7 +13,6 @@ import android.os.IBinder
 import android.os.Parcel
 import android.os.Parcelable
 import android.os.Process
-import android.os.WorkSource
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiAction
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiKeys
@@ -29,7 +28,7 @@ import java.lang.reflect.InvocationTargetException
 @SuppressLint("PrivateApi")
 @Suppress("DEPRECATION")
 class AndroidApi(
-    private val callerPackage: String = defaultCallerPackage(),
+    internal val callerPackage: String = defaultCallerPackage(),
 ) {
     private val sdk = Build.VERSION.SDK_INT
 
@@ -41,7 +40,6 @@ class AndroidApi(
                     setWifiEnabledDirect(request.arguments.getBoolean(AndroidApiKeys.ENABLED))
                     AndroidApiResponse.success()
                 }
-                AndroidApiAction.WIFI_START_SCAN -> booleanResponse(startScanDirect())
                 AndroidApiAction.WIFI_GET_SCAN_RESULTS -> {
                     val results = ArrayList(getScanResultsDirect())
                     AndroidApiResponse.success(Bundle().apply {
@@ -65,48 +63,6 @@ class AndroidApi(
         )
     }
 
-    fun startScanDirect(): Boolean {
-        Log.d(TAG, "startScan() | SDK=$sdk | uid=${Process.myUid()}")
-
-        val wifiService = getWifiService()
-        val clazz = wifiService::class.java
-
-        val result = systemApi("startScan") {
-            when {
-                sdk >= 30 -> clazz.getMethod(
-                    "startScan",
-                    String::class.java,
-                    String::class.java
-                ).invoke(wifiService, callerPackage, null)
-
-                sdk >= 28 -> clazz.getMethod(
-                    "startScan",
-                    String::class.java
-                ).invoke(wifiService, callerPackage)
-
-                else -> {
-                    val scanSettings = Class.forName("android.net.wifi.ScanSettings")
-                    if (sdk >= 26) {
-                        clazz.getMethod(
-                            "startScan",
-                            scanSettings,
-                            WorkSource::class.java,
-                            String::class.java
-                        ).invoke(wifiService, null, null, callerPackage)
-                    } else {
-                        clazz.getMethod(
-                            "startScan",
-                            scanSettings,
-                            WorkSource::class.java
-                        ).invoke(wifiService, null, null)
-                    }
-                }
-            }
-        }
-
-        requireBooleanSuccess("startScan", result)
-        return true
-    }
 
     fun getScanResultsDirect(): List<ScanResult> {
         val wifiService = getWifiService()

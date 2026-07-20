@@ -1,13 +1,16 @@
 package io.github.bszapp.wifitoolbox.contract
 
+import io.github.bszapp.wifitoolbox.contract.error.AppError
 import io.github.bszapp.wifitoolbox.contract.settings.ISettingsManager
 import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 interface IAppController {
     val startup: IStartupController
     val wifiList: IWifiListController
     val settings: ISettingsManager
-    val isExiting: StateFlow<Boolean>
+    val errors: SharedFlow<AppError>
+    val isExiting: StateFlow<Boolean>//TODO:未免显得有些突兀的分类？
 }
