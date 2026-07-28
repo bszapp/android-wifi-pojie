@@ -7,17 +7,15 @@ import android.os.Parcel
 import android.util.Log
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 
 /**
  * 独立 service 的 Wi-Fi 事件入口。
  *
  * 不再尝试 ActivityManager 广播：
  * - 扫描结果完全由每次 WifiScanner.ScanListener.onResults 处理；
- * - Wi-Fi 开关变化优先使用隐藏 listener，并由 getWifiEnabledState 轮询兜底；
- * - network state listener 只作为“可能变化”的唤醒信号，最终仍读取真实开关状态。
+ * - Wi-Fi 开关变化只使用 IWifiNetworkStateChangedListener 作为唤醒信号；
+ * - 收到回调后通过 getWifiEnabledState 读取真实开关状态；
+ * - listener 注册失败后不再接收 Wi-Fi 开关变化。
  */
 @SuppressLint("PrivateApi")
 internal class ServiceWifiBroadcastLogger(
@@ -28,12 +26,9 @@ internal class ServiceWifiBroadcastLogger(
     private var started = false
 
     private var wifiService: Any? = null
-    private var wifiStateCallbackInterface: Any? = null
-    private var wifiStateCallbackBinder: RawCallbackBinder? = null
     private var networkStateCallbackInterface: Any? = null
     private var networkStateCallbackBinder: RawCallbackBinder? = null
 
-    private var pollingExecutor: ScheduledExecutorService? = null
     private var lastWifiState: Int? = null
 
     @Synchronized
@@ -41,14 +36,8 @@ internal class ServiceWifiBroadcastLogger(
         if (started) return
         started = true
 
-        runCatching(::startWifiStateChangedCallback).onFailure {
-            reportError("注册 Wi-Fi 状态回调", it)
-        }
         runCatching(::startWifiNetworkStateChangedCallback).onFailure {
             reportError("注册 Wi-Fi 网络状态回调", it)
-        }
-        runCatching(::startWifiStatePolling).onFailure {
-            reportError("启动 Wi-Fi 状态轮询", it)
         }
     }
 
@@ -57,60 +46,11 @@ internal class ServiceWifiBroadcastLogger(
         if (!started) return
         started = false
 
-        runCatching(::stopWifiStatePolling).onFailure {
-            reportError("停止 Wi-Fi 状态轮询", it)
-        }
         runCatching(::stopWifiNetworkStateChangedCallback).onFailure {
             reportError("注销 Wi-Fi 网络状态回调", it)
         }
-        runCatching(::stopWifiStateChangedCallback).onFailure {
-            reportError("注销 Wi-Fi 状态回调", it)
-        }
+        lastWifiState = null
         wifiService = null
-    }
-
-    private fun startWifiStateChangedCallback() {
-        Class.forName(I_WIFI_STATE_CHANGED_LISTENER_STUB)
-        val wifi = resolveWifiService()
-        val code = resolveTransactionCode(
-            I_WIFI_STATE_CHANGED_LISTENER_STUB,
-            "TRANSACTION_onWifiStateChanged",
-            IBinder.FIRST_CALL_TRANSACTION,
-        )
-        val binder = RawCallbackBinder(
-            descriptor = I_WIFI_STATE_CHANGED_LISTENER,
-            onError = { reportError("处理 Wi-Fi 状态 Binder 回调", it) },
-            handlers = mapOf(code to {
-                readWifiStateChange(force = true)?.let { change ->
-                    Log.d(TAG, "[$PATH_WIFI_STATE_CALLBACK] WIFI_STATE ${change.previous} -> ${change.current}")
-                    onWifiStateChanged()
-                }
-            }),
-        )
-        val callback = createAidlInterface(I_WIFI_STATE_CHANGED_LISTENER_STUB, binder)
-        val method = findSingleCallbackMethod(
-            wifi,
-            names = setOf("addWifiStateChangedListener", "registerWifiStateChangedListener"),
-            callbackClassName = I_WIFI_STATE_CHANGED_LISTENER,
-        )
-        invokeSystem(method, wifi, arrayOf(callback))
-
-        wifiStateCallbackBinder = binder
-        wifiStateCallbackInterface = callback
-        Log.d(TAG, "[$PATH_WIFI_STATE_CALLBACK] 注册成功：${method.toGenericString()}")
-    }
-
-    private fun stopWifiStateChangedCallback() {
-        val wifi = wifiService
-        val callback = wifiStateCallbackInterface
-        wifiStateCallbackInterface = null
-        wifiStateCallbackBinder = null
-        if (wifi == null || callback == null) return
-        findOptionalSingleCallbackMethod(
-            wifi,
-            names = setOf("removeWifiStateChangedListener", "unregisterWifiStateChangedListener"),
-            callbackClassName = I_WIFI_STATE_CHANGED_LISTENER,
-        )?.let { invokeSystem(it, wifi, arrayOf(callback)) }
     }
 
     private fun startWifiNetworkStateChangedCallback() {
@@ -170,43 +110,13 @@ internal class ServiceWifiBroadcastLogger(
         )?.let { invokeSystem(it, wifi, arrayOf(callback)) }
     }
 
-    private fun startWifiStatePolling() {
-        lastWifiState = queryWifiEnabledState(resolveWifiService())
-        pollingExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
-            Thread(runnable, "toolbox-wifi-state-poll").apply { isDaemon = true }
-        }.also { executor ->
-            executor.scheduleWithFixedDelay(
-                {
-                    runCatching {
-                        readWifiStateChange()?.let { change ->
-                            Log.d(TAG, "[$PATH_WIFI_STATE_POLLING] WIFI_STATE ${change.previous} -> ${change.current}")
-                            onWifiStateChanged()
-                        }
-                    }.onFailure {
-                        reportError("轮询 Wi-Fi 状态", it)
-                    }
-                },
-                WIFI_STATE_POLL_INTERVAL_MS,
-                WIFI_STATE_POLL_INTERVAL_MS,
-                TimeUnit.MILLISECONDS,
-            )
-        }
-        Log.d(TAG, "[$PATH_WIFI_STATE_POLLING] 已启动，initial=$lastWifiState")
-    }
-
-    private fun stopWifiStatePolling() {
-        pollingExecutor?.shutdownNow()
-        pollingExecutor = null
-        lastWifiState = null
-    }
-
     @Synchronized
-    private fun readWifiStateChange(force: Boolean = false): WifiStateChange? {
+    private fun readWifiStateChange(): WifiStateChange? {
         if (!started) return null
         val current = queryWifiEnabledState(resolveWifiService())
         val previous = lastWifiState
         lastWifiState = current
-        return if (force || previous == null || previous != current) {
+        return if (previous == null || previous != current) {
             WifiStateChange(previous = previous, current = current)
         } else {
             null
@@ -325,16 +235,10 @@ internal class ServiceWifiBroadcastLogger(
 
     private companion object {
         const val TAG = "ServiceWifiReceiver"
-        const val WIFI_STATE_POLL_INTERVAL_MS = 500L
 
-        const val PATH_WIFI_STATE_CALLBACK = "IWIFI_STATE_CALLBACK"
         const val PATH_NETWORK_STATE_CALLBACK = "IWIFI_NETWORK_CALLBACK"
-        const val PATH_WIFI_STATE_POLLING = "WIFI_STATE_POLLING"
 
         const val I_WIFI_MANAGER_STUB = "android.net.wifi.IWifiManager\$Stub"
-        const val I_WIFI_STATE_CHANGED_LISTENER = "android.net.wifi.IWifiStateChangedListener"
-        const val I_WIFI_STATE_CHANGED_LISTENER_STUB =
-            "android.net.wifi.IWifiStateChangedListener\$Stub"
         const val I_WIFI_NETWORK_STATE_CHANGED_LISTENER =
             "android.net.wifi.IWifiNetworkStateChangedListener"
         const val I_WIFI_NETWORK_STATE_CHANGED_LISTENER_STUB =

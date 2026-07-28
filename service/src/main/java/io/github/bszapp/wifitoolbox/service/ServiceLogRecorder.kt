@@ -1,16 +1,20 @@
 package io.github.bszapp.wifitoolbox.service
 
+import android.os.Build
 import android.os.Process
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogBatch
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogEntry
+import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
+import java.io.EOFException
+import java.io.InputStream
 import java.io.OutputStream
 import java.io.PrintStream
+import java.text.SimpleDateFormat
 import java.util.ArrayDeque
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
+import java.util.Date
+import java.util.Locale
 
 /** 服务进程自己的、纯内存的 logcat 记录器。 */
 internal object ServiceLogRecorder {
@@ -22,11 +26,6 @@ internal object ServiceLogRecorder {
     private var logcatProcess: java.lang.Process? = null
     private var stopping = false
     private var onVisibleRangeChanged: ((oldestAvailableId: Long, latestId: Long) -> Unit)? = null
-    private var pendingLog: PendingLog? = null
-    private var pendingFlushTask: ScheduledFuture<*>? = null
-    private val pendingFlushExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "toolbox-service-log-grouping").apply { isDaemon = true }
-    }
 
     fun start() {
         val process = synchronized(lock) {
@@ -42,16 +41,30 @@ internal object ServiceLogRecorder {
             appendLocked("[ServiceLogRecorder] 开始采集服务日志，pid=${Process.myPid()}")
             Log.i(captureBoundary.tag, captureBoundary.message)
 
-            val created = runCatching {
-                ProcessBuilder(
+            val command = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                listOf(
                     "logcat",
+                    "--proto",
                     "--pid=${Process.myPid()}",
-                    "-v",
-                    "threadtime",
                     "-T",
                     logcatSinceArgument(captureStartedAtMillis - LOGCAT_BOUNDARY_LOOKBACK_MILLIS),
                     "*:V",
                 )
+            } else {
+                listOf(
+                    "logcat",
+                    "--pid=${Process.myPid()}",
+                    "-v",
+                    "long",
+                    "-v",
+                    "epoch",
+                    "-T",
+                    logcatSinceArgument(captureStartedAtMillis - LOGCAT_BOUNDARY_LOOKBACK_MILLIS),
+                    "*:V",
+                )
+            }
+            val created = runCatching {
+                ProcessBuilder(command)
                     .redirectErrorStream(false)
                     .start()
             }.getOrElse { error ->
@@ -67,13 +80,8 @@ internal object ServiceLogRecorder {
         }
 
         notifyCurrentVisibleRange()
-        startReader(
-            name = "toolbox-service-logcat-output",
-            stream = process.first.inputStream,
-            prefix = "",
-            startAfter = process.second,
-        )
-        startReader(
+        startLogcatReader(process.first.inputStream, process.second)
+        startErrorReader(
             name = "toolbox-service-logcat-error",
             stream = process.first.errorStream,
             prefix = "[logcat stderr] ",
@@ -131,9 +139,6 @@ internal object ServiceLogRecorder {
 
     fun clear() {
         val notification = synchronized(lock) {
-            pendingFlushTask?.cancel(false)
-            pendingFlushTask = null
-            pendingLog = null
             entries.clear()
             totalCharacters = 0
             val range = visibleRangeLocked()
@@ -148,9 +153,6 @@ internal object ServiceLogRecorder {
         val process = synchronized(lock) {
             stopping = true
             onVisibleRangeChanged = null
-            pendingFlushTask?.cancel(false)
-            pendingFlushTask = null
-            pendingLog = null
             logcatProcess.also { logcatProcess = null }
         }
 
@@ -160,26 +162,46 @@ internal object ServiceLogRecorder {
         runCatching { process?.outputStream?.close() }
     }
 
-    private fun startReader(
-        name: String,
-        stream: java.io.InputStream,
-        prefix: String,
-        startAfter: CaptureBoundary? = null,
+    private fun startLogcatReader(
+        stream: InputStream,
+        startAfter: CaptureBoundary,
     ) {
         Thread(
             {
                 runCatching {
-                    val boundary = startAfter
-                    var boundaryReached = boundary == null
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                        readProtobufLogcat(stream, startAfter)
+                    } else {
+                        readTextLogcat(stream, startAfter)
+                    }
+                }.onFailure { error ->
+                    val shouldRecord = synchronized(lock) { !stopping }
+                    if (shouldRecord) {
+                        append(
+                            "[ServiceLogRecorder] 读取 toolbox-service-logcat-output 失败：" +
+                                (error.message ?: error.javaClass.name),
+                        )
+                    }
+                }
+            },
+            "toolbox-service-logcat-output",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun startErrorReader(
+        name: String,
+        stream: InputStream,
+        prefix: String,
+    ) {
+        Thread(
+            {
+                runCatching {
                     stream.bufferedReader().useLines { sequence ->
                         sequence.forEach { line ->
-                            if (!boundaryReached && boundary != null) {
-                                val parsed = parseThreadtimeLine(line)
-                                boundaryReached = parsed?.tag == boundary.tag &&
-                                    parsed.message == boundary.message
-                            } else {
-                                append(prefix + line)
-                            }
+                            append(prefix + line)
                         }
                     }
                 }.onFailure { error ->
@@ -199,25 +221,223 @@ internal object ServiceLogRecorder {
         }
     }
 
-    private fun append(line: String) {
-        val notification = synchronized(lock) {
-            val currentPending = pendingLog
-            val committed = if (
-                currentPending != null &&
-                isStackTraceContinuation(currentPending, line)
-            ) {
-                currentPending.append(line)
-                null
-            } else {
-                commitPendingLocked().also {
-                    pendingLog = PendingLog(
-                        lines = mutableListOf(line),
-                        source = parseThreadtimeLine(line),
-                    )
+    private fun readTextLogcat(
+        stream: InputStream,
+        startAfter: CaptureBoundary,
+    ) {
+        var boundaryReached = false
+        var pendingHeader: LongLogcatHeader? = null
+        val pendingLines = mutableListOf<String>()
+
+        fun commitPending() {
+            val header = pendingHeader ?: return
+            if (pendingLines.isEmpty()) return
+
+            val record = LogcatRecord(
+                timestampMillis = header.timestampMillis,
+                pid = header.pid,
+                tid = header.tid,
+                priority = header.priority,
+                tag = header.tag,
+                message = pendingLines.joinToString("\n").trimEnd('\n'),
+            )
+            pendingLines.clear()
+
+            if (!boundaryReached) {
+                boundaryReached = record.tag == startAfter.tag &&
+                    record.message == startAfter.message
+                return
+            }
+            append(record)
+        }
+
+        stream.bufferedReader().useLines { lines ->
+            lines.forEach { rawLine ->
+                val line = rawLine.replace("\r", "")
+                val header = parseLongLogcatHeader(line)
+                if (header != null) {
+                    commitPending()
+                    pendingHeader = header
+                } else if (!line.startsWith(LOGCAT_BUFFER_MARKER_PREFIX)) {
+                    pendingHeader?.let { pendingLines += line }
                 }
             }
-            schedulePendingFlushLocked()
-            committed?.let { visibleRangeNotificationLocked() }
+        }
+        commitPending()
+    }
+
+    private fun readProtobufLogcat(
+        stream: InputStream,
+        startAfter: CaptureBoundary,
+    ) {
+        val input = BufferedInputStream(stream)
+        skipInitialBufferMarker(input)
+        var boundaryReached = false
+
+        while (true) {
+            val sizeBytes = input.readExactlyOrNull(PROTOBUF_SIZE_BYTES) ?: return
+            val recordSize = littleEndianLong(sizeBytes)
+            if (recordSize !in 0..MAX_PROTOBUF_RECORD_BYTES.toLong()) {
+                throw IllegalStateException("logcat protobuf 记录长度非法：$recordSize")
+            }
+
+            val record = parseLogcatEntryProto(input.readExactly(recordSize.toInt()))
+            if (!boundaryReached) {
+                boundaryReached = record.tag == startAfter.tag &&
+                    record.message == startAfter.message
+            } else {
+                append(record)
+            }
+        }
+    }
+
+    private fun skipInitialBufferMarker(input: BufferedInputStream) {
+        val prefix = LOGCAT_BUFFER_MARKER_PREFIX.toByteArray(Charsets.UTF_8)
+        input.mark(prefix.size + 1)
+        val candidate = ByteArray(prefix.size)
+        val count = input.readUpTo(candidate)
+        if (count == prefix.size && candidate.contentEquals(prefix)) {
+            while (true) {
+                val value = input.read()
+                if (value < 0 || value == '\n'.code) return
+            }
+        }
+        input.reset()
+    }
+
+    private fun parseLongLogcatHeader(line: String): LongLogcatHeader? {
+        val values = LONG_EPOCH_HEADER_PATTERN.matchEntire(line)?.groupValues ?: return null
+        val seconds = values[1].toLongOrNull() ?: return null
+        val fractionalNanos = values[2]
+            .take(PROTOBUF_NANOSECOND_DIGITS)
+            .padEnd(PROTOBUF_NANOSECOND_DIGITS, '0')
+            .toLongOrNull()
+            ?: return null
+        return LongLogcatHeader(
+            timestampMillis = seconds * 1_000L + fractionalNanos / 1_000_000L,
+            pid = values[3].toLongOrNull() ?: return null,
+            tid = values[4].toLongOrNull() ?: return null,
+            priority = values[5].single(),
+            tag = values[6],
+        )
+    }
+
+    private fun parseLogcatEntryProto(bytes: ByteArray): LogcatRecord {
+        val input = ProtoInput(bytes)
+        var timeSec = 0L
+        var timeNsec = 0L
+        var priority = 0
+        var pid = 0L
+        var tid = 0L
+        var tag = ByteArray(0)
+        var message = ByteArray(0)
+
+        while (input.hasRemaining()) {
+            val key = input.readVarint().toInt()
+            val fieldNumber = key ushr 3
+            val wireType = key and PROTOBUF_WIRE_TYPE_MASK
+            when (fieldNumber) {
+                PROTO_TIME_SEC_FIELD -> timeSec = input.readVarintField(wireType)
+                PROTO_TIME_NSEC_FIELD -> timeNsec = input.readVarintField(wireType)
+                PROTO_PRIORITY_FIELD -> priority = input.readVarintField(wireType).toInt()
+                PROTO_PID_FIELD -> pid = input.readVarintField(wireType)
+                PROTO_TID_FIELD -> tid = input.readVarintField(wireType)
+                PROTO_TAG_FIELD -> tag = input.readBytesField(wireType)
+                PROTO_MESSAGE_FIELD -> message = input.readBytesField(wireType)
+                else -> input.skipField(wireType)
+            }
+        }
+
+        val tagEnd = (tag.size - 1).coerceAtLeast(0)
+        val messageEnd = if (message.lastOrNull() == '\n'.code.toByte()) {
+            message.size - 1
+        } else {
+            message.size
+        }
+        return LogcatRecord(
+            timestampMillis = timeSec * 1_000L + timeNsec / 1_000_000L,
+            pid = pid,
+            tid = tid,
+            priority = protobufPriority(priority),
+            tag = tag.copyOfRange(0, tagEnd).toString(Charsets.UTF_8),
+            message = message.copyOfRange(0, messageEnd).toString(Charsets.UTF_8),
+        )
+    }
+
+    private fun formatThreadtimeRecord(record: LogcatRecord): String {
+        val timestamp = synchronized(threadtimeDateFormat) {
+            threadtimeDateFormat.format(Date(record.timestampMillis))
+        }
+        val prefix = buildString {
+            append(timestamp)
+            append(' ')
+            append(record.pid.toString().padStart(5))
+            append(' ')
+            append(record.tid.toString().padStart(5))
+            append(' ')
+            append(record.priority)
+            append(' ')
+            append(record.tag)
+            append(": ")
+        }
+        return record.message.split('\n').joinToString("\n") { messageLine ->
+            prefix + messageLine
+        }
+    }
+
+    private fun protobufPriority(priority: Int): Char = when (priority) {
+        2 -> 'V'
+        3 -> 'D'
+        4 -> 'I'
+        5 -> 'W'
+        6 -> 'E'
+        8 -> 'A'
+        else -> 'E'
+    }
+
+    private fun InputStream.readUpTo(destination: ByteArray): Int {
+        var offset = 0
+        while (offset < destination.size) {
+            val count = read(destination, offset, destination.size - offset)
+            if (count < 0) break
+            offset += count
+        }
+        return offset
+    }
+
+    private fun InputStream.readExactlyOrNull(size: Int): ByteArray? {
+        val result = ByteArray(size)
+        val count = readUpTo(result)
+        if (count == 0) return null
+        if (count != size) throw EOFException("logcat protobuf 数据在记录中间结束")
+        return result
+    }
+
+    private fun InputStream.readExactly(size: Int): ByteArray =
+        readExactlyOrNull(size) ?: throw EOFException("logcat protobuf 数据提前结束")
+
+    private fun littleEndianLong(bytes: ByteArray): Long {
+        var value = 0L
+        bytes.forEachIndexed { index, byte ->
+            value = value or ((byte.toLong() and 0xFFL) shl (index * 8))
+        }
+        return value
+    }
+
+    private fun append(line: String) {
+        val notification = synchronized(lock) {
+            appendLocked(line)
+            visibleRangeNotificationLocked()
+        }
+        notifyVisibleRange(notification)
+    }
+
+    private fun append(record: LogcatRecord) {
+        val rawLine = formatThreadtimeRecord(record)
+        val expanded = expandElidedStackFrames(rawLine.lineSequence().toList())
+        val notification = synchronized(lock) {
+            appendLocked(expanded)
+            visibleRangeNotificationLocked()
         }
         notifyVisibleRange(notification)
     }
@@ -242,29 +462,6 @@ internal object ServiceLogRecorder {
         return entry
     }
 
-    private fun schedulePendingFlushLocked() {
-        pendingFlushTask?.cancel(false)
-        pendingFlushTask = pendingFlushExecutor.schedule(
-            ::flushPending,
-            STACK_TRACE_GROUPING_DELAY_MILLIS,
-            TimeUnit.MILLISECONDS,
-        )
-    }
-
-    private fun flushPending() {
-        val notification = synchronized(lock) {
-            pendingFlushTask = null
-            commitPendingLocked()?.let { visibleRangeNotificationLocked() }
-        }
-        notifyVisibleRange(notification)
-    }
-
-    private fun commitPendingLocked(): ServiceLogEntry? {
-        val pending = pendingLog ?: return null
-        pendingLog = null
-        return appendLocked(expandElidedStackFrames(pending.lines))
-    }
-
     private fun visibleRangeNotificationLocked(): Triple<
         ((oldestAvailableId: Long, latestId: Long) -> Unit)?,
         Long,
@@ -285,30 +482,6 @@ internal object ServiceLogRecorder {
             runCatching { listener(notification.second, notification.third) }
         }
     }
-
-    private fun isStackTraceContinuation(pending: PendingLog, line: String): Boolean {
-        val parsed = parseThreadtimeLine(line)
-        val message = (parsed?.message ?: line).trimStart()
-        val pendingSource = pending.source
-
-        if (parsed == null) {
-            return pendingSource != null &&
-                !line.startsWith("---------") &&
-                !line.startsWith("[ServiceLogRecorder]") &&
-                !line.startsWith("[logcat stderr]")
-        }
-        if (pendingSource == null || !parsed.hasSameEmitter(pendingSource)) return false
-
-        return parsed.timestamp == pendingSource.timestamp ||
-            STACK_TRACE_CONTINUATION_PATTERN.containsMatchIn(message) ||
-            THROWABLE_HEADER_PATTERN.matches(message)
-    }
-
-    private fun ThreadtimeLine.hasSameEmitter(other: ThreadtimeLine): Boolean =
-        pid == other.pid &&
-            tid == other.tid &&
-            priority == other.priority &&
-            tag == other.tag
 
     private fun notifyCurrentVisibleRange() {
         val notification = synchronized(lock) {
@@ -497,12 +670,66 @@ internal object ServiceLogRecorder {
         }
     }
 
-    private data class PendingLog(
-        val lines: MutableList<String>,
-        val source: ThreadtimeLine?,
+    private class ProtoInput(
+        private val bytes: ByteArray,
     ) {
-        fun append(line: String) {
-            lines += line
+        private var position = 0
+
+        fun hasRemaining(): Boolean = position < bytes.size
+
+        fun readVarint(): Long {
+            var value = 0L
+            var shift = 0
+            while (shift < Long.SIZE_BITS) {
+                if (position >= bytes.size) throw EOFException("protobuf varint 数据不完整")
+                val current = bytes[position++].toInt() and 0xFF
+                value = value or ((current and 0x7F).toLong() shl shift)
+                if (current and 0x80 == 0) return value
+                shift += 7
+            }
+            throw IllegalStateException("protobuf varint 长度非法")
+        }
+
+        fun readVarintField(wireType: Int): Long {
+            require(wireType == PROTOBUF_VARINT_WIRE_TYPE) {
+                "protobuf 字段类型错误：$wireType"
+            }
+            return readVarint()
+        }
+
+        fun readBytesField(wireType: Int): ByteArray {
+            require(wireType == PROTOBUF_LENGTH_DELIMITED_WIRE_TYPE) {
+                "protobuf 字段类型错误：$wireType"
+            }
+            val size = readVarint()
+            if (size !in 0..(bytes.size - position).toLong()) {
+                throw EOFException("protobuf bytes 数据不完整")
+            }
+            val end = position + size.toInt()
+            return bytes.copyOfRange(position, end).also { position = end }
+        }
+
+        fun skipField(wireType: Int) {
+            when (wireType) {
+                PROTOBUF_VARINT_WIRE_TYPE -> readVarint()
+                PROTOBUF_FIXED_64_WIRE_TYPE -> skipBytes(Long.SIZE_BYTES)
+                PROTOBUF_LENGTH_DELIMITED_WIRE_TYPE -> {
+                    val size = readVarint()
+                    if (size > Int.MAX_VALUE) {
+                        throw IllegalStateException("protobuf 字段长度非法：$size")
+                    }
+                    skipBytes(size.toInt())
+                }
+                PROTOBUF_FIXED_32_WIRE_TYPE -> skipBytes(Int.SIZE_BYTES)
+                else -> throw IllegalStateException("不支持的 protobuf wire type：$wireType")
+            }
+        }
+
+        private fun skipBytes(count: Int) {
+            if (count < 0 || position + count > bytes.size) {
+                throw EOFException("protobuf 字段数据不完整")
+            }
+            position += count
         }
     }
 
@@ -514,6 +741,23 @@ internal object ServiceLogRecorder {
     private data class StackTraceContext(
         val enclosingFrames: List<String> = emptyList(),
         val frames: MutableList<String> = mutableListOf(),
+    )
+
+    private data class LongLogcatHeader(
+        val timestampMillis: Long,
+        val pid: Long,
+        val tid: Long,
+        val priority: Char,
+        val tag: String,
+    )
+
+    private data class LogcatRecord(
+        val timestampMillis: Long,
+        val pid: Long,
+        val tid: Long,
+        val priority: Char,
+        val tag: String,
+        val message: String,
     )
 
     private data class ThreadtimeLine(
@@ -528,8 +772,8 @@ internal object ServiceLogRecorder {
     private val THREADTIME_PATTERN = Regex(
         """^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEFAS])\s+(.+?)\s*:\s?(.*)$""",
     )
-    private val STACK_TRACE_CONTINUATION_PATTERN = Regex(
-        """^(?:at\s+|Caused by:\s*|Suppressed:\s*|Wrapped by:\s*|\.\.\.\s+\d+\s+more\b)""",
+    private val LONG_EPOCH_HEADER_PATTERN = Regex(
+        """^\[\s*(\d+)\.(\d+)\s+(\d+):\s*(\d+)\s+([VDIWEFAS])/(.*?)\s*]$""",
     )
     private val THROWABLE_HEADER_PATTERN = Regex(
         """^(?:Exception in thread\s+.+|(?:[A-Za-z_\x24][\w\x24]*\.)*[A-Za-z_\x24][\w\x24]*(?:Exception|Error|Throwable)(?::.*)?)$""",
@@ -539,12 +783,31 @@ internal object ServiceLogRecorder {
         """^(?:Caused by:|Suppressed:|Wrapped by:)\s*.+$""",
     )
     private val ELIDED_FRAME_PATTERN = Regex("""^\.\.\.\s+(\d+)\s+more$""")
+    private val threadtimeDateFormat = SimpleDateFormat(
+        "MM-dd HH:mm:ss.SSS",
+        Locale.US,
+    )
 
     private const val MAX_LOGCAT_MESSAGE_CHARACTERS = 3_000
     private const val MAX_BUFFER_ENTRIES = 4_000
     private const val MAX_BUFFER_CHARACTERS = 512 * 1024
-    private const val STACK_TRACE_GROUPING_DELAY_MILLIS = 300L
     private const val STACK_TRACE_SPACES_PER_INDENT = 4
     private const val LOGCAT_BOUNDARY_LOOKBACK_MILLIS = 1_000L
     private const val LOGCAT_BOUNDARY_TAG = "SvcLogBoundary"
+    private const val LOGCAT_BUFFER_MARKER_PREFIX = "--------- beginning of"
+    private const val PROTOBUF_SIZE_BYTES = 8
+    private const val MAX_PROTOBUF_RECORD_BYTES = 1024 * 1024
+    private const val PROTOBUF_NANOSECOND_DIGITS = 9
+    private const val PROTOBUF_WIRE_TYPE_MASK = 0x07
+    private const val PROTOBUF_VARINT_WIRE_TYPE = 0
+    private const val PROTOBUF_FIXED_64_WIRE_TYPE = 1
+    private const val PROTOBUF_LENGTH_DELIMITED_WIRE_TYPE = 2
+    private const val PROTOBUF_FIXED_32_WIRE_TYPE = 5
+    private const val PROTO_TIME_SEC_FIELD = 1
+    private const val PROTO_TIME_NSEC_FIELD = 2
+    private const val PROTO_PRIORITY_FIELD = 3
+    private const val PROTO_PID_FIELD = 5
+    private const val PROTO_TID_FIELD = 6
+    private const val PROTO_TAG_FIELD = 7
+    private const val PROTO_MESSAGE_FIELD = 8
 }

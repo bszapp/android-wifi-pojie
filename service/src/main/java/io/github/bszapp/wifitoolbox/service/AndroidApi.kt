@@ -32,13 +32,8 @@ class AndroidApi(
 ) {
     private val sdk = Build.VERSION.SDK_INT
 
-    fun execute(request: AndroidApiRequest): AndroidApiResponse {
-        Log.d(
-            TAG,
-            "收到 AndroidApi 请求：action=${request.action}；" +
-                "参数=${describeRequestArguments(request)}",
-        )
-        return runCatching {
+    fun execute(request: AndroidApiRequest): AndroidApiResponse =
+        runCatching {
             when (request.action) {
                 AndroidApiAction.WIFI_IS_ENABLED -> booleanResponse(isWifiEnabledDirect())
                 AndroidApiAction.WIFI_SET_ENABLED -> {
@@ -62,31 +57,24 @@ class AndroidApi(
                 }
                 else -> throw IllegalArgumentException("未知 AndroidApi action：${request.action}")
             }
-        }.fold(
-            onSuccess = { response ->
-                Log.d(TAG, "AndroidApi 请求完成：action=${request.action}；success=${response.success}")
-                response
-            },
-            onFailure = { error ->
-                Log.e(TAG, "AndroidApi 请求失败：action=${request.action}", error)
-                AndroidApiResponse.failure(error)
-            },
-        )
+        }.getOrElse(AndroidApiResponse::failure)
+
+
+    fun getScanResultsDirect(): List<ScanResult> = androidBusinessCall(
+        operation = "获取扫描的 Wi-Fi 列表",
+        successMessage = { results ->
+            "获取扫描的 Wi-Fi 列表成功：count=${results.size}"
+        },
+    ) {
+        getScanResultsInternal()
     }
 
-
-    fun getScanResultsDirect(): List<ScanResult> {
+    private fun getScanResultsInternal(): List<ScanResult> {
         val wifiService = getWifiService()
         val clazz = wifiService::class.java
 
         val raw = systemApi(
             apiName = "getScanResults",
-            operation = "读取当前 Wi-Fi 扫描结果",
-            parameters = if (sdk >= 30) {
-                "signature=(String,String), callerPackage=$callerPackage, featureId=null"
-            } else {
-                "signature=(String), callerPackage=$callerPackage"
-            },
         ) {
             when {
                 sdk >= 35 -> clazz.getMethod(
@@ -108,30 +96,33 @@ class AndroidApi(
             }
         } ?: throw IllegalStateException("getScanResults 返回 null")
 
-        return parseScanResultList(raw, "getScanResults").also { results ->
-            Log.d(TAG, "Wi-Fi 扫描结果解析完成：有效结果数量=${results.size}")
-        }
+        return parseScanResultList(raw, "getScanResults")
     }
 
     fun getSavedWifiListBytesDirect(): ByteArray {
         val list = getSavedWifiListDirect()
-        Log.d(TAG, "序列化已保存 Wi-Fi 列表：配置数量=${list.size}")
         val parcel = Parcel.obtain()
         return try {
             parcel.writeTypedList(list)
-            parcel.marshall().also { bytes ->
-                Log.d(TAG, "已保存 Wi-Fi 列表序列化完成：字节数=${bytes.size}")
-            }
+            parcel.marshall()
         } finally {
             parcel.recycle()
         }
     }
 
-    fun getSavedWifiListDirect(): List<WifiConfiguration> {
+    fun getSavedWifiListDirect(): List<WifiConfiguration> = androidBusinessCall(
+        operation = "获取已保存的 Wi-Fi 列表",
+        successMessage = { networks ->
+            "获取已保存的 Wi-Fi 列表成功：count=${networks.size}"
+        },
+    ) {
+        getSavedWifiListInternal()
+    }
+
+    private fun getSavedWifiListInternal(): List<WifiConfiguration> {
         val raw = try {
             queryPrivilegedConfiguredNetworks()
-        } catch (e: SecurityException) {
-            Log.w(TAG, "getPrivilegedConfiguredNetworks 被安全策略拒绝，回退到普通配置列表（不含密码）: ${e.message}")
+        } catch (_: SecurityException) {
             return getSavedWifiListFallback()
         }
 
@@ -140,9 +131,7 @@ class AndroidApi(
             apiName = "getPrivilegedConfiguredNetworks"
         )
 
-        return list.distinctBy { it.networkId }.also { distinctList ->
-            Log.d(TAG, "受保护 Wi-Fi 配置读取完成：去重后数量=${distinctList.size}")
-        }
+        return list.distinctBy { it.networkId }
     }
 
     @SuppressLint("NewApi")
@@ -158,14 +147,6 @@ class AndroidApi(
 
         return systemApi(
             apiName = "getPrivilegedConfiguredNetworks",
-            operation = "读取包含受保护字段的已保存 Wi-Fi 配置",
-            parameters = when {
-                sdk >= 33 -> "signature=(String,String,Bundle), user=$callerUser, " +
-                    "callerPackage=$callerPackage, attributionUid=${Process.myUid()}"
-                sdk >= 30 -> "signature=(String,String), callerPackage=$callerPackage, featureId=null"
-                sdk >= 28 -> "signature=(String), callerPackage=$callerPackage"
-                else -> "signature=(), 无参数"
-            },
         ) {
             when {
                 sdk >= 33 -> {
@@ -213,12 +194,6 @@ class AndroidApi(
 
         val raw = systemApi(
             apiName = "getConfiguredNetworks",
-            operation = "读取普通已保存 Wi-Fi 配置列表",
-            parameters = when {
-                sdk >= 30 -> "signature=(String,String), callerPackage=$callerPackage, featureId=null"
-                sdk >= 28 -> "signature=(String), callerPackage=$callerPackage"
-                else -> "signature=(), 无参数"
-            },
         ) {
             when {
                 sdk >= 30 -> clazz.getMethod(
@@ -237,18 +212,22 @@ class AndroidApi(
         } ?: throw IllegalStateException("getConfiguredNetworks 返回 null")
 
         val list = parseWifiConfigurationList(raw, "getConfiguredNetworks")
-        return list.distinctBy { it.networkId }.also { distinctList ->
-            Log.d(TAG, "普通 Wi-Fi 配置读取完成：去重后数量=${distinctList.size}")
-        }
+        return list.distinctBy { it.networkId }
     }
 
-    fun updateWifiConfigDirect(networkId: Int, patchBytes: ByteArray): Boolean {
+    fun updateWifiConfigDirect(networkId: Int, patchBytes: ByteArray): Boolean =
+        androidBusinessCall(
+            operation = "更新 Wi-Fi 配置",
+            details = "networkId=$networkId",
+            successMessage = {
+                "更新 Wi-Fi 配置成功：networkId=$networkId"
+            },
+        ) {
+            updateWifiConfigInternal(networkId, patchBytes)
+        }
+
+    private fun updateWifiConfigInternal(networkId: Int, patchBytes: ByteArray): Boolean {
         val patch = readWifiConfigPatch(patchBytes)
-        Log.d(
-            TAG,
-            "更新 Wi-Fi 配置：networkId=$networkId, patchBytes=${patchBytes.size}字节, " +
-                "enabled=${patch.enabled}, autoJoin=${patch.autoJoin}",
-        )
 
         val wifiService = getWifiService()
         val clazz = wifiService::class.java
@@ -256,21 +235,6 @@ class AndroidApi(
         patch.enabled?.let { enabled ->
             val result = systemApi(
                 apiName = if (enabled) "enableNetwork" else "disableNetwork",
-                operation = if (enabled) "启用指定 Wi-Fi 配置" else "停用指定 Wi-Fi 配置",
-                parameters = if (enabled) {
-                    if (sdk >= 29) {
-                        "signature=(Int,Boolean,String), networkId=$networkId, " +
-                            "disableOthers=false, callerPackage=$callerPackage"
-                    } else {
-                        "signature=(Int,Boolean), networkId=$networkId, disableOthers=false"
-                    }
-                } else {
-                    if (sdk >= 29) {
-                        "signature=(Int,String), networkId=$networkId, callerPackage=$callerPackage"
-                    } else {
-                        "signature=(Int), networkId=$networkId"
-                    }
-                },
             ) {
                 if (enabled) {
                     if (sdk >= 29) {
@@ -310,8 +274,6 @@ class AndroidApi(
             if (sdk >= 30) {
                 systemApi(
                     apiName = "allowAutojoin",
-                    operation = "设置指定 Wi-Fi 配置是否允许自动连接",
-                    parameters = "signature=(Int,Boolean), networkId=$networkId, allow=$autoJoin",
                 ) {
                     clazz.getMethod(
                         "allowAutojoin",
@@ -320,14 +282,12 @@ class AndroidApi(
                     ).invoke(wifiService, networkId, autoJoin)
                 }
             } else {
-                val config = getSavedWifiListDirect()
+                val config = getSavedWifiListInternal()
                     .firstOrNull { it.networkId == networkId }
                     ?: throw IllegalArgumentException("找不到 networkId=$networkId 的 Wi-Fi 配置")
 
                 systemApi(
                     apiName = "WifiConfiguration.allowAutojoin.setBoolean",
-                    operation = "在旧版系统配置对象中写入自动连接字段",
-                    parameters = "field=allowAutojoin, networkId=$networkId, value=$autoJoin",
                 ) {
                     WifiConfiguration::class.java
                         .getField("allowAutojoin")
@@ -336,9 +296,6 @@ class AndroidApi(
 
                 val result = systemApi(
                     apiName = "updateNetwork",
-                    operation = "写回修改过自动连接字段的 Wi-Fi 配置",
-                    parameters = "signature=(WifiConfiguration), networkId=$networkId, " +
-                        "allowAutojoin=$autoJoin",
                 ) {
                     clazz.getMethod(
                         "updateNetwork",
@@ -350,16 +307,22 @@ class AndroidApi(
             }
         }
 
-        Log.d(TAG, "Wi-Fi 配置更新完成：networkId=$networkId")
         return true
     }
 
-    fun isWifiEnabledDirect(): Boolean {
+    fun isWifiEnabledDirect(): Boolean = androidBusinessCall(
+        operation = "查询 Wi-Fi 开关状态",
+        successMessage = { enabled ->
+            "查询 Wi-Fi 开关状态成功：enabled=$enabled"
+        },
+    ) {
+        isWifiEnabledInternal()
+    }
+
+    private fun isWifiEnabledInternal(): Boolean {
         val wifiService = getWifiService()
         val state = systemApi(
             apiName = "getWifiEnabledState",
-            operation = "读取 Wi-Fi 开关状态",
-            parameters = "signature=(), 无参数",
         ) {
             wifiService::class.java
                 .getMethod("getWifiEnabledState")
@@ -369,18 +332,22 @@ class AndroidApi(
         return state == WifiManager.WIFI_STATE_ENABLED || state == WifiManager.WIFI_STATE_ENABLING
     }
 
-    fun setWifiEnabledDirect(enabled: Boolean) {
+    fun setWifiEnabledDirect(enabled: Boolean) = androidBusinessCall(
+        operation = "设置 Wi-Fi 开关",
+        details = "enabled=$enabled",
+        successMessage = {
+            "设置 Wi-Fi 开关成功：enabled=$enabled"
+        },
+    ) {
+        setWifiEnabledInternal(enabled)
+    }
+
+    private fun setWifiEnabledInternal(enabled: Boolean) {
         val wifiService = getWifiService()
         val clazz = wifiService::class.java
 
         val result = systemApi(
             apiName = "setWifiEnabled",
-            operation = if (enabled) "打开 Wi-Fi" else "关闭 Wi-Fi",
-            parameters = if (sdk >= 29) {
-                "signature=(String,Boolean), callerPackage=$callerPackage, enabled=$enabled"
-            } else {
-                "signature=(Boolean), enabled=$enabled"
-            },
         ) {
             if (sdk >= 29) {
                 clazz.getMethod(
@@ -417,8 +384,6 @@ class AndroidApi(
             else -> {
                 val list = systemApi(
                     apiName = "$apiName.getList",
-                    operation = "从系统返回的列表包装对象中取出 Wi-Fi 配置列表",
-                    parameters = "signature=(), wrapperType=${raw.javaClass.name}",
                 ) {
                     raw.javaClass.getMethod("getList").invoke(raw)
                 }
@@ -439,8 +404,6 @@ class AndroidApi(
             else -> {
                 val list = systemApi(
                     apiName = "$apiName.getList",
-                    operation = "从系统返回的列表包装对象中取出扫描结果列表",
-                    parameters = "signature=(), wrapperType=${raw.javaClass.name}",
                 ) {
                     raw.javaClass.getMethod("getList").invoke(raw)
                 }
@@ -453,7 +416,6 @@ class AndroidApi(
             val result = item as? ScanResult
                 ?: throw IllegalStateException("$apiName 返回第 $index 项不是 ScanResult：$item")
             if (result.BSSID.isNullOrBlank()) {
-                Log.w(TAG, "$apiName 丢弃第 $index 项：BSSID 为空")
                 null
             } else {
                 result
@@ -464,8 +426,6 @@ class AndroidApi(
     private fun getWifiService(): Any {
         val binder = systemApi(
             apiName = "ServiceManager.getService",
-            operation = "取得系统 Wi-Fi Binder 服务",
-            parameters = "signature=(String), name=wifi",
         ) {
             Class.forName("android.os.ServiceManager")
                 .getMethod("getService", String::class.java)
@@ -475,9 +435,6 @@ class AndroidApi(
 
         return systemApi(
             apiName = "IWifiManager.Stub.asInterface",
-            operation = "把 Wi-Fi Binder 转换为 IWifiManager 接口",
-            parameters = "signature=(IBinder), binderType=${binder.javaClass.name}, " +
-                "binderAlive=${binder.isBinderAlive}",
         ) {
             Class.forName("android.net.wifi.IWifiManager\$Stub")
                 .getMethod("asInterface", IBinder::class.java)
@@ -488,18 +445,10 @@ class AndroidApi(
 
     private inline fun <T> systemApi(
         apiName: String,
-        operation: String,
-        parameters: String,
         block: () -> T,
     ): T {
-        Log.d(
-            TAG,
-            "调用系统 API：api=$apiName；操作=$operation；参数=$parameters；sdk=$sdk",
-        )
         return try {
-            block().also { result ->
-                Log.d(TAG, "系统 API 调用完成：api=$apiName；结果=${describeSystemApiResult(result)}")
-            }
+            block()
         } catch (e: InvocationTargetException) {
             throw unwrapSystemApiError(apiName, e)
         } catch (e: ReflectiveOperationException) {
@@ -524,29 +473,25 @@ class AndroidApi(
         if (result is Int && result < 0) throw IllegalStateException("$apiName 返回 $result")
     }
 
-    private fun describeRequestArguments(request: AndroidApiRequest): String =
-        when (request.action) {
-            AndroidApiAction.WIFI_SET_ENABLED ->
-                "enabled=${request.arguments.getBoolean(AndroidApiKeys.ENABLED)}"
-            AndroidApiAction.WIFI_UPDATE_CONFIG -> {
-                val patchSize = request.arguments.getByteArray(AndroidApiKeys.PATCH_BYTES)?.size
-                "networkId=${request.arguments.getInt(AndroidApiKeys.NETWORK_ID)}, " +
-                    "patchBytes=${patchSize?.let { "$it 字节" } ?: "null"}"
+    private inline fun <T> androidBusinessCall(
+        operation: String,
+        details: String? = null,
+        successMessage: (T) -> String,
+        block: () -> T,
+    ): T {
+        return try {
+            block().also { result ->
+                Log.d(TAG, successMessage(result))
             }
-            AndroidApiAction.WIFI_IS_ENABLED,
-            AndroidApiAction.WIFI_GET_SCAN_RESULTS,
-            AndroidApiAction.WIFI_GET_SAVED_LIST,
-            -> "无参数"
-            else -> "keys=${request.arguments.keySet().sorted()}"
+        } catch (error: Throwable) {
+            val message = if (details == null) {
+                "$operation 失败"
+            } else {
+                "$operation 失败：$details"
+            }
+            Log.e(TAG, message, error)
+            throw error
         }
-
-    private fun describeSystemApiResult(result: Any?): String = when (result) {
-        null -> "null"
-        is Boolean -> "Boolean($result)"
-        is Number -> "${result.javaClass.simpleName}($result)"
-        is List<*> -> "List(size=${result.size})"
-        is IBinder -> "IBinder(type=${result.javaClass.name}, alive=${result.isBinderAlive})"
-        else -> "type=${result.javaClass.name}"
     }
 
     private fun booleanResponse(value: Boolean): AndroidApiResponse =
