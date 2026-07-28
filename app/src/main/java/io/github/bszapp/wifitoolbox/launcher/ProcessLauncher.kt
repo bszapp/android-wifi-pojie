@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.IBinder
 import android.os.Process
 import android.util.Log
-import io.github.bszapp.wifitoolbox.contract.startup.AppVersion
+import io.github.bszapp.wifitoolbox.BuildConfig
 import io.github.bszapp.wifitoolbox.contract.startup.RunningException
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
@@ -26,6 +26,8 @@ import kotlin.time.Duration.Companion.seconds
 class ProcessLauncher(
     private val context: Context,
     private val onAndroidApiError: (operation: String, error: Throwable) -> Unit,
+    private val onServiceConnected: (IMainService, AndroidApiClient) -> Unit,
+    private val onServiceDisconnected: () -> Unit,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -39,19 +41,19 @@ class ProcessLauncher(
     private var activeBinder: IBinder? = null
     private var deathRecipient: IBinder.DeathRecipient? = null
 
-    var mainService: IMainService? = null
-        private set
+    private var mainService: IMainService? = null
 
-    var androidApiClient: AndroidApiClient? = null
-        private set
+    private var androidApiClient: AndroidApiClient? = null
 
     private fun cleanupActive() {
         cleanupDeathRecipientOnly()
+        ToolboxServiceProvider.clearBinder()
         activeLauncher?.closeQuietly()
         activeLauncher = null
     }
 
     private fun cleanupDeathRecipientOnly() {
+        val hadConnection = activeBinder != null || mainService != null || androidApiClient != null
         deathRecipient?.let { recipient ->
             runCatching { activeBinder?.unlinkToDeath(recipient, 0) }
         }
@@ -59,6 +61,12 @@ class ProcessLauncher(
         activeBinder = null
         mainService = null
         androidApiClient = null
+        if (hadConnection) notifyServiceDisconnected()
+    }
+
+    private fun notifyServiceDisconnected() {
+        runCatching(onServiceDisconnected)
+            .onFailure { Log.w(TAG, "通知 App 侧 Service 已断开失败：${it.message}") }
     }
 
     fun tryAutoReconnect() {
@@ -174,10 +182,14 @@ class ProcessLauncher(
                 onError = onAndroidApiError,
             )
 
-            val recipient = IBinder.DeathRecipient {
+            lateinit var recipient: IBinder.DeathRecipient
+            recipient = IBinder.DeathRecipient {
                 Log.e(TAG, "${serviceMode.displayName()} 服务进程崩溃或被终止")
                 scope.launch(Dispatchers.Main) {
-                    if (_state.value.status == StartupStatus.RUNNING) {
+                    if (activeBinder === binder &&
+                        deathRecipient === recipient &&
+                        _state.value.status == StartupStatus.RUNNING
+                    ) {
                         cleanupActive()
                         _state.value = StartupState(
                             status = StartupStatus.ERROR,
@@ -200,6 +212,11 @@ class ProcessLauncher(
                 serviceVersionName = startupInfo.versionName,
                 serviceVersionCode = startupInfo.versionCode
             )
+
+            runCatching { onServiceConnected(service, androidApiClient!!) }
+                .onFailure {
+                    Log.e(TAG, "通知 App 侧 Service 已连接失败：${it.message}", it)
+                }
 
             Log.d(
                 TAG,
@@ -280,6 +297,7 @@ class ProcessLauncher(
         launchJob = null
 
         cleanupDeathRecipientOnly()
+        ToolboxServiceProvider.clearBinder()
         activeLauncher = null
         _state.value = StartupState()
 
@@ -309,19 +327,14 @@ class ProcessLauncher(
         launchJob?.cancel()
         launchJob = null
 
-        deathRecipient?.let { recipient ->
-            runCatching { activeBinder?.unlinkToDeath(recipient, 0) }
-        }
-        deathRecipient = null
-
-        runCatching { mainService?.shutdown() }
-
+        val service = mainService
         val toClose = activeLauncher
 
-        activeBinder = null
+        cleanupDeathRecipientOnly()
+        ToolboxServiceProvider.clearBinder()
         activeLauncher = null
-        mainService = null
-        androidApiClient = null
+
+        runCatching { service?.shutdown() }
 
         _state.value = StartupState()
 
@@ -357,8 +370,8 @@ class ProcessLauncher(
     private fun createStartupInfo(mode: StartupMode): StartupInfo = StartupInfo.forAppLaunch(
         mode = mode,
         uid = Process.myUid(),
-        versionName = AppVersion.VERSION_NAME,
-        versionCode = AppVersion.VERSION_CODE,
+        versionName = BuildConfig.VERSION_NAME,
+        versionCode = BuildConfig.VERSION_CODE.toLong(),
     )
 
     companion object {

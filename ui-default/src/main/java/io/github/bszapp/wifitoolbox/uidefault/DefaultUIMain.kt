@@ -32,6 +32,7 @@ import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.navigation.rememberNavigator
 import io.github.bszapp.wifitoolbox.uidefault.screen.HomeScreen
 import io.github.bszapp.wifitoolbox.uidefault.screen.ListScreen
+import io.github.bszapp.wifitoolbox.uidefault.screen.LogScreen
 import io.github.bszapp.wifitoolbox.uidefault.screen.SettingsScreen
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ColorPaletteScreen
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -118,7 +119,7 @@ private fun MainPager(
     snackbarHostState: SnackbarHostState,
 ) {
     val navigator = LocalNavigator.current
-    val pagerState = rememberPagerState(pageCount = { 3 })
+    val pagerState = rememberPagerState(pageCount = { 4 })
     val mainState = rememberMainScreenState(pagerState)
     val enableBlur = LocalEnableBlur.current
     val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
@@ -143,12 +144,13 @@ private fun MainPager(
                 modifier = Modifier
                     .then(if (enableFloatingBottomBar && enableFloatingBottomBarBlur) Modifier.layerBackdrop(backdrop) else Modifier),
                 state = mainState.pagerState,
-                beyondViewportPageCount = 3,
+                beyondViewportPageCount = 4,
             ) { page ->
                 when (page) {
                     0 -> HomeScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                     1 -> ListScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
-                    2 -> SettingsScreen()
+                    2 -> LogScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
+                    3 -> SettingsScreen(bottomInnerPadding = bottomInnerPadding)
                 }
             }
         }

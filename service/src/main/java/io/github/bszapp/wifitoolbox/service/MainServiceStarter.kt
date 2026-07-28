@@ -17,6 +17,7 @@ object MainServiceStarter {
             ?: throw IllegalArgumentException("缺少启动信息参数")
         val startupInfo = StartupInfoParcelCodec.decode(startupInfoArg).requireLaunchInfo()
 
+        ServiceLogRecorder.start()
         Log.d(
             TAG,
             "独立服务进程入口启动 mode=${startupInfo.startupMode} trustedUid=${startupInfo.trustedUid} " +

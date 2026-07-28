@@ -9,9 +9,9 @@ import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiException
 import io.github.bszapp.wifitoolbox.contract.error.AppError
 import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
-import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
+import io.github.bszapp.wifitoolbox.logs.ServiceLogController
 import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
 import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
@@ -28,13 +28,14 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
 
 class ToolboxApp : Application(), IAppController {
 
     private lateinit var processLauncher: ProcessLauncher
+    private lateinit var wifiListController: WifiListController
+    private lateinit var serviceLogController: ServiceLogController
     override lateinit var settings: SettingsManager
         private set
 
@@ -65,14 +66,11 @@ class ToolboxApp : Application(), IAppController {
         }
     }
 
-    override val wifiList: IWifiListController by lazy {
-        WifiListController(
-            scope = appScope,
-            getMainService = { processLauncher.mainService },
-            getAndroidApiClient = { processLauncher.androidApiClient },
-            reportError = ::publishError,
-        )
-    }
+    override val wifiList: IWifiListController
+        get() = wifiListController
+
+    override val serviceLogs: ServiceLogController
+        get() = serviceLogController
 
     override fun onCreate() {
         super.onCreate()
@@ -80,6 +78,11 @@ class ToolboxApp : Application(), IAppController {
         predictiveBackController = PredictiveBackController(
             application = this,
         ).also { it.start() }
+        wifiListController = WifiListController(
+            scope = appScope,
+            reportError = ::publishError,
+        )
+        serviceLogController = ServiceLogController(scope = appScope)
         processLauncher = ProcessLauncher(
             context = this,
             onAndroidApiError = { operation, error ->
@@ -90,18 +93,17 @@ class ToolboxApp : Application(), IAppController {
                     remoteDetails = null,
                 )
             },
+            onServiceConnected = { service, androidApi ->
+                wifiListController.connect(service, androidApi)
+                serviceLogController.connect(service)
+            },
+            onServiceDisconnected = {
+                wifiListController.disconnect()
+                serviceLogController.disconnect()
+            },
         )
         AppControllerProvider.register(this)
         processLauncher.tryAutoReconnect()
-
-        appScope.launch {
-            startup.state.collect { state ->
-                if (state.status == StartupStatus.RUNNING) {
-                    // App 只注册 Service 数据回调，不主动请求刷新 WifiState。
-                    wifiList.initialize()
-                }
-            }
-        }
     }
 
     /** App 内唯一错误发布入口。UI 只监听 [errors]。 */

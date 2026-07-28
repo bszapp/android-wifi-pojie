@@ -2,6 +2,7 @@
 
 package io.github.bszapp.wifitoolbox.wifilist
 
+import android.os.DeadObjectException
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -28,8 +29,6 @@ import kotlinx.coroutines.withContext
  */
 class WifiListController(
     private val scope: CoroutineScope,
-    private val getMainService: () -> IMainService?,
-    private val getAndroidApiClient: () -> AndroidApiClient?,
     private val reportError: (
         source: String,
         operation: String,
@@ -46,15 +45,144 @@ class WifiListController(
 
     @Volatile
     private var registeredService: IMainService? = null
+
+    @Volatile
     private var registeredBinder: IBinder? = null
 
-    private val callback = object : IMainServiceCallback.Stub() {
+    @Volatile
+    private var registeredCallback: IMainServiceCallback? = null
+
+    @Volatile
+    private var androidApiClient: AndroidApiClient? = null
+
+    @Volatile
+    private var connectionGeneration = 0L
+
+    private val connectionLock = Any()
+
+    private data class DetachedConnection(
+        val service: IMainService,
+        val binder: IBinder,
+        val callback: IMainServiceCallback,
+    )
+
+    private data class ConnectionPlan(
+        val detached: DetachedConnection?,
+        val generation: Long,
+        val callback: IMainServiceCallback,
+    )
+
+    private data class ConnectionLease(
+        val generation: Long,
+        val service: IMainService,
+        val binder: IBinder,
+        val client: AndroidApiClient,
+    )
+
+    /**
+     * 接收 ProcessLauncher 已确认的当前连接。
+     *
+     * 本方法只建立 App 侧 callback 订阅；注册结果不参与 Service 的 RUNNING 判定。
+     */
+    fun connect(
+        service: IMainService,
+        client: AndroidApiClient,
+    ) {
+        val binder = service.asBinder()
+        val plan = synchronized(connectionLock) {
+            if (registeredBinder === binder && binder.isBinderAlive) {
+                androidApiClient = client
+                return
+            }
+
+            val detached = currentConnectionLocked()
+            connectionGeneration += 1
+            val generation = connectionGeneration
+            val callback = createCallback(
+                generation = connectionGeneration,
+                service = service,
+            )
+
+            registeredService = service
+            registeredBinder = binder
+            registeredCallback = callback
+            androidApiClient = client
+            ConnectionPlan(detached, generation, callback)
+        }
+
+        _state.value = null
+        _savedWifiList.value = null
+        unregisterDetached(plan.detached, operation = "注销已替换的 Wi-Fi 数据回调")
+
+        scope.launch(Dispatchers.IO) {
+            if (!isCurrentConnection(plan.generation, plan.callback)) return@launch
+
+            runCatching { service.registerCallback(plan.callback) }
+                .onSuccess {
+                    if (isCurrentConnection(plan.generation, plan.callback)) {
+                        Log.d(TAG, "已注册 Wi-Fi 数据回调，generation=${plan.generation}")
+                    } else {
+                        unregisterDetached(
+                            DetachedConnection(service, binder, plan.callback),
+                            operation = "清理已失效的 Wi-Fi 数据回调",
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    if (error is DeadObjectException ||
+                        !isCurrentConnection(plan.generation, plan.callback)
+                    ) {
+                        Log.d(TAG, "注册 Wi-Fi 数据回调时连接已失效")
+                    } else {
+                        report(
+                            operation = "注册 Wi-Fi 数据回调",
+                            error = error,
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * ProcessLauncher 失去 Service 所有权时同步作废 App 侧引用。
+     * 远端注销只做后台尽力清理，不阻塞 Service 关闭或 StartupState 更新。
+     */
+    fun disconnect() {
+        val detached = synchronized(connectionLock) {
+            val current = currentConnectionLocked()
+            connectionGeneration += 1
+            registeredService = null
+            registeredBinder = null
+            registeredCallback = null
+            androidApiClient = null
+            current
+        }
+
+        _state.value = null
+        _savedWifiList.value = null
+        unregisterDetached(detached, operation = "注销 Wi-Fi 数据回调")
+    }
+
+    private fun createCallback(
+        generation: Long,
+        service: IMainService,
+    ): IMainServiceCallback = object : IMainServiceCallback.Stub() {
         override fun onWifiStateChanged(payload: ParcelFileDescriptor) {
+            if (!isCurrentConnection(generation, this)) {
+                runCatching { payload.close() }
+                return
+            }
+            val callback = this
+
             scope.launch(Dispatchers.IO) {
                 val result = runCatching {
                     WifiParcelTransport.decodeWifiState(payload)
                 }
+
+                if (!isCurrentConnection(generation, callback)) return@launch
+
                 withContext(Dispatchers.Main.immediate) {
+                    if (!isCurrentConnection(generation, callback)) return@withContext
                     result
                         .onSuccess { _state.value = it }
                         .onFailure {
@@ -64,16 +192,26 @@ class WifiListController(
                             )
                         }
                 }
-                acknowledgeWifiState()
+                acknowledgeWifiState(service, callback, generation)
             }
         }
 
         override fun onSavedWifiListChanged(payload: ParcelFileDescriptor) {
+            if (!isCurrentConnection(generation, this)) {
+                runCatching { payload.close() }
+                return
+            }
+            val callback = this
+
             scope.launch(Dispatchers.IO) {
                 val result = runCatching {
                     WifiParcelTransport.decodeSavedWifiList(payload)
                 }
+
+                if (!isCurrentConnection(generation, callback)) return@launch
+
                 withContext(Dispatchers.Main.immediate) {
+                    if (!isCurrentConnection(generation, callback)) return@withContext
                     result
                         .onSuccess { _savedWifiList.value = it }
                         .onFailure {
@@ -83,7 +221,7 @@ class WifiListController(
                             )
                         }
                 }
-                acknowledgeSavedWifiList()
+                acknowledgeSavedWifiList(service, callback, generation)
             }
         }
 
@@ -93,53 +231,13 @@ class WifiListController(
             message: String,
             details: String,
         ) {
+            if (!isCurrentConnection(generation, this)) return
             reportError(
                 source,
                 operation,
                 IllegalStateException(message),
                 details,
             )
-        }
-    }
-
-    override fun initialize() {
-        scope.launch(Dispatchers.IO) {
-            val service = getMainService()
-            if (service == null) {
-                report(
-                    operation = "注册 Wi-Fi 数据回调",
-                    error = IllegalStateException("service 未连接"),
-                )
-                return@launch
-            }
-
-            val binder = service.asBinder()
-            if (registeredBinder !== binder) {
-                registeredService?.let { old ->
-                    runCatching { old.unregisterCallback(callback) }
-                        .onFailure {
-                            report(
-                                operation = "注销旧 Wi-Fi 数据回调",
-                                error = it,
-                            )
-                        }
-                }
-
-                registeredService = service
-                registeredBinder = binder
-                withContext(Dispatchers.Main.immediate) {
-                    _state.value = null
-                    _savedWifiList.value = null
-                }
-
-                runCatching { service.registerCallback(callback) }
-                    .onFailure {
-                        report(
-                            operation = "注册 Wi-Fi 数据回调",
-                            error = it,
-                        )
-                    }
-            }
         }
     }
 
@@ -156,11 +254,11 @@ class WifiListController(
     @Throws(Exception::class)
     override fun startScan() {
         try {
-            val service = registeredService ?: getMainService()
+            val lease = currentLease()
                 ?: throw IllegalStateException("service 未连接")
 
             Log.d(TAG, "向 Service 同步请求启动 Wi-Fi 扫描")
-            val started = service.startWifiScan()
+            val started = lease.service.startWifiScan()
             if (!started) {
                 throw IllegalStateException("Service 未确认扫描已开始")
             }
@@ -176,18 +274,20 @@ class WifiListController(
 
     /** 单次系统命令只走 AndroidApi，不要求 Service 顺带刷新 WifiState。 */
     override fun setWifiEnabled(enabled: Boolean) {
+        val lease = currentLease()
+        if (lease == null) {
+            report(
+                operation = "设置 Wi-Fi 开关为 $enabled",
+                error = IllegalStateException("AndroidApiClient 不可用"),
+            )
+            return
+        }
+
         scope.launch(Dispatchers.IO) {
-            val client = getAndroidApiClient()
-            if (client == null) {
-                report(
-                    operation = "设置 Wi-Fi 开关为 $enabled",
-                    error = IllegalStateException("AndroidApiClient 不可用"),
-                )
-                return@launch
-            }
+            if (!isCurrentLease(lease)) return@launch
 
             // AndroidApiClient 已负责把所有异常送入统一错误广播；这里仅终止协程异常传播。
-            runCatching { client.setWifiEnabled(enabled) }
+            runCatching { lease.client.setWifiEnabled(enabled) }
                 .onFailure {
                     Log.e(TAG, "设置 Wi-Fi 开关失败：${it.message}", it)
                 }
@@ -196,50 +296,68 @@ class WifiListController(
 
     /** 修改系统配置成功后，由 App 单独请求 Service 刷新 SavedWifiList。 */
     override fun updateWifiConfig(networkId: Int, patch: WifiConfigPatch) {
+        val lease = currentLease()
+        if (lease == null) {
+            report(
+                operation = "更新 Wi-Fi 配置 networkId=$networkId",
+                error = IllegalStateException("AndroidApiClient 不可用"),
+            )
+            return
+        }
+
         scope.launch(Dispatchers.IO) {
-            val client = getAndroidApiClient()
-            if (client == null) {
-                report(
-                    operation = "更新 Wi-Fi 配置 networkId=$networkId",
-                    error = IllegalStateException("AndroidApiClient 不可用"),
-                )
-                return@launch
-            }
+            if (!isCurrentLease(lease)) return@launch
 
             val updated = runCatching {
-                client.updateWifiConfig(networkId, patch)
+                lease.client.updateWifiConfig(networkId, patch)
             }.onFailure {
                 // AndroidApiClient 已广播详细错误。
                 Log.e(TAG, "更新 Wi-Fi 配置失败：${it.message}", it)
             }.isSuccess
 
             if (updated) {
-                callServiceNow("请求刷新已保存 Wi-Fi 列表") {
+                callServiceNow("请求刷新已保存 Wi-Fi 列表", lease) {
                     it.refreshSavedWifiNetworks()
                 }
             }
         }
     }
 
-    private fun acknowledgeWifiState() {
-        val service = registeredService ?: getMainService() ?: return
+    private fun acknowledgeWifiState(
+        service: IMainService,
+        callback: IMainServiceCallback,
+        generation: Long,
+    ) {
+        if (!isCurrentConnection(generation, callback)) return
         runCatching { service.acknowledgeWifiState(callback) }
-            .onFailure {
-                report(
-                    operation = "确认 WifiState 接收完成",
-                    error = it,
-                )
+            .onFailure { error ->
+                if (error is DeadObjectException || !isCurrentConnection(generation, callback)) {
+                    Log.d(TAG, "确认 WifiState 时连接已失效")
+                } else {
+                    report(
+                        operation = "确认 WifiState 接收完成",
+                        error = error,
+                    )
+                }
             }
     }
 
-    private fun acknowledgeSavedWifiList() {
-        val service = registeredService ?: getMainService() ?: return
+    private fun acknowledgeSavedWifiList(
+        service: IMainService,
+        callback: IMainServiceCallback,
+        generation: Long,
+    ) {
+        if (!isCurrentConnection(generation, callback)) return
         runCatching { service.acknowledgeSavedWifiList(callback) }
-            .onFailure {
-                report(
-                    operation = "确认 SavedWifiList 接收完成",
-                    error = it,
-                )
+            .onFailure { error ->
+                if (error is DeadObjectException || !isCurrentConnection(generation, callback)) {
+                    Log.d(TAG, "确认 SavedWifiList 时连接已失效")
+                } else {
+                    report(
+                        operation = "确认 SavedWifiList 接收完成",
+                        error = error,
+                    )
+                }
             }
     }
 
@@ -247,17 +365,8 @@ class WifiListController(
         operation: String,
         block: (IMainService) -> Unit,
     ) {
-        scope.launch(Dispatchers.IO) {
-            callServiceNow(operation, block)
-        }
-    }
-
-    private fun callServiceNow(
-        operation: String,
-        block: (IMainService) -> Unit,
-    ) {
-        val service = registeredService ?: getMainService()
-        if (service == null) {
+        val lease = currentLease()
+        if (lease == null) {
             report(
                 operation = operation,
                 error = IllegalStateException("service 未连接"),
@@ -265,13 +374,82 @@ class WifiListController(
             return
         }
 
-        runCatching { block(service) }
-            .onFailure {
-                report(
-                    operation = operation,
-                    error = it,
-                )
+        scope.launch(Dispatchers.IO) {
+            callServiceNow(operation, lease, block)
+        }
+    }
+
+    private fun callServiceNow(
+        operation: String,
+        lease: ConnectionLease,
+        block: (IMainService) -> Unit,
+    ) {
+        if (!isCurrentLease(lease)) return
+
+        runCatching { block(lease.service) }
+            .onFailure { error ->
+                if (error is DeadObjectException && !isCurrentLease(lease)) {
+                    Log.d(TAG, "$operation 时连接已失效")
+                } else {
+                    report(
+                        operation = operation,
+                        error = error,
+                    )
+                }
             }
+    }
+
+    private fun currentConnectionLocked(): DetachedConnection? {
+        val service = registeredService ?: return null
+        val binder = registeredBinder ?: return null
+        val callback = registeredCallback ?: return null
+        return DetachedConnection(service, binder, callback)
+    }
+
+    private fun unregisterDetached(
+        detached: DetachedConnection?,
+        operation: String,
+    ) {
+        if (detached == null || !detached.binder.isBinderAlive) return
+
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                detached.service.unregisterCallback(detached.callback)
+            }.onFailure { error ->
+                if (error is DeadObjectException || !detached.binder.isBinderAlive) {
+                    Log.d(TAG, "$operation 时旧 Service 已失效")
+                } else {
+                    report(
+                        operation = operation,
+                        error = error,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun currentLease(): ConnectionLease? = synchronized(connectionLock) {
+        val service = registeredService ?: return@synchronized null
+        val binder = registeredBinder?.takeIf { it.isBinderAlive } ?: return@synchronized null
+        val client = androidApiClient ?: return@synchronized null
+        ConnectionLease(connectionGeneration, service, binder, client)
+    }
+
+    private fun isCurrentConnection(
+        generation: Long,
+        callback: IMainServiceCallback,
+    ): Boolean = synchronized(connectionLock) {
+        generation == connectionGeneration &&
+            registeredCallback === callback &&
+            registeredBinder?.isBinderAlive == true
+    }
+
+    private fun isCurrentLease(lease: ConnectionLease): Boolean = synchronized(connectionLock) {
+        lease.generation == connectionGeneration &&
+            registeredService === lease.service &&
+            registeredBinder === lease.binder &&
+            androidApiClient === lease.client &&
+            lease.binder.isBinderAlive
     }
 
     private fun report(

@@ -54,7 +54,6 @@ object WifiParcelTransport {
                     BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(writeSide)),
                 ).use { output ->
                     output.writeInt(MAGIC)
-                    output.writeInt(PROTOCOL_VERSION)
                     output.writeInt(type)
                     output.writeInt(payload.size)
                     output.writeLong(crc32(payload))
@@ -79,11 +78,6 @@ object WifiParcelTransport {
         ).use { input ->
             val magic = input.readInt()
             require(magic == MAGIC) { "Wi-Fi IPC magic 不匹配：$magic" }
-
-            val version = input.readInt()
-            require(version == PROTOCOL_VERSION) {
-                "Wi-Fi IPC 协议版本不匹配：$version != $PROTOCOL_VERSION"
-            }
 
             val type = input.readInt()
             require(type == expectedType) {
@@ -136,7 +130,6 @@ object WifiParcelTransport {
     }
 
     private const val MAGIC = 0x57465450 // WFTP
-    private const val PROTOCOL_VERSION = 1
     private const val TYPE_WIFI_STATE = 1
     private const val TYPE_SAVED_WIFI_LIST = 2
     private const val MAX_PAYLOAD_BYTES = 64 * 1024 * 1024

@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.IBinder
 import android.os.Process
 import android.util.Log
-import io.github.bszapp.wifitoolbox.contract.startup.AppVersion
+import io.github.bszapp.wifitoolbox.BuildConfig
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfoParcelCodec
@@ -103,8 +103,8 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
         val startupInfo = StartupInfo.forAppLaunch(
             mode = StartupMode.ROOT,
             uid = Process.myUid(),
-            versionName = AppVersion.VERSION_NAME,
-            versionCode = AppVersion.VERSION_CODE,
+            versionName = BuildConfig.VERSION_NAME,
+            versionCode = BuildConfig.VERSION_CODE.toLong(),
         )
         val startupInfoQuoted = shellQuote(StartupInfoParcelCodec.encode(startupInfo))
 

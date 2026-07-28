@@ -6,6 +6,8 @@ import android.content.ContextWrapper
 import android.os.IBinder
 import android.os.Looper
 import android.os.WorkSource
+import android.util.Log
+import java.lang.reflect.Constructor
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
@@ -45,21 +47,20 @@ internal class WifiScannerClient(
         val listenerClass = Class.forName(SCAN_LISTENER_CLASS)
         val listener = createScanListener(listenerClass, callback)
 
-        val startMethod = findStartScanMethod(
+        val startPlan = findStartScanMethod(
             scannerClass = scannerClass,
             settingsClass = settings.javaClass,
             listenerClass = listenerClass,
+            settings = settings,
+            callbackExecutor = callbackExecutor,
+            listener = listener,
         )
 
+        Log.d(TAG, "使用 WifiScanner.startScan：${startPlan.method.runtimeSignature()}")
         invokeScannerMethod(
-            method = startMethod,
+            method = startPlan.method,
             receiver = scanner,
-            args = when (startMethod.parameterCount) {
-                4 -> arrayOf(settings, callbackExecutor, listener, null)
-                3 -> arrayOf(settings, listener, null)
-                2 -> arrayOf(settings, listener)
-                else -> error("不支持的 WifiScanner.startScan 参数数量")
-            },
+            args = startPlan.arguments,
         )
 
         return ScanRequest(scanner = scanner, listener = listener)
@@ -67,13 +68,27 @@ internal class WifiScannerClient(
 
     fun stopScan(request: ScanRequest) {
         val listenerClass = Class.forName(SCAN_LISTENER_CLASS)
-        val method = request.scanner.javaClass.methods.firstOrNull { candidate ->
-            candidate.name == "stopScan" &&
-                candidate.parameterCount == 1 &&
-                candidate.parameterTypes[0] == listenerClass
-        } ?: throw NoSuchMethodException("找不到 WifiScanner.stopScan(ScanListener)")
+        val methods = visibleMethods(request.scanner.javaClass)
+        val namedMethods = methods.filter { it.name == "stopScan" }
+        if (namedMethods.isEmpty()) {
+            throw NoSuchMethodException(
+                "WifiScanner 中不存在名为 stopScan 的可见方法；" +
+                    "可见方法名=${methods.map { it.name }.distinct().sorted()}",
+            )
+        }
 
-        invokeScannerMethod(method, request.scanner, arrayOf(request.listener))
+        val plan = namedMethods
+            .mapNotNull { method ->
+                buildStopScanArguments(method.parameterTypes, listenerClass, request.listener)
+                    ?.let { arguments -> MethodPlan(method, arguments) }
+            }
+            .minByOrNull { it.method.parameterCount }
+            ?: throw NoSuchMethodException(
+                "WifiScanner 存在 stopScan 方法，但参数无法适配；" +
+                    "运行时签名=${namedMethods.joinToString { it.runtimeSignature() }}",
+            )
+
+        invokeScannerMethod(plan.method, request.scanner, plan.arguments)
     }
 
     private fun resolveScannerService(scannerServiceClass: Class<*>): Any {
@@ -98,18 +113,78 @@ internal class WifiScannerClient(
         val looper = Looper.getMainLooper() ?: Looper.myLooper()
             ?: throw IllegalStateException("当前进程没有可用 Looper")
 
-        val constructor = scannerClass.constructors.firstOrNull { candidate ->
-            val types = candidate.parameterTypes
-            types.size == 3 &&
-                Context::class.java.isAssignableFrom(types[0]) &&
-                types[1] == scannerServiceClass &&
-                types[2] == Looper::class.java
-        } ?: throw NoSuchMethodException(
-            "找不到 WifiScanner(Context, IWifiScanner, Looper)",
-        )
+        val constructors = scannerClass.declaredConstructors.toList()
+        if (constructors.isEmpty()) {
+            throw NoSuchMethodException("WifiScanner 中没有可见构造函数")
+        }
 
-        return invokeConstructor(constructor) {
-            constructor.newInstance(context, scannerService, looper)
+        val plan = constructors
+            .mapNotNull { constructor ->
+                buildConstructorArguments(
+                    parameterTypes = constructor.parameterTypes,
+                    context = context,
+                    scannerServiceClass = scannerServiceClass,
+                    scannerService = scannerService,
+                    looper = looper,
+                )?.let { arguments -> ConstructorPlan(constructor, arguments) }
+            }
+            .maxByOrNull { constructorPriority(it.constructor.parameterTypes) }
+            ?: throw NoSuchMethodException(
+                "WifiScanner 存在构造函数，但参数无法适配；" +
+                    "运行时签名=${constructors.joinToString { it.runtimeSignature() }}",
+            )
+
+        Log.d(TAG, "使用 WifiScanner 构造函数：${plan.constructor.runtimeSignature()}")
+        return invokeConstructor(plan.constructor) {
+            plan.constructor.newInstance(*plan.arguments)
+        }
+    }
+
+    private fun buildConstructorArguments(
+        parameterTypes: Array<Class<*>>,
+        context: Context,
+        scannerServiceClass: Class<*>,
+        scannerService: Any,
+        looper: Looper,
+    ): Array<Any?>? {
+        var contextCount = 0
+        var serviceCount = 0
+        var stringCount = 0
+
+        val arguments = parameterTypes.map { type ->
+            when {
+                Context::class.java.isAssignableFrom(type) -> {
+                    contextCount++
+                    context
+                }
+                type == scannerServiceClass -> {
+                    serviceCount++
+                    scannerService
+                }
+                type == Looper::class.java -> looper
+                type == java.lang.Boolean.TYPE || type == java.lang.Boolean::class.java -> true
+                Executor::class.java.isAssignableFrom(type) &&
+                    type.isInstance(DIRECT_EXECUTOR) -> DIRECT_EXECUTOR
+                type == String::class.java -> {
+                    stringCount++
+                    if (stringCount == 1) callerPackage else null
+                }
+                else -> return null
+            }
+        }.toTypedArray()
+
+        return arguments.takeIf { contextCount == 1 && serviceCount == 1 }
+    }
+
+    private fun constructorPriority(parameterTypes: Array<Class<*>>): Int {
+        val hasLooper = parameterTypes.any { it == Looper::class.java }
+        val hasBoolean = parameterTypes.any {
+            it == java.lang.Boolean.TYPE || it == java.lang.Boolean::class.java
+        }
+        return when {
+            hasLooper && !hasBoolean -> 300 - parameterTypes.size
+            !hasLooper && !hasBoolean -> 200 - parameterTypes.size
+            else -> 100 - parameterTypes.size
         }
     }
 
@@ -171,28 +246,123 @@ internal class WifiScannerClient(
         scannerClass: Class<*>,
         settingsClass: Class<*>,
         listenerClass: Class<*>,
-    ): Method {
-        val candidates = scannerClass.methods.filter { method ->
-            method.name == "startScan" &&
-                method.parameterTypes.firstOrNull() == settingsClass
+        settings: Any,
+        callbackExecutor: Executor,
+        listener: Any,
+    ): MethodPlan {
+        val methods = visibleMethods(scannerClass)
+        val namedMethods = methods.filter { it.name == "startScan" }
+        if (namedMethods.isEmpty()) {
+            throw NoSuchMethodException(
+                "WifiScanner 中不存在名为 startScan 的可见方法；" +
+                    "可见方法名=${methods.map { it.name }.distinct().sorted()}",
+            )
         }
 
-        return candidates.firstOrNull { method ->
-            val types = method.parameterTypes
-            types.size == 4 &&
-                Executor::class.java.isAssignableFrom(types[1]) &&
-                types[2] == listenerClass &&
-                types[3] == WorkSource::class.java
-        } ?: candidates.firstOrNull { method ->
-            val types = method.parameterTypes
-            types.size == 3 &&
-                types[1] == listenerClass &&
-                types[2] == WorkSource::class.java
-        } ?: candidates.firstOrNull { method ->
-            val types = method.parameterTypes
-            types.size == 2 && types[1] == listenerClass
-        } ?: throw NoSuchMethodException("找不到可用的 WifiScanner.startScan")
+        return namedMethods
+            .mapNotNull { method ->
+                buildStartScanArguments(
+                    parameterTypes = method.parameterTypes,
+                    settingsClass = settingsClass,
+                    settings = settings,
+                    listenerClass = listenerClass,
+                    listener = listener,
+                    callbackExecutor = callbackExecutor,
+                )?.let { arguments -> MethodPlan(method, arguments) }
+            }
+            .maxByOrNull { startScanPriority(it.method.parameterTypes) }
+            ?: throw NoSuchMethodException(
+                "WifiScanner 存在 startScan 方法，但参数无法适配；" +
+                    "运行时签名=${namedMethods.joinToString { it.runtimeSignature() }}",
+            )
     }
+
+    private fun buildStartScanArguments(
+        parameterTypes: Array<Class<*>>,
+        settingsClass: Class<*>,
+        settings: Any,
+        listenerClass: Class<*>,
+        listener: Any,
+        callbackExecutor: Executor,
+    ): Array<Any?>? {
+        var settingsCount = 0
+        var listenerCount = 0
+        var stringCount = 0
+
+        val arguments = parameterTypes.map { type ->
+            when {
+                type == settingsClass -> {
+                    settingsCount++
+                    settings
+                }
+                type == listenerClass -> {
+                    listenerCount++
+                    listener
+                }
+                Executor::class.java.isAssignableFrom(type) &&
+                    type.isInstance(callbackExecutor) -> callbackExecutor
+                type == WorkSource::class.java -> null
+                type == String::class.java -> {
+                    stringCount++
+                    if (stringCount == 1) callerPackage else null
+                }
+                else -> return null
+            }
+        }.toTypedArray()
+
+        return arguments.takeIf { settingsCount == 1 && listenerCount == 1 }
+    }
+
+    private fun buildStopScanArguments(
+        parameterTypes: Array<Class<*>>,
+        listenerClass: Class<*>,
+        listener: Any,
+    ): Array<Any?>? {
+        var listenerCount = 0
+        var stringCount = 0
+
+        val arguments = parameterTypes.map { type ->
+            when {
+                type == listenerClass -> {
+                    listenerCount++
+                    listener
+                }
+                type == String::class.java -> {
+                    stringCount++
+                    if (stringCount == 1) callerPackage else null
+                }
+                type == WorkSource::class.java -> null
+                else -> return null
+            }
+        }.toTypedArray()
+
+        return arguments.takeIf { listenerCount == 1 }
+    }
+
+    private fun startScanPriority(parameterTypes: Array<Class<*>>): Int {
+        val hasExecutor = parameterTypes.any { Executor::class.java.isAssignableFrom(it) }
+        return (if (hasExecutor) 100 else 0) - parameterTypes.size
+    }
+
+    private fun visibleMethods(type: Class<*>): List<Method> =
+        (type.methods.asList() + type.declaredMethods.asList())
+            .distinctBy { it.runtimeSignature() }
+
+    private fun Method.runtimeSignature(): String =
+        "$name(${parameterTypes.joinToString { it.name }})"
+
+    private fun Constructor<*>.runtimeSignature(): String =
+        "${declaringClass.name}(${parameterTypes.joinToString { it.name }})"
+
+    private data class MethodPlan(
+        val method: Method,
+        val arguments: Array<Any?>,
+    )
+
+    private data class ConstructorPlan(
+        val constructor: Constructor<*>,
+        val arguments: Array<Any?>,
+    )
 
     private fun setIntField(receiver: Any, name: String, value: Int) {
         receiver.javaClass.getField(name).setInt(receiver, value)
@@ -208,7 +378,7 @@ internal class WifiScannerClient(
     }
 
     private inline fun invokeConstructor(
-        constructor: java.lang.reflect.Constructor<*>,
+        constructor: Constructor<*>,
         block: () -> Any,
     ): Any {
         constructor.isAccessible = true
@@ -245,11 +415,14 @@ internal class WifiScannerClient(
     }
 
     private companion object {
+        const val TAG = "WifiScannerClient"
         const val WIFI_SCANNING_SERVICE = "wifiscanner"
         const val WIFI_SCANNER_CLASS = "android.net.wifi.WifiScanner"
         const val SCAN_SETTINGS_CLASS = "android.net.wifi.WifiScanner\$ScanSettings"
         const val SCAN_LISTENER_CLASS = "android.net.wifi.WifiScanner\$ScanListener"
         const val I_WIFI_SCANNER_CLASS = "android.net.wifi.IWifiScanner"
         const val I_WIFI_SCANNER_STUB_CLASS = "android.net.wifi.IWifiScanner\$Stub"
+
+        val DIRECT_EXECUTOR = Executor { command -> command.run() }
     }
 }

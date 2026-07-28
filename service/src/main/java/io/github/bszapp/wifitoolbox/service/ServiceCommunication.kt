@@ -18,6 +18,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 统一处理 App 与 service 之间的通信：调用方校验、Provider 投递 Binder、callback 预留通道。
@@ -33,6 +34,10 @@ class ServiceCommunication(
             clientStates.remove(callback.asBinder())
         }
     }
+    private val serviceLogCallbacks = RemoteCallbackList<IServiceLogCallback>()
+    private val serviceLogRangeLock = Any()
+    private var pendingServiceLogRange = ServiceLogRange(1L, 0L, 0L)
+    private val serviceLogDeliveryScheduled = AtomicBoolean(false)
     private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
     }
@@ -80,6 +85,73 @@ class ServiceCommunication(
             callbacks.unregister(callback)
             clientStates.remove(callback.asBinder())
             Unit
+        }
+    }
+
+    fun registerServiceLogCallback(callback: IServiceLogCallback) {
+        callFromApp {
+            serviceLogCallbacks.register(callback)
+            Unit
+        }
+    }
+
+    fun unregisterServiceLogCallback(callback: IServiceLogCallback) {
+        callFromApp {
+            serviceLogCallbacks.unregister(callback)
+            Unit
+        }
+    }
+
+    fun pushServiceLogRangeChanged(
+        callback: IServiceLogCallback,
+        oldestAvailableId: Long,
+        latestId: Long,
+    ) {
+        runCatching { callback.onServiceLogRangeChanged(oldestAvailableId, latestId) }
+            .onFailure { serviceLogCallbacks.unregister(callback) }
+    }
+
+    fun broadcastServiceLogRangeChanged(oldestAvailableId: Long, latestId: Long) {
+        synchronized(serviceLogRangeLock) {
+            pendingServiceLogRange = ServiceLogRange(
+                oldestAvailableId = maxOf(
+                    pendingServiceLogRange.oldestAvailableId,
+                    oldestAvailableId,
+                ),
+                latestId = maxOf(pendingServiceLogRange.latestId, latestId),
+                generation = pendingServiceLogRange.generation + 1L,
+            )
+        }
+        scheduleServiceLogDelivery()
+    }
+
+    private fun scheduleServiceLogDelivery() {
+        if (!serviceLogDeliveryScheduled.compareAndSet(false, true)) return
+        deliveryExecutor.execute {
+            var deliveredGeneration = 0L
+            try {
+                while (true) {
+                    val range = synchronized(serviceLogRangeLock) { pendingServiceLogRange }
+                    forEachServiceLogCallback { callback ->
+                        pushServiceLogRangeChanged(
+                            callback = callback,
+                            oldestAvailableId = range.oldestAvailableId,
+                            latestId = range.latestId,
+                        )
+                    }
+                    deliveredGeneration = range.generation
+                    val caughtUp = synchronized(serviceLogRangeLock) {
+                        pendingServiceLogRange.generation == range.generation
+                    }
+                    if (caughtUp) break
+                }
+            } finally {
+                serviceLogDeliveryScheduled.set(false)
+                val hasPendingRange = synchronized(serviceLogRangeLock) {
+                    pendingServiceLogRange.generation > deliveredGeneration
+                }
+                if (hasPendingRange) scheduleServiceLogDelivery()
+            }
         }
     }
 
@@ -238,6 +310,21 @@ class ServiceCommunication(
             callbacks.finishBroadcast()
         }
     }
+
+    private inline fun forEachServiceLogCallback(block: (IServiceLogCallback) -> Unit) {
+        val count = serviceLogCallbacks.beginBroadcast()
+        try {
+            for (index in 0 until count) block(serviceLogCallbacks.getBroadcastItem(index))
+        } finally {
+            serviceLogCallbacks.finishBroadcast()
+        }
+    }
+
+    private data class ServiceLogRange(
+        val oldestAvailableId: Long,
+        val latestId: Long,
+        val generation: Long,
+    )
 
     fun startBinderPublisher() {
         synchronized(publisherLock) {

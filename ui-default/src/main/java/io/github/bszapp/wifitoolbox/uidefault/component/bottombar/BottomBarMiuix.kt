@@ -30,8 +30,11 @@ import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cottage
+import androidx.compose.material.icons.rounded.Podcasts
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
@@ -109,6 +112,7 @@ private enum class BottomBarDestination(
     val icon: ImageVector,
 ) {
     Home("主页", Icons.Rounded.Cottage),
-    List("列表", Icons.Rounded.Security),
+    List("列表", Icons.Rounded.Podcasts),
+    Logs("日志", MiuixIcons.Notes),
     Setting("设置", Icons.Rounded.Settings),
 }

@@ -257,11 +257,13 @@ private fun InfoNumberCard(
     title: String,
     value: String,
 ) {
-    //TODO:我要点击效果！
     Card(
         modifier = modifier
             .fillMaxWidth(),
         insideMargin = PaddingValues(16.dp),
+        pressFeedbackType = PressFeedbackType.Tilt,
+        showIndication = true,
+        onClick = {},
     ) {
         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
             Text(

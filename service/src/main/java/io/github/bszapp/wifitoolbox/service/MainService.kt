@@ -1,17 +1,23 @@
 package io.github.bszapp.wifitoolbox.service
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.util.Log
 import androidx.annotation.Keep
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiResponse
+import io.github.bszapp.wifitoolbox.contract.log.ServiceLogTransport
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 
 @Keep
 open class MainService(
     serviceContext: Context? = null,
 ) : IMainService.Stub() {
+
+    init {
+        ServiceLogRecorder.start()
+    }
 
     constructor(startupInfo: StartupInfo) : this(serviceContext = null) {
         Log.d(TAG, "使用启动参数初始化服务")
@@ -24,6 +30,12 @@ open class MainService(
         startupInfoProvider = { initializer.requireStartupInfo() },
         serviceBinderProvider = { this.asBinder() },
     )
+
+    init {
+        ServiceLogRecorder.setOnVisibleRangeChanged(
+            communication::broadcastServiceLogRangeChanged,
+        )
+    }
 
     private val wifiListController = WifiListController(
         androidApiProvider = { initializer.androidApi },
@@ -82,6 +94,35 @@ open class MainService(
             }.getOrElse(AndroidApiResponse::failure)
         }
 
+    override fun getLatestServiceLogId(): Long = communication.callFromApp {
+        ServiceLogRecorder.latestId()
+    }
+
+    override fun getServiceLogs(
+        fromIdInclusive: Long,
+        toIdInclusive: Long,
+    ): ParcelFileDescriptor = communication.callFromApp {
+        require(fromIdInclusive >= 1L) { "日志起始 ID 必须大于等于 1" }
+        require(toIdInclusive >= fromIdInclusive) { "日志结束 ID 不能小于起始 ID" }
+        ServiceLogTransport.encode(
+            ServiceLogRecorder.getRange(fromIdInclusive, toIdInclusive),
+        )
+    }
+
+    override fun clearServiceLogs() = communication.callFromApp {
+        ServiceLogRecorder.clear()
+    }
+
+    override fun registerServiceLogCallback(cb: IServiceLogCallback) {
+        communication.registerServiceLogCallback(cb)
+        val range = ServiceLogRecorder.visibleRange()
+        communication.pushServiceLogRangeChanged(cb, range.first, range.second)
+    }
+
+    override fun unregisterServiceLogCallback(cb: IServiceLogCallback) {
+        communication.unregisterServiceLogCallback(cb)
+    }
+
     override fun refreshSavedWifiNetworks() = communication.callFromApp {
         Log.d(TAG, "应用请求刷新已保存 Wi-Fi 列表")
         wifiListController.refreshSavedNetworks()
@@ -117,6 +158,8 @@ open class MainService(
         Log.d(TAG, "收到 shutdown，服务退出")
         wifiEventMonitor.stop()
         wifiListController.stop()
+        ServiceLogRecorder.setOnVisibleRangeChanged(null)
+        ServiceLogRecorder.stop()
         Process.killProcess(Process.myPid())
     }
 

@@ -2,6 +2,7 @@ package io.github.bszapp.wifitoolbox.launcher
 
 import android.content.ComponentName
 import android.content.Context
+import io.github.bszapp.wifitoolbox.BuildConfig
 import io.github.bszapp.wifitoolbox.service.BoundMainService
 import rikka.shizuku.Shizuku
 
@@ -12,7 +13,7 @@ object ServiceConfig {
     const val PROVIDER_RESULT_OK = "ok"
 
     const val SERVICE_PROCESS_SUFFIX = "service"
-    const val SERVICE_VERSION = 1
+    const val SERVICE_VERSION = BuildConfig.VERSION_CODE
 
     fun serviceProcessName(context: Context): String =
         "${context.packageName}:$SERVICE_PROCESS_SUFFIX"

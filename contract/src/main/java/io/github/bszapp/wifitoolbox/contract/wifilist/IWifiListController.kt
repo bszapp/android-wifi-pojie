@@ -7,9 +7,6 @@ interface IWifiListController {
     val state: StateFlow<WifiState?>
     val savedWifiList: StateFlow<SavedWifiList?>
 
-    /** 连接 Service 并注册两种数据回调；App 启动时不主动刷新 Wi-Fi。 */
-    fun initialize()
-
     /** 请求 Service 只更新独立的 SavedWifiList。 */
     fun updateSavedNetworks()
 
