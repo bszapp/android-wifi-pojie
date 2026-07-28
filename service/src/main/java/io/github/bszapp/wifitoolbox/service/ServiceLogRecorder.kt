@@ -33,8 +33,14 @@ internal object ServiceLogRecorder {
             if (logcatProcess != null) return
 
             stopping = false
+            val captureStartedAtMillis = System.currentTimeMillis()
+            val captureBoundary = CaptureBoundary(
+                tag = LOGCAT_BOUNDARY_TAG,
+                message = "${Process.myPid()}-${System.nanoTime()}",
+            )
             redirectStandardStreamsToLogcat()
             appendLocked("[ServiceLogRecorder] 开始采集服务日志，pid=${Process.myPid()}")
+            Log.i(captureBoundary.tag, captureBoundary.message)
 
             val created = runCatching {
                 ProcessBuilder(
@@ -43,7 +49,7 @@ internal object ServiceLogRecorder {
                     "-v",
                     "threadtime",
                     "-T",
-                    "1",
+                    logcatSinceArgument(captureStartedAtMillis - LOGCAT_BOUNDARY_LOOKBACK_MILLIS),
                     "*:V",
                 )
                     .redirectErrorStream(false)
@@ -57,25 +63,26 @@ internal object ServiceLogRecorder {
             }
 
             logcatProcess = created
-            created
+            created to captureBoundary
         }
 
         notifyCurrentVisibleRange()
         startReader(
             name = "toolbox-service-logcat-output",
-            stream = process.inputStream,
+            stream = process.first.inputStream,
             prefix = "",
+            startAfter = process.second,
         )
         startReader(
             name = "toolbox-service-logcat-error",
-            stream = process.errorStream,
+            stream = process.first.errorStream,
             prefix = "[logcat stderr] ",
         )
         Thread(
             {
-                val exitCode = runCatching { process.waitFor() }.getOrNull()
+                val exitCode = runCatching { process.first.waitFor() }.getOrNull()
                 val shouldRecord = synchronized(lock) {
-                    if (logcatProcess === process) logcatProcess = null
+                    if (logcatProcess === process.first) logcatProcess = null
                     !stopping
                 }
                 if (shouldRecord) {
@@ -157,12 +164,23 @@ internal object ServiceLogRecorder {
         name: String,
         stream: java.io.InputStream,
         prefix: String,
+        startAfter: CaptureBoundary? = null,
     ) {
         Thread(
             {
                 runCatching {
+                    val boundary = startAfter
+                    var boundaryReached = boundary == null
                     stream.bufferedReader().useLines { sequence ->
-                        sequence.forEach { line -> append(prefix + line) }
+                        sequence.forEach { line ->
+                            if (!boundaryReached && boundary != null) {
+                                val parsed = parseThreadtimeLine(line)
+                                boundaryReached = parsed?.tag == boundary.tag &&
+                                    parsed.message == boundary.message
+                            } else {
+                                append(prefix + line)
+                            }
+                        }
                     }
                 }.onFailure { error ->
                     val shouldRecord = synchronized(lock) { !stopping }
@@ -193,7 +211,7 @@ internal object ServiceLogRecorder {
             } else {
                 commitPendingLocked().also {
                     pendingLog = PendingLog(
-                        rawLine = boundedLine(line),
+                        lines = mutableListOf(line),
                         source = parseThreadtimeLine(line),
                     )
                 }
@@ -205,11 +223,10 @@ internal object ServiceLogRecorder {
     }
 
     private fun appendLocked(line: String): ServiceLogEntry {
-        val boundedLine = boundedLine(line)
         val entry = ServiceLogEntry(
             id = nextId++,
-            tag = extractTag(boundedLine),
-            rawLine = boundedLine,
+            tag = extractTag(line),
+            rawLine = line,
         )
 
         entries.addLast(entry)
@@ -217,7 +234,7 @@ internal object ServiceLogRecorder {
 
         while (
             entries.size > MAX_BUFFER_ENTRIES ||
-            totalCharacters > MAX_BUFFER_CHARACTERS
+            totalCharacters > MAX_BUFFER_CHARACTERS && entries.size > 1
         ) {
             val removed = entries.removeFirst()
             totalCharacters -= removed.tag.length + removed.rawLine.length
@@ -245,7 +262,7 @@ internal object ServiceLogRecorder {
     private fun commitPendingLocked(): ServiceLogEntry? {
         val pending = pendingLog ?: return null
         pendingLog = null
-        return appendLocked(pending.rawLine)
+        return appendLocked(expandElidedStackFrames(pending.lines))
     }
 
     private fun visibleRangeNotificationLocked(): Triple<
@@ -293,12 +310,6 @@ internal object ServiceLogRecorder {
             priority == other.priority &&
             tag == other.tag
 
-    private fun boundedLine(line: String): String = if (line.length <= MAX_LINE_CHARACTERS) {
-        line
-    } else {
-        line.take(MAX_LINE_CHARACTERS) + "…"
-    }
-
     private fun notifyCurrentVisibleRange() {
         val notification = synchronized(lock) {
             val range = visibleRangeLocked()
@@ -329,6 +340,102 @@ internal object ServiceLogRecorder {
             message = values[6],
         )
     }
+
+    private fun expandElidedStackFrames(lines: List<String>): String {
+        val output = ArrayList<String>(lines.size)
+        val contexts = mutableMapOf<Int, StackTraceContext>()
+
+        lines.forEach { rawLine ->
+            val parsed = parseThreadtimeLine(rawLine)
+            val message = parsed?.message ?: rawLine
+            val leadingWhitespace = message.takeWhile { it == ' ' || it == '\t' }
+            val content = message.substring(leadingWhitespace.length)
+            val indentation = stackTraceIndentation(leadingWhitespace)
+
+            when {
+                STACK_FRAME_PATTERN.matches(content) -> {
+                    val level = (indentation - 1).coerceAtLeast(0)
+                    contexts.getOrPut(level) { StackTraceContext() }.frames += content
+                    output += rawLine
+                }
+
+                ENCLOSED_THROWABLE_PATTERN.containsMatchIn(content) -> {
+                    val level = indentation
+                    contexts.keys.removeAll { it > level }
+                    val enclosingFrames = if (content.startsWith("Suppressed:")) {
+                        contexts[level - 1]?.frames.orEmpty()
+                    } else {
+                        contexts[level]?.frames.orEmpty()
+                    }
+                    contexts[level] = StackTraceContext(
+                        enclosingFrames = enclosingFrames.toList(),
+                    )
+                    output += rawLine
+                }
+
+                ELIDED_FRAME_PATTERN.matches(content) -> {
+                    val count = ELIDED_FRAME_PATTERN.matchEntire(content)
+                        ?.groupValues
+                        ?.get(1)
+                        ?.toIntOrNull()
+                    val level = (indentation - 1).coerceAtLeast(0)
+                    val context = contexts[level]
+                    val expandedFrames = count
+                        ?.takeIf { it > 0 && it <= context?.enclosingFrames.orEmpty().size }
+                        ?.let { context?.enclosingFrames?.takeLast(it) }
+
+                    if (context != null && !expandedFrames.isNullOrEmpty()) {
+                        expandedFrames.forEach { frame ->
+                            context.frames += frame
+                            output += replaceThreadtimeMessage(
+                                rawLine,
+                                leadingWhitespace + frame,
+                            )
+                        }
+                    } else {
+                        output += rawLine
+                    }
+                }
+
+                indentation == 0 && THROWABLE_HEADER_PATTERN.matches(content) -> {
+                    contexts.clear()
+                    contexts[0] = StackTraceContext()
+                    output += rawLine
+                }
+
+                else -> output += rawLine
+            }
+        }
+
+        return output.joinToString("\n")
+    }
+
+    private fun replaceThreadtimeMessage(line: String, message: String): String {
+        val match = THREADTIME_PATTERN.matchEntire(line) ?: return message
+        val range = match.groups[6]?.range ?: return message
+        return line.replaceRange(range, message)
+    }
+
+    private fun stackTraceIndentation(whitespace: String): Int {
+        var indentation = 0
+        var spaces = 0
+        whitespace.forEach { character ->
+            if (character == '\t') {
+                indentation++
+                spaces = 0
+            } else {
+                spaces++
+                if (spaces == STACK_TRACE_SPACES_PER_INDENT) {
+                    indentation++
+                    spaces = 0
+                }
+            }
+        }
+        return indentation
+    }
+
+    private fun logcatSinceArgument(epochMillis: Long): String =
+        "${epochMillis / 1_000}.${(epochMillis % 1_000).toString().padStart(3, '0')}"
 
     private fun redirectStandardStreamsToLogcat() {
         runCatching {
@@ -391,16 +498,23 @@ internal object ServiceLogRecorder {
     }
 
     private data class PendingLog(
-        var rawLine: String,
+        val lines: MutableList<String>,
         val source: ThreadtimeLine?,
     ) {
         fun append(line: String) {
-            if (rawLine.length >= MAX_LINE_CHARACTERS) return
-            val remaining = MAX_LINE_CHARACTERS - rawLine.length - 1
-            if (remaining <= 0) return
-            rawLine += "\n" + line.take(remaining)
+            lines += line
         }
     }
+
+    private data class CaptureBoundary(
+        val tag: String,
+        val message: String,
+    )
+
+    private data class StackTraceContext(
+        val enclosingFrames: List<String> = emptyList(),
+        val frames: MutableList<String> = mutableListOf(),
+    )
 
     private data class ThreadtimeLine(
         val timestamp: String,
@@ -420,10 +534,17 @@ internal object ServiceLogRecorder {
     private val THROWABLE_HEADER_PATTERN = Regex(
         """^(?:Exception in thread\s+.+|(?:[A-Za-z_\x24][\w\x24]*\.)*[A-Za-z_\x24][\w\x24]*(?:Exception|Error|Throwable)(?::.*)?)$""",
     )
+    private val STACK_FRAME_PATTERN = Regex("""^at\s+.+\(.+\)$""")
+    private val ENCLOSED_THROWABLE_PATTERN = Regex(
+        """^(?:Caused by:|Suppressed:|Wrapped by:)\s*.+$""",
+    )
+    private val ELIDED_FRAME_PATTERN = Regex("""^\.\.\.\s+(\d+)\s+more$""")
 
     private const val MAX_LOGCAT_MESSAGE_CHARACTERS = 3_000
-    private const val MAX_LINE_CHARACTERS = 16 * 1024
     private const val MAX_BUFFER_ENTRIES = 4_000
     private const val MAX_BUFFER_CHARACTERS = 512 * 1024
     private const val STACK_TRACE_GROUPING_DELAY_MILLIS = 300L
+    private const val STACK_TRACE_SPACES_PER_INDENT = 4
+    private const val LOGCAT_BOUNDARY_LOOKBACK_MILLIS = 1_000L
+    private const val LOGCAT_BOUNDARY_TAG = "SvcLogBoundary"
 }

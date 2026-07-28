@@ -82,6 +82,7 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Download
 import top.yukonga.miuix.kmp.icon.extended.FileDownloads
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
@@ -235,7 +236,7 @@ private fun LogTopBar(
         actions = {
             IconButton(onClick = onSave) {
                 Icon(
-                    imageVector = MiuixIcons.FileDownloads,
+                    imageVector = MiuixIcons.Download,
                     tint = colorScheme.onSurface,
                     contentDescription = "保存全部日志",
                 )
@@ -444,7 +445,7 @@ private fun LogEntryCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Card(
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(17.dp),
                     cornerRadius = 5.dp,
                     insideMargin = PaddingValues(0.dp),
                     colors = CardDefaults.defaultColors(
@@ -459,12 +460,13 @@ private fun LogEntryCard(
                         Text(
                             text = priority,
                             style = MiuixTheme.textStyles.footnote2,
-                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
                             color = Color.White,
                         )
                     }
                 }
-                Spacer(Modifier.size(6.dp))
+                Spacer(Modifier.size(3.dp))
                 Text(
                     text = "${entry.tag} ($pid:$tid)",
                     modifier = Modifier.weight(1f),
