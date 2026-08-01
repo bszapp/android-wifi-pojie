@@ -38,16 +38,16 @@ class MainActivity : ComponentActivity() {
                 if (isExiting) finish()
             }
 
-            WifiToolboxMaterialTheme(settingsManager = controller.settings) {
-                @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
-                Scaffold(modifier = Modifier.fillMaxSize()) {
-                    AnimatedContent(
-                        targetState = state.status == StartupStatus.RUNNING,
-                        label = "startup_state",
-                    ) { isRunning ->
-                        if (isRunning) {
-                            DefaultUI()
-                        } else {
+            AnimatedContent(
+                targetState = state.status == StartupStatus.RUNNING,
+                label = "startup_state",
+            ) { isRunning ->
+                if (isRunning) {
+                    DefaultUI()
+                } else {
+                    WifiToolboxMaterialTheme(settingsManager = controller.settings) {
+                        @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
+                        Scaffold(modifier = Modifier.fillMaxSize()) {
                             StartupScreen()
                         }
                     }

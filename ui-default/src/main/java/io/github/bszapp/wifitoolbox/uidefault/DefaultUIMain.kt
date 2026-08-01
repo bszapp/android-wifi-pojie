@@ -38,7 +38,7 @@ import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ColorPaletteScreen
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableFloatingBottomBar
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableFloatingBottomBarBlur
-import io.github.bszapp.wifitoolbox.uidefault.theme.WifiToolboxMiuixTheme
+import io.github.bszapp.wifitoolbox.uidefault.theme.WifiToolboxDefaultTheme
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SnackbarDuration
@@ -90,7 +90,7 @@ fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
         }
     }
 
-    WifiToolboxMiuixTheme {
+    WifiToolboxDefaultTheme {
         CompositionLocalProvider(LocalNavigator provides navigator) {
             NavDisplay(
                 backStack = navigator.backStack,
@@ -150,7 +150,7 @@ private fun MainPager(
                     0 -> HomeScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                     1 -> ListScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                     2 -> LogScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
-                    3 -> SettingsScreen(bottomInnerPadding = bottomInnerPadding)
+                    3 -> SettingsScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                 }
             }
         }

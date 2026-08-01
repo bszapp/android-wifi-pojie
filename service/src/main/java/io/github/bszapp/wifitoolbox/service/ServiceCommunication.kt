@@ -14,6 +14,7 @@ import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSourceState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ConcurrentHashMap
@@ -35,9 +36,14 @@ class ServiceCommunication(
         }
     }
     private val serviceLogCallbacks = RemoteCallbackList<IServiceLogCallback>()
+    private val containerTerminalCallbacks = RemoteCallbackList<IContainerTerminalCallback>()
+    private val terminalManagerCallbacks = RemoteCallbackList<ITerminalManagerCallback>()
     private val serviceLogRangeLock = Any()
     private var pendingServiceLogRange = ServiceLogRange(1L, 0L, 0L)
     private val serviceLogDeliveryScheduled = AtomicBoolean(false)
+    private val terminalLogRangeLock = Any()
+    private val pendingTerminalLogRanges = mutableMapOf<Long, TerminalLogRangeSnapshot>()
+    private val terminalLogDeliveryScheduled = AtomicBoolean(false)
     private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
     }
@@ -102,6 +108,124 @@ class ServiceCommunication(
         }
     }
 
+    fun registerContainerTerminalCallback(callback: IContainerTerminalCallback) {
+        callFromApp {
+            containerTerminalCallbacks.register(callback)
+            Unit
+        }
+    }
+
+    fun unregisterContainerTerminalCallback(callback: IContainerTerminalCallback) {
+        callFromApp {
+            containerTerminalCallbacks.unregister(callback)
+            Unit
+        }
+    }
+
+    fun registerTerminalManagerCallback(callback: ITerminalManagerCallback) {
+        callFromApp {
+            terminalManagerCallbacks.register(callback)
+            Unit
+        }
+    }
+
+    fun unregisterTerminalManagerCallback(callback: ITerminalManagerCallback) {
+        callFromApp {
+            terminalManagerCallbacks.unregister(callback)
+            Unit
+        }
+    }
+
+    internal fun pushAliveTerminalsChanged(
+        callback: ITerminalManagerCallback,
+        snapshot: AliveTerminalSnapshot,
+    ) {
+        runCatching {
+            callback.onAliveTerminalIdsChanged(snapshot.generation, snapshot.terminalIds)
+        }.onFailure { terminalManagerCallbacks.unregister(callback) }
+    }
+
+    internal fun broadcastAliveTerminalsChanged(snapshot: AliveTerminalSnapshot) {
+        deliveryExecutor.execute {
+            forEachTerminalManagerCallback { callback ->
+                pushAliveTerminalsChanged(callback, snapshot)
+            }
+        }
+    }
+
+    internal fun pushTerminalLogRangeChanged(
+        callback: ITerminalManagerCallback,
+        range: TerminalLogRangeSnapshot,
+    ) {
+        runCatching {
+            callback.onTerminalLogRangeChanged(
+                range.terminalId,
+                range.generation,
+                range.oldestAvailableId,
+                range.latestId,
+                range.lineCount,
+            )
+        }.onFailure { terminalManagerCallbacks.unregister(callback) }
+    }
+
+    internal fun broadcastTerminalLogRangeChanged(range: TerminalLogRangeSnapshot) {
+        synchronized(terminalLogRangeLock) {
+            val pending = pendingTerminalLogRanges[range.terminalId]
+            if (pending == null || range.generation >= pending.generation) {
+                pendingTerminalLogRanges[range.terminalId] = range
+            }
+        }
+        scheduleTerminalLogDelivery()
+    }
+
+    private fun scheduleTerminalLogDelivery() {
+        if (!terminalLogDeliveryScheduled.compareAndSet(false, true)) return
+        deliveryExecutor.execute {
+            try {
+                while (true) {
+                    val ranges = synchronized(terminalLogRangeLock) {
+                        if (pendingTerminalLogRanges.isEmpty()) return@synchronized emptyList()
+                        pendingTerminalLogRanges.values.toList().also {
+                            pendingTerminalLogRanges.clear()
+                        }
+                    }
+                    if (ranges.isEmpty()) break
+                    forEachTerminalManagerCallback { callback ->
+                        ranges.forEach { range -> pushTerminalLogRangeChanged(callback, range) }
+                    }
+                }
+            } finally {
+                terminalLogDeliveryScheduled.set(false)
+                val hasPending = synchronized(terminalLogRangeLock) {
+                    pendingTerminalLogRanges.isNotEmpty()
+                }
+                if (hasPending) scheduleTerminalLogDelivery()
+            }
+        }
+    }
+
+    fun pushContainerTerminalEvent(
+        callback: IContainerTerminalCallback,
+        eventJson: String,
+    ) {
+        runCatching { callback.onContainerTerminalEvent(eventJson) }
+            .onFailure { containerTerminalCallbacks.unregister(callback) }
+    }
+
+    fun broadcastContainerTerminalEvent(eventJson: String) {
+        val count = containerTerminalCallbacks.beginBroadcast()
+        try {
+            for (index in 0 until count) {
+                pushContainerTerminalEvent(
+                    callback = containerTerminalCallbacks.getBroadcastItem(index),
+                    eventJson = eventJson,
+                )
+            }
+        } finally {
+            containerTerminalCallbacks.finishBroadcast()
+        }
+    }
+
     fun pushServiceLogRangeChanged(
         callback: IServiceLogCallback,
         oldestAvailableId: Long,
@@ -161,6 +285,24 @@ class ServiceCommunication(
 
     fun broadcastSavedWifiList(value: SavedWifiList) {
         forEachCallback { callback -> pushSavedWifiList(callback, value) }
+    }
+
+    fun broadcastWifiInformationSourceState(value: WifiInformationSourceState) {
+        forEachCallback { callback -> pushWifiInformationSourceState(callback, value) }
+    }
+
+    fun pushWifiInformationSourceState(
+        callback: IMainServiceCallback,
+        value: WifiInformationSourceState,
+    ) {
+        runCatching {
+            callback.onWifiInformationSourceStateChanged(
+                value.source.wireValue,
+                value.initializing,
+            )
+        }.onFailure {
+            Log.w(TAG, "推送 Wi-Fi 信息源状态失败：${it.message}", it)
+        }
     }
 
     fun pushWifiState(callback: IMainServiceCallback, state: WifiState) {
@@ -317,6 +459,17 @@ class ServiceCommunication(
             for (index in 0 until count) block(serviceLogCallbacks.getBroadcastItem(index))
         } finally {
             serviceLogCallbacks.finishBroadcast()
+        }
+    }
+
+    private inline fun forEachTerminalManagerCallback(
+        block: (ITerminalManagerCallback) -> Unit,
+    ) {
+        val count = terminalManagerCallbacks.beginBroadcast()
+        try {
+            for (index in 0 until count) block(terminalManagerCallbacks.getBroadcastItem(index))
+        } finally {
+            terminalManagerCallbacks.finishBroadcast()
         }
     }
 

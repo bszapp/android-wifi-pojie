@@ -6,6 +6,8 @@ import android.net.wifi.ScanResult
 import android.os.SystemClock
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSourceState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
@@ -14,6 +16,8 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Service 进程中的 Wi-Fi 唯一数据源和扫描任务拥有者。
@@ -23,8 +27,10 @@ import java.util.concurrent.TimeoutException
  */
 internal class WifiListController(
     private val androidApiProvider: () -> AndroidApi?,
+    private val containerTerminalController: ContainerTerminalController,
     private val onWifiStateChanged: (WifiState) -> Unit,
     private val onSavedWifiListChanged: (SavedWifiList) -> Unit,
+    private val onInformationSourceStateChanged: (WifiInformationSourceState) -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
     private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -48,12 +54,21 @@ internal class WifiListController(
     private var stopped = false
 
     private var scanGeneration = 0L
+    private var informationSourceGeneration = 0L
     private var pendingScanRequest: PendingScanRequest? = null
     private var scanSession: ScanSession? = null
+
+    @Volatile
+    private var informationSourceState = WifiInformationSourceState(
+        source = WifiInformationSource.SYSTEM,
+        initializing = false,
+    )
 
     fun getWifiState(): WifiState? = wifiState
 
     fun getSavedWifiList(): SavedWifiList? = savedWifiList
+
+    fun getInformationSourceState(): WifiInformationSourceState = informationSourceState
 
     fun initialize() {
         execute {
@@ -81,6 +96,13 @@ internal class WifiListController(
     @Throws(Exception::class)
     fun startScan() {
         if (stopped) throw IllegalStateException("Wi-Fi 服务已停止")
+
+        val sourceState = informationSourceState
+        check(!sourceState.initializing) { "Wi-Fi 信息源正在初始化" }
+        if (sourceState.source == WifiInformationSource.HYBRID) {
+            startHybridScanSynchronously()
+            return
+        }
 
         val confirmation = CompletableFuture<Unit>()
         try {
@@ -125,10 +147,164 @@ internal class WifiListController(
     /** Service 检测到 Wi-Fi 开关可能变化时自行刷新数据，不接受 App 的状态刷新命令。 */
     fun onWifiStateMayHaveChanged() {
         execute {
-            Log.d(TAG, "检测到 Wi-Fi 状态可能变化，刷新 Service 数据")
-            refreshWifiDataInternal()
+            if (informationSourceState.source == WifiInformationSource.HYBRID) {
+                Log.d(TAG, "混合模式收到 Wi-Fi 状态事件，仅刷新已保存网络")
+                refreshSavedNetworksInternal()
+            } else {
+                Log.d(TAG, "检测到 Wi-Fi 状态可能变化，刷新 Service 数据")
+                refreshWifiDataInternal()
+            }
         }
     }
+
+    fun setInformationSource(
+        source: WifiInformationSource,
+        rootfsPath: String,
+        runtimePath: String,
+        terminalPath: String,
+    ) {
+        execute {
+            val current = informationSourceState
+            if (current.source == source) return@execute
+
+            val generation = ++informationSourceGeneration
+            cancelScanInternal(publishChange = false)
+            publishInformationSourceState(
+                WifiInformationSourceState(source = source, initializing = true),
+            )
+            when (source) {
+                WifiInformationSource.SYSTEM -> switchToSystemSource(generation)
+                WifiInformationSource.HYBRID -> switchToHybridSource(
+                    generation = generation,
+                    rootfsPath = rootfsPath,
+                    runtimePath = runtimePath,
+                    terminalPath = terminalPath,
+                )
+            }
+        }
+    }
+
+    private fun switchToSystemSource(generation: Long) {
+        try {
+            containerTerminalController.stop()
+            if (!isCurrentInformationSource(generation, WifiInformationSource.SYSTEM)) return
+            refreshWifiDataInternal()
+            publishInformationSourceState(
+                WifiInformationSourceState(
+                    source = WifiInformationSource.SYSTEM,
+                    initializing = false,
+                ),
+            )
+            Log.i(TAG, "Wi-Fi 信息源已切换为系统模式")
+        } catch (error: Throwable) {
+            finishInformationSourceFailure(
+                generation = generation,
+                source = WifiInformationSource.SYSTEM,
+                operation = "切换到系统模式",
+                error = error,
+            )
+        }
+    }
+
+    private fun switchToHybridSource(
+        generation: Long,
+        rootfsPath: String,
+        runtimePath: String,
+        terminalPath: String,
+    ) {
+        val startup = try {
+            containerTerminalController.start(rootfsPath, runtimePath, terminalPath)
+        } catch (error: Throwable) {
+            finishInformationSourceFailure(
+                generation = generation,
+                source = WifiInformationSource.HYBRID,
+                operation = "初始化混合模式终端",
+                error = error,
+            )
+            return
+        }
+        startup.whenComplete { _, failure ->
+            execute {
+                if (!isCurrentInformationSource(generation, WifiInformationSource.HYBRID)) {
+                    return@execute
+                }
+                if (failure != null) {
+                    finishInformationSourceFailure(
+                        generation = generation,
+                        source = WifiInformationSource.HYBRID,
+                        operation = "初始化混合模式终端",
+                        error = unwrapCompletionFailure(failure),
+                    )
+                    return@execute
+                }
+
+                publishInformationSourceState(
+                    WifiInformationSourceState(
+                        source = WifiInformationSource.HYBRID,
+                        initializing = false,
+                    ),
+                )
+                Log.i(TAG, "Wi-Fi 信息源已切换为混合模式，启动首次扫描")
+                //TODO:这里需要给scan.py添加仅读取功能，我不希望首次扫描。
+                val confirmation = try {
+                    beginHybridScan()
+                } catch (error: Throwable) {
+                    reportError("执行混合模式首次扫描", error)
+                    return@execute
+                }
+                confirmation.whenComplete { _, scanFailure ->
+                    if (scanFailure != null) {
+                        execute {
+                            if (isCurrentInformationSource(
+                                    generation,
+                                    WifiInformationSource.HYBRID,
+                                )
+                            ) {
+                                reportError(
+                                    "执行混合模式首次扫描",
+                                    unwrapCompletionFailure(scanFailure),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun finishInformationSourceFailure(
+        generation: Long,
+        source: WifiInformationSource,
+        operation: String,
+        error: Throwable,
+    ) {
+        if (!isCurrentInformationSource(generation, source)) return
+        publishInformationSourceState(
+            WifiInformationSourceState(source = source, initializing = false),
+        )
+        publishWifiStateError(error)
+        refreshSavedNetworksInternal()
+        reportError(operation, error)
+    }
+
+    private fun isCurrentInformationSource(
+        generation: Long,
+        source: WifiInformationSource,
+    ): Boolean =
+        generation == informationSourceGeneration &&
+            informationSourceState.source == source
+
+    private fun publishInformationSourceState(next: WifiInformationSourceState) {
+        informationSourceState = next
+        if (!stopped) onInformationSourceStateChanged(next)
+    }
+
+    private fun unwrapCompletionFailure(error: Throwable): Throwable =
+        if (error is java.util.concurrent.CompletionException && error.cause != null) {
+            error.cause!!
+        } else {
+            error
+        }
 
     fun stop() {
         executor.execute {
@@ -203,6 +379,123 @@ internal class WifiListController(
             reportError("刷新已保存 Wi-Fi 列表", error)
         }
     }
+
+    private fun startHybridScanSynchronously() {
+        val confirmation = CompletableFuture<Unit>()
+        try {
+            executor.execute {
+                try {
+                    check(
+                        informationSourceState.source == WifiInformationSource.HYBRID &&
+                            !informationSourceState.initializing,
+                    ) { "混合模式扫描终端尚未就绪" }
+                    beginHybridScan().whenComplete { _, failure ->
+                        if (failure == null) {
+                            confirmation.complete(Unit)
+                        } else {
+                            confirmation.completeExceptionally(
+                                unwrapCompletionFailure(failure),
+                            )
+                        }
+                    }
+                } catch (error: Throwable) {
+                    confirmation.completeExceptionally(error)
+                }
+            }
+        } catch (error: RejectedExecutionException) {
+            throw IllegalStateException("Wi-Fi 扫描执行器不可用", error)
+        }
+
+        try {
+            confirmation.get(SCAN_START_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (error: TimeoutException) {
+            throw IllegalStateException("等待混合模式扫描请求确认超时", error)
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("等待混合模式扫描请求确认时线程被中断", error)
+        } catch (error: ExecutionException) {
+            val cause = error.cause ?: error
+            throw when (cause) {
+                is Exception -> cause
+                else -> RuntimeException(cause)
+            }
+        }
+    }
+
+    private fun beginHybridScan(): CompletableFuture<Unit> {
+        val generation = informationSourceGeneration
+        return containerTerminalController.runWifiScan(
+            onMessage = { payload ->
+                execute {
+                    if (isCurrentInformationSource(generation, WifiInformationSource.HYBRID)) {
+                        handleHybridScanMessage(payload)
+                    }
+                }
+            },
+            onFinished = { exitCode ->
+                execute { finishHybridScan(generation, exitCode) }
+            },
+        )
+    }
+
+    private fun handleHybridScanMessage(payload: JSONObject) {
+        if (payload.optString("action") != "update_wifi_state") return
+        try {
+            val state = payload.getJSONObject("state")
+            when (state.getString("type")) {
+                "enabled" -> publishWifiState(
+                    WifiState.Data.Enabled(
+                        scanResults = parseHybridScanResults(state.getJSONArray("wifilist")),
+                        isScanning = state.optBoolean("scanning", false),
+                    ),
+                )
+                "error" -> publishWifiStateError(
+                    IllegalStateException(
+                        state.optString("message", "混合模式扫描发生未知错误"),
+                    ),
+                )
+                else -> throw IllegalArgumentException(
+                    "未知混合模式 Wi-Fi 状态: ${state.optString("type")}",
+                )
+            }
+            refreshSavedNetworksInternal()
+        } catch (error: Throwable) {
+            publishWifiStateError(error)
+            refreshSavedNetworksInternal()
+            reportError("解析混合模式 Wi-Fi 状态", error)
+        }
+    }
+
+    private fun finishHybridScan(generation: Long, exitCode: Int) {
+        if (!isCurrentInformationSource(generation, WifiInformationSource.HYBRID)) return
+        val current = wifiState as? WifiState.Data.Enabled
+        if (current?.isScanning == true) {
+            publishWifiState(current.copy(isScanning = false))
+        }
+        Log.d(TAG, "混合模式扫描进程结束：exitCode=$exitCode")
+    }
+
+    private fun parseHybridScanResults(values: JSONArray): List<ScanResult> =
+        buildList(values.length()) {
+            for (index in 0 until values.length()) {
+                val value = values.getJSONObject(index)
+                val bssid = value.getString("BSSID")
+                require(bssid.isNotBlank()) { "第 $index 项混合扫描结果缺少 BSSID" }
+                add(
+                    ScanResult().apply {//TODO:报错啦：Call requires API level 30 (current min is 24): android.net.wifi.ScanResult()
+                        SSID = value.optString("SSID", "")
+                        BSSID = bssid
+                        capabilities = value.optString("capabilities", "")
+                        level = value.optInt("level", -100)
+                        frequency = value.optInt("frequency", 0)
+                        timestamp = value.optLong("timestamp", 0L)
+                        channelWidth = value.optInt("channelWidth", ScanResult.CHANNEL_WIDTH_20MHZ)
+                        centerFreq0 = value.optInt("centerFreq0", frequency)
+                        centerFreq1 = value.optInt("centerFreq1", 0)
+                    },
+                )
+            }
+        }
 
     private fun submitScanRequest(confirmation: CompletableFuture<Unit>) {
         if (pendingScanRequest != null || scanSession != null) {

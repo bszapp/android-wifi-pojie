@@ -2,6 +2,7 @@
 
 package io.github.bszapp.wifitoolbox.wifilist
 
+import android.content.Context
 import android.os.DeadObjectException
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -9,11 +10,14 @@ import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSourceState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.IMainServiceCallback
 import io.github.bszapp.wifitoolbox.tools.AndroidApiClient
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +32,7 @@ import kotlinx.coroutines.withContext
  * 所有错误都交给 ToolboxApp 的统一错误广播源；本控制器不再拥有独立扫描错误流。
  */
 class WifiListController(
+    private val context: Context,
     private val scope: CoroutineScope,
     private val reportError: (
         source: String,
@@ -42,6 +47,10 @@ class WifiListController(
 
     private val _savedWifiList = MutableStateFlow<SavedWifiList?>(null)
     override val savedWifiList: StateFlow<SavedWifiList?> = _savedWifiList.asStateFlow()
+
+    private val _informationSourceState = MutableStateFlow<WifiInformationSourceState?>(null)
+    override val informationSourceState: StateFlow<WifiInformationSourceState?> =
+        _informationSourceState.asStateFlow()
 
     @Volatile
     private var registeredService: IMainService? = null
@@ -112,6 +121,7 @@ class WifiListController(
 
         _state.value = null
         _savedWifiList.value = null
+        _informationSourceState.value = null
         unregisterDetached(plan.detached, operation = "注销已替换的 Wi-Fi 数据回调")
 
         scope.launch(Dispatchers.IO) {
@@ -121,6 +131,20 @@ class WifiListController(
                 .onSuccess {
                     if (isCurrentConnection(plan.generation, plan.callback)) {
                         Log.d(TAG, "已注册 Wi-Fi 数据回调，generation=${plan.generation}")
+                        runCatching { service.getWifiInformationSourceState() }
+                            .onSuccess { snapshot ->
+                                updateInformationSourceSnapshot(
+                                    snapshot = snapshot,
+                                    generation = plan.generation,
+                                    callback = plan.callback,
+                                )
+                            }
+                            .onFailure { error ->
+                                report(
+                                    operation = "读取当前 Wi-Fi 信息源",
+                                    error = error,
+                                )
+                            }
                     } else {
                         unregisterDetached(
                             DetachedConnection(service, binder, plan.callback),
@@ -160,6 +184,7 @@ class WifiListController(
 
         _state.value = null
         _savedWifiList.value = null
+        _informationSourceState.value = null
         unregisterDetached(detached, operation = "注销 Wi-Fi 数据回调")
     }
 
@@ -225,6 +250,30 @@ class WifiListController(
             }
         }
 
+        override fun onWifiInformationSourceStateChanged(
+            source: Int,
+            initializing: Boolean,
+        ) {
+            if (!isCurrentConnection(generation, this)) return
+            val callback = this
+            scope.launch(Dispatchers.Main.immediate) {
+                if (!isCurrentConnection(generation, callback)) return@launch
+                runCatching {
+                    WifiInformationSourceState(
+                        source = WifiInformationSource.fromWireValue(source),
+                        initializing = initializing,
+                    )
+                }.onSuccess {
+                    _informationSourceState.value = it
+                }.onFailure {
+                    report(
+                        operation = "解析 Wi-Fi 信息源状态",
+                        error = it,
+                    )
+                }
+            }
+        }
+
         override fun onServiceError(
             source: String,
             operation: String,
@@ -244,6 +293,21 @@ class WifiListController(
     override fun updateSavedNetworks() {
         callService("请求刷新已保存 Wi-Fi 列表") {
             it.refreshSavedWifiNetworks()
+        }
+    }
+
+    override fun setInformationSource(source: WifiInformationSource) {
+        val appDataDirectory = requireNotNull(context.filesDir.parentFile)
+        val rootfs = File(appDataDirectory, "rootfs")
+        val runtime = File(context.noBackupFilesDir, "rftool-runtime")
+        val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
+        callService("切换 Wi-Fi 信息源为 ${source.displayName}") { service ->
+            service.setWifiInformationSource(
+                source.wireValue,
+                rootfs.absolutePath,
+                runtime.absolutePath,
+                terminal.absolutePath,
+            )
         }
     }
 
@@ -319,6 +383,26 @@ class WifiListController(
                 callServiceNow("请求刷新已保存 Wi-Fi 列表", lease) {
                     it.refreshSavedWifiNetworks()
                 }
+            }
+        }
+    }
+
+    private fun updateInformationSourceSnapshot(
+        snapshot: IntArray,
+        generation: Long,
+        callback: IMainServiceCallback,
+    ) {
+        if (!isCurrentConnection(generation, callback)) return
+        require(snapshot.size >= 2) { "Service 返回的 Wi-Fi 信息源状态不完整" }
+        val value = WifiInformationSourceState(
+            source = WifiInformationSource.fromWireValue(snapshot[0]),
+            initializing = snapshot[1] != 0,
+        )
+        scope.launch(Dispatchers.Main.immediate) {
+            if (isCurrentConnection(generation, callback) &&
+                _informationSourceState.value == null
+            ) {
+                _informationSourceState.value = value
             }
         }
     }

@@ -6,12 +6,15 @@ import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiException
+import io.github.bszapp.wifitoolbox.container.ContainerController
+import io.github.bszapp.wifitoolbox.contract.container.IContainerController
 import io.github.bszapp.wifitoolbox.contract.error.AppError
 import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
 import io.github.bszapp.wifitoolbox.logs.ServiceLogController
+import io.github.bszapp.wifitoolbox.terminal.TerminalController
 import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
 import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
@@ -36,6 +39,8 @@ class ToolboxApp : Application(), IAppController {
     private lateinit var processLauncher: ProcessLauncher
     private lateinit var wifiListController: WifiListController
     private lateinit var serviceLogController: ServiceLogController
+    private lateinit var terminalController: TerminalController
+    private lateinit var containerController: ContainerController
     override lateinit var settings: SettingsManager
         private set
 
@@ -72,6 +77,12 @@ class ToolboxApp : Application(), IAppController {
     override val serviceLogs: ServiceLogController
         get() = serviceLogController
 
+    override val terminals: TerminalController
+        get() = terminalController
+
+    override val containers: IContainerController
+        get() = containerController
+
     override fun onCreate() {
         super.onCreate()
         settings = SettingsManager(this)
@@ -79,10 +90,17 @@ class ToolboxApp : Application(), IAppController {
             application = this,
         ).also { it.start() }
         wifiListController = WifiListController(
+            context = this,
             scope = appScope,
             reportError = ::publishError,
         )
         serviceLogController = ServiceLogController(scope = appScope)
+        terminalController = TerminalController(scope = appScope)
+        containerController = ContainerController(
+            context = this,
+            scope = appScope,
+            reportError = ::publishError,
+        )
         processLauncher = ProcessLauncher(
             context = this,
             onAndroidApiError = { operation, error ->
@@ -96,10 +114,14 @@ class ToolboxApp : Application(), IAppController {
             onServiceConnected = { service, androidApi ->
                 wifiListController.connect(service, androidApi)
                 serviceLogController.connect(service)
+                terminalController.connect(service)
+                containerController.connect(service)
             },
             onServiceDisconnected = {
                 wifiListController.disconnect()
                 serviceLogController.disconnect()
+                terminalController.disconnect()
+                containerController.disconnect()
             },
         )
         AppControllerProvider.register(this)

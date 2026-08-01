@@ -9,9 +9,12 @@ import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiResponse
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogTransport
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
+import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogTransport
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 
 @Keep
 open class MainService(
+    //TODO:这咋neverused？
     serviceContext: Context? = null,
 ) : IMainService.Stub() {
 
@@ -37,10 +40,22 @@ open class MainService(
         )
     }
 
+    private val terminalManager = TerminalManager(
+        onAliveTerminalsChanged = communication::broadcastAliveTerminalsChanged,
+        onTerminalLogRangeChanged = communication::broadcastTerminalLogRangeChanged,
+    )
+
+    private val containerTerminalController = ContainerTerminalController(
+        terminalManager = terminalManager,
+        publishEvent = communication::broadcastContainerTerminalEvent,
+    )
+
     private val wifiListController = WifiListController(
         androidApiProvider = { initializer.androidApi },
+        containerTerminalController = containerTerminalController,
         onWifiStateChanged = communication::broadcastWifiState,
         onSavedWifiListChanged = communication::broadcastSavedWifiList,
+        onInformationSourceStateChanged = communication::broadcastWifiInformationSourceState,
         onError = { operation, error ->
             communication.broadcastServiceError(
                 source = "Service.WifiListController",
@@ -146,6 +161,104 @@ open class MainService(
         }
     }
 
+    override fun getWifiInformationSourceState(): IntArray = communication.callFromApp {
+        wifiListController.getInformationSourceState().let { state ->
+            intArrayOf(state.source.wireValue, if (state.initializing) 1 else 0)
+        }
+    }
+
+    override fun setWifiInformationSource(
+        source: Int,
+        rootfsPath: String,
+        runtimePath: String,
+        terminalPath: String,
+    ) = communication.callFromApp {
+        wifiListController.setInformationSource(
+            source = WifiInformationSource.fromWireValue(source),
+            rootfsPath = rootfsPath,
+            runtimePath = runtimePath,
+            terminalPath = terminalPath,
+        )
+    }
+
+    override fun startContainerTerminal(
+        rootfsPath: String,
+        runtimePath: String,
+        terminalPath: String,
+    ) = communication.callFromApp {
+        containerTerminalController.start(rootfsPath, runtimePath, terminalPath)
+        Unit
+    }
+
+    override fun stopContainerTerminal() = communication.callFromApp {
+        containerTerminalController.stop()
+    }
+
+    override fun runContainerWifiScan() = communication.callFromApp {
+        containerTerminalController.runWifiScan()
+        Unit
+    }
+
+    override fun registerContainerTerminalCallback(cb: IContainerTerminalCallback) {
+        communication.registerContainerTerminalCallback(cb)
+        communication.pushContainerTerminalEvent(cb, containerTerminalController.snapshotJson())
+    }
+
+    override fun unregisterContainerTerminalCallback(cb: IContainerTerminalCallback) {
+        communication.unregisterContainerTerminalCallback(cb)
+    }
+
+    override fun getAliveTerminalIds(): LongArray = communication.callFromApp {
+        terminalManager.aliveSnapshot().terminalIds
+    }
+
+    override fun getAliveTerminalGeneration(): Long = communication.callFromApp {
+        terminalManager.aliveSnapshot().generation
+    }
+
+    override fun getTerminalLogCount(terminalId: Long): Int = communication.callFromApp {
+        terminalManager.getLogCount(terminalId)
+    }
+
+    override fun getTerminalLogRange(terminalId: Long): LongArray = communication.callFromApp {
+        terminalManager.getLogRange(terminalId).let { range ->
+            longArrayOf(
+                range.generation,
+                range.oldestAvailableId,
+                range.latestId,
+                range.lineCount.toLong(),
+            )
+        }
+    }
+
+    override fun getTerminalLogs(
+        terminalId: Long,
+        fromIdInclusive: Long,
+        toIdInclusive: Long,
+    ): ParcelFileDescriptor = communication.callFromApp {
+        require(fromIdInclusive >= 1L) { "终端日志起始 ID 必须大于等于 1" }
+        require(toIdInclusive >= fromIdInclusive) { "终端日志结束 ID 不能小于起始 ID" }
+        TerminalLogTransport.encode(
+            terminalManager.getLogs(terminalId, fromIdInclusive, toIdInclusive),
+        )
+    }
+
+    override fun clearTerminalLogs(terminalId: Long) = communication.callFromApp {
+        terminalManager.clearLogs(terminalId)
+    }
+
+    override fun registerTerminalManagerCallback(cb: ITerminalManagerCallback) {
+        communication.registerTerminalManagerCallback(cb)
+        communication.pushAliveTerminalsChanged(cb, terminalManager.aliveSnapshot())
+        terminalManager.terminalSnapshots().forEach { range ->
+            communication.pushTerminalLogRangeChanged(cb, range)
+        }
+    }
+
+    override fun unregisterTerminalManagerCallback(cb: ITerminalManagerCallback) {
+        communication.unregisterTerminalManagerCallback(cb)
+    }
+
     override fun acknowledgeWifiState(cb: IMainServiceCallback) {
         communication.acknowledgeWifiState(cb)
     }
@@ -158,6 +271,8 @@ open class MainService(
         Log.d(TAG, "收到 shutdown，服务退出")
         wifiEventMonitor.stop()
         wifiListController.stop()
+        containerTerminalController.close()
+        terminalManager.close()
         ServiceLogRecorder.setOnVisibleRangeChanged(null)
         ServiceLogRecorder.stop()
         Process.killProcess(Process.myPid())
@@ -168,6 +283,10 @@ open class MainService(
         // 重连时分别发送当前两种原始数据；不存在的数据等首次初始化后再推送。
         wifiListController.getWifiState()?.let { communication.pushWifiState(cb, it) }
         wifiListController.getSavedWifiList()?.let { communication.pushSavedWifiList(cb, it) }
+        communication.pushWifiInformationSourceState(
+            cb,
+            wifiListController.getInformationSourceState(),
+        )
     }
 
     override fun unregisterCallback(cb: IMainServiceCallback) {

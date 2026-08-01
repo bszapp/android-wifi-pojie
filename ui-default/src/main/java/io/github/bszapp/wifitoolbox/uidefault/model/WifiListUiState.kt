@@ -2,6 +2,7 @@ package io.github.bszapp.wifitoolbox.uidefault.model
 
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -24,6 +25,9 @@ class WifiListUiState(
 
     /** 与 WifiState 同级、独立传输的已保存 Wi-Fi 列表。 */
     val savedWifiList = controller.wifiList.savedWifiList
+
+    /** Service 保存的信息源目标与初始化状态。 */
+    val informationSourceState = controller.wifiList.informationSourceState
 
     private val scanRequestGuard = AtomicBoolean(false)
     private val _isSendingScanRequest = MutableStateFlow(false)
@@ -52,6 +56,9 @@ class WifiListUiState(
     }
 
     fun updateSavedNetworks() = controller.wifiList.updateSavedNetworks()
+
+    fun setInformationSource(source: WifiInformationSource) =
+        controller.wifiList.setInformationSource(source)
 
     /**
      * ViewModel 层异步发送扫描请求，并维护“正在等待 Service 确认”的 UI 状态。

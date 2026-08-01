@@ -21,6 +21,7 @@ material = "1.14.0"
 materialKolor = "4.1.1"
 runtime = "1.11.4"
 material3-experimental = "1.5.0-alpha23"
+xz = "1.12"
 
 [libraries]
 androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
@@ -55,9 +56,9 @@ material-kolor = { module = "com.materialkolor:material-kolor", version.ref = "m
 miuix-preference = { module = "top.yukonga.miuix.kmp:miuix-preference", version.ref = "miuixPreference" }
 miuix-ui = { module = "top.yukonga.miuix.kmp:miuix-ui", version.ref = "miuixUi" }
 provider = { module = "dev.rikka.shizuku:provider", version.ref = "api" }
+xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 android-library = { id = "com.android.library", version.ref = "agp" }
-

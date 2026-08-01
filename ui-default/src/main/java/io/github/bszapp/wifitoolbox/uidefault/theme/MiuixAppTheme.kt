@@ -95,7 +95,7 @@ val keyColorOptions = listOf(
 fun rememberSettingsManager(): ISettingsManager = remember { AppControllerProvider.get().settings }
 
 @Composable
-fun WifiToolboxMiuixTheme(
+fun WifiToolboxDefaultTheme(
     settingsManager: ISettingsManager = rememberSettingsManager(),
     content: @Composable () -> Unit,
 ) {
@@ -139,31 +139,31 @@ fun WifiToolboxMiuixTheme(
     )
 
     MiuixTheme(controller = controller) {
-        LaunchedEffect(dark) {
-            val window = (context as? Activity)?.window ?: return@LaunchedEffect
-            WindowInsetsControllerCompat(window, window.decorView).apply {
-                isAppearanceLightStatusBars = !dark
-                isAppearanceLightNavigationBars = !dark
+            LaunchedEffect(dark) {
+                val window = (context as? Activity)?.window ?: return@LaunchedEffect
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
             }
-        }
-        val density = LocalDensity.current
-        val scaledDensity = remember(density, pageScale) {
-            Density(
-                density = density.density * pageScale.coerceIn(0.8f, 1.1f),
-                fontScale = density.fontScale,
-            )
-        }
-        val blurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-        CompositionLocalProvider(
-            LocalSettingsManager provides settingsManager,
-            LocalColorMode provides colorMode,
-            LocalEnableBlur provides (enableBlur && blurSupported),
-            LocalEnableFloatingBottomBar provides enableFloatingBottomBar,
-            LocalEnableFloatingBottomBarBlur provides (enableFloatingBottomBarBlur && blurSupported),
-            LocalDensity provides scaledDensity,
-        ) {
-            content()
-        }
+            val density = LocalDensity.current
+            val scaledDensity = remember(density, pageScale) {
+                Density(
+                    density = density.density * pageScale.coerceIn(0.8f, 1.1f),
+                    fontScale = density.fontScale,
+                )
+            }
+            val blurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+            CompositionLocalProvider(
+                LocalSettingsManager provides settingsManager,
+                LocalColorMode provides colorMode,
+                LocalEnableBlur provides (enableBlur && blurSupported),
+                LocalEnableFloatingBottomBar provides enableFloatingBottomBar,
+                LocalEnableFloatingBottomBarBlur provides (enableFloatingBottomBarBlur && blurSupported),
+                LocalDensity provides scaledDensity,
+            ) {
+                content()
+            }
     }
 }
 

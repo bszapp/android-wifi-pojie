@@ -14,13 +14,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.bszapp.wifitoolbox.contract.container.ContainerSystemStatus
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
+import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ContainerProgressSheet
+import io.github.bszapp.wifitoolbox.uidefault.screen.settings.InstallContainerConfirmationSheet
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -34,6 +42,10 @@ import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.Inventory2
+import androidx.compose.material.icons.rounded.RestartAlt
+import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -41,12 +53,25 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 @Composable
 fun SettingsScreen(
+    viewModel: DefaultViewModel = viewModel(),
     bottomInnerPadding: Dp = 0.dp,
 ) {
+    val containerState by viewModel.containerState.collectAsStateWithLifecycle()
+    var showInstallConfirmation by rememberSaveable { mutableStateOf(false) }
     val navigator = LocalNavigator.current
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
+
+    InstallContainerConfirmationSheet(
+        show = showInstallConfirmation,
+        onDismiss = { showInstallConfirmation = false },
+        onConfirm = {
+            showInstallConfirmation = false
+            viewModel.installContainer()
+        },
+    )
+    ContainerProgressSheet(state = containerState)
 
     Scaffold(
         topBar = {
@@ -91,6 +116,61 @@ fun SettingsScreen(
                             },
                             onClick = { navigator.push(Route.ColorPalette) },
                         )
+                    }
+                }
+                item {
+                    //TODO:容器重置二次确认？还有需要一个更新容器功能
+                    SmallTitle(text = "容器系统")
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        if (!containerState.installed) {
+                            ArrowPreference(
+                                title = "安装容器系统",
+                                summary = when (containerState.systemStatus) {
+                                    ContainerSystemStatus.CHECKING -> "正在检查容器状态"
+                                    ContainerSystemStatus.ERROR -> containerState.errorMessage ?: "容器操作失败"
+                                    else -> "解压 APK 内置的容器系统"
+                                },
+                                enabled = containerState.systemStatus != ContainerSystemStatus.CHECKING && !containerState.isBusy,
+                                startAction = {
+                                    Icon(
+                                        Icons.Rounded.Inventory2,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                        contentDescription = null,
+                                        tint = colorScheme.onBackground,
+                                    )
+                                },
+                                onClick = { showInstallConfirmation = true },
+                            )
+                        } else {
+                            ArrowPreference(
+                                title = "重置容器",
+                                summary = "删除现有容器并重新解压内置容器系统",
+                                enabled = !containerState.isBusy,
+                                startAction = {
+                                    Icon(
+                                        Icons.Rounded.RestartAlt,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                        contentDescription = null,
+                                        tint = colorScheme.onBackground,
+                                    )
+                                },
+                                onClick = viewModel::resetContainer,
+                            )
+                            ArrowPreference(
+                                title = "卸载容器",
+                                summary = "删除已解压的容器系统",
+                                enabled = !containerState.isBusy,
+                                startAction = {
+                                    Icon(
+                                        Icons.Rounded.DeleteForever,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                        contentDescription = null,
+                                        tint = colorScheme.onBackground,
+                                    )
+                                },
+                                onClick = viewModel::uninstallContainer,
+                            )
+                        }
                     }
                     Spacer(Modifier.height(bottomInnerPadding))
                 }

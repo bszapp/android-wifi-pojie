@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.uidefault.screen
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -9,6 +10,8 @@ import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -17,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -25,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.bszapp.wifitoolbox.contract.wifilist.isScanning
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -32,6 +37,8 @@ import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
 import io.github.bszapp.wifitoolbox.uidefault.widget.WifiList
 import top.yukonga.miuix.kmp.basic.DropdownImpl
+import top.yukonga.miuix.kmp.basic.DropdownItem
+import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.ListPopupColumn
@@ -40,6 +47,7 @@ import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -58,7 +66,12 @@ fun ListScreen(
     val wifiState by viewModel.wifiList.state.collectAsStateWithLifecycle()
     val isSendingScanRequest by
         viewModel.wifiList.isSendingScanRequest.collectAsStateWithLifecycle()
+    val informationSourceState by
+        viewModel.wifiList.informationSourceState.collectAsStateWithLifecycle()
+    val selectedSource = informationSourceState?.source ?: WifiInformationSource.SYSTEM
+    val isInitializing = informationSourceState?.initializing == true
     val isScanning = wifiState.isScanning || isSendingScanRequest
+    val controlsBusy = isScanning || isInitializing
     val listState = rememberLazyListState()
     val pullState = rememberPullToRefreshState()
     val scrollBehavior = MiuixScrollBehavior()
@@ -70,7 +83,7 @@ fun ListScreen(
             BlurredBar(backdrop) {
                 TopAppBar(
                     color = barColor,
-                    title = "系统模式",
+                    title = selectedSource.displayName,
                     navigationIcon = {
                         Box {
                             val showTopPopup = remember { mutableStateOf(false) }
@@ -81,12 +94,36 @@ fun ListScreen(
                                 onDismissRequest = { showTopPopup.value = false },
                                 content = {
                                     ListPopupColumn {
+                                        //TODO:错了！是分组，选项都叫扫描，不是给每个选项加小标题
                                         DropdownImpl(
-                                            text = "空空如也",
-                                            isSelected = false,
-                                            optionSize = 1,
-                                            onSelectedIndexChange = { showTopPopup.value = false },
+                                            item = DropdownItem(
+                                                text = "系统模式",
+                                                summary = "扫描",
+                                            ),
+                                            isSelected = selectedSource == WifiInformationSource.SYSTEM,
+                                            optionSize = 2,
+                                            onSelectedIndexChange = {
+                                                showTopPopup.value = false
+                                                viewModel.wifiList.setInformationSource(
+                                                    WifiInformationSource.SYSTEM,
+                                                )
+                                            },
                                             index = 0,
+                                        )
+                                        DropdownImpl(
+                                            item = DropdownItem(
+                                                text = "混合模式",
+                                                summary = "扫描",
+                                            ),
+                                            isSelected = selectedSource == WifiInformationSource.HYBRID,
+                                            optionSize = 2,
+                                            onSelectedIndexChange = {
+                                                showTopPopup.value = false
+                                                viewModel.wifiList.setInformationSource(
+                                                    WifiInformationSource.HYBRID,
+                                                )
+                                            },
+                                            index = 1,
                                         )
                                     }
                                 },
@@ -106,7 +143,7 @@ fun ListScreen(
                     actions = {
                         IconButton(
                             onClick = { viewModel.wifiList.startScan() },
-                            enabled = !isScanning,
+                            enabled = !controlsBusy,
                         ) {
                             Icon(
                                 imageVector = MiuixIcons.Refresh,
@@ -127,7 +164,9 @@ fun ListScreen(
         PullToRefresh(
             isRefreshing = isScanning,
             pullToRefreshState = pullState,
-            onRefresh = { viewModel.wifiList.startScan() },
+            onRefresh = {
+                if (!isInitializing) viewModel.wifiList.startScan()
+            },
             refreshTexts = refreshTexts,
             contentPadding = PaddingValues(
                 top = innerPadding.calculateTopPadding() + 6.dp,
@@ -136,22 +175,43 @@ fun ListScreen(
                 bottom = bottomInnerPadding,
             ),
         ) {
-            Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
-                WifiList(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .scrollEndHaptic()
-                        .overScrollVertical()
-                        .nestedScroll(scrollBehavior.nestedScrollConnection),
-                    vm = viewModel,
-                    listState = listState,
-                    contentPadding = PaddingValues(
-                        top = innerPadding.calculateTopPadding() + 14.dp,
-                        start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
-                        end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
-                        bottom = bottomInnerPadding + 8.dp,
-                    ),
-                )
+            Box(
+                modifier = Modifier.fillMaxSize().let {
+                    if (backdrop != null) it.layerBackdrop(backdrop) else it
+                },
+            ) {
+                if (isInitializing) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = bottomInnerPadding),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+                    ) {
+                        CircularProgressIndicator()
+                        Text(
+                            text = "初始化",
+                            modifier = Modifier.padding(top = 12.dp),
+                            color = colorScheme.onSurface,
+                        )
+                    }
+                } else {
+                    WifiList(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .scrollEndHaptic()
+                            .overScrollVertical()
+                            .nestedScroll(scrollBehavior.nestedScrollConnection),
+                        vm = viewModel,
+                        listState = listState,
+                        contentPadding = PaddingValues(
+                            top = innerPadding.calculateTopPadding() + 14.dp,
+                            start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
+                            end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
+                            bottom = bottomInnerPadding + 8.dp,
+                        ),
+                    )
+                }
             }
         }
     }

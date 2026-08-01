@@ -32,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,11 +80,12 @@ import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.ScrollBehavior
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TabRow
+import top.yukonga.miuix.kmp.basic.TabRowDefaults
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Download
-import top.yukonga.miuix.kmp.icon.extended.FileDownloads
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -96,34 +98,64 @@ fun LogScreen(
     viewModel: DefaultViewModel = viewModel(),
     bottomInnerPadding: Dp = 0.dp,
 ) {
+    //TODO:加个终端关闭、主动新建终端、清空终端、直接发送快捷键或命令？
     val context = LocalContext.current
     val entries by viewModel.serviceLogs.entries.collectAsStateWithLifecycle()
     val rawViewEnabled by viewModel.serviceLogs.rawViewEnabled.collectAsStateWithLifecycle()
+    val terminalManagerState by viewModel.terminals.state.collectAsStateWithLifecycle()
     val serviceUid by viewModel.startup.uid.collectAsStateWithLifecycle()
     val servicePid by viewModel.startup.pid.collectAsStateWithLifecycle()
-    val currentEntries by rememberUpdatedState(entries)
+    var selectedTerminalId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val terminalIds = terminalManagerState.aliveTerminalIds
+    val selectedTerminal = selectedTerminalId?.let(terminalManagerState.terminals::get)
+    val selectedTabIndex = selectedTerminalId
+        ?.let(terminalIds::indexOf)
+        ?.takeIf { it >= 0 }
+        ?.plus(1)
+        ?: 0
+    val tabs = remember(terminalIds) {
+        listOf("日志") + terminalIds.map { terminalId -> "终端 $terminalId" }
+    }
+    val currentLines = if (selectedTerminalId == null) {
+        entries.map(ServiceLogEntry::rawLine)
+    } else {
+        selectedTerminal?.entries.orEmpty().map { it.text }
+    }
+    val currentLinesForSave by rememberUpdatedState(currentLines)
     val rawText = remember(entries) {
         entries.joinToString(separator = "\n", transform = ServiceLogEntry::rawLine)
+    }
+    val terminalText = remember(selectedTerminal?.entries) {
+        selectedTerminal?.entries.orEmpty().joinToString(separator = "\n") { it.text }
     }
     val listState = rememberLazyListState()
     val rawVerticalScrollState = rememberScrollState()
     val rawHorizontalScrollState = rememberScrollState()
+    val terminalVerticalScrollState = rememberScrollState()
+    val terminalHorizontalScrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
     var showMenu by remember { mutableStateOf(false) }
 
+    LaunchedEffect(terminalIds, selectedTerminalId) {
+        if (selectedTerminalId != null && selectedTerminalId !in terminalIds) {
+            selectedTerminalId = null
+            showMenu = false
+        }
+    }
+
     val saveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri ->
         if (uri != null) {
-            val logsToSave = currentEntries
+            val logsToSave = currentLinesForSave
             scope.launch(Dispatchers.IO) {
                 val output = context.contentResolver.openOutputStream(uri, "wt") ?: return@launch
                 output.bufferedWriter(Charsets.UTF_8).use { writer ->
-                    logsToSave.forEach { entry ->
-                        writer.write(entry.rawLine)
+                    logsToSave.forEach { line ->
+                        writer.write(line)
                         writer.newLine()
                     }
                 }
@@ -134,48 +166,71 @@ fun LogScreen(
     Scaffold(
         topBar = {
             BlurredBar(backdrop) {
-                LogTopBar(
-                    color = barColor,
-                    scrollBehavior = scrollBehavior,
-                    showMenu = showMenu,
-                    rawViewEnabled = rawViewEnabled,
-                    onShowMenuChange = { showMenu = it },
-                    onSave = {
-                        val filename = SimpleDateFormat(
-                            "yyyyMMdd_HHmmss'.log'",
-                            Locale.getDefault(),
-                        ).format(Date())
-                        saveLauncher.launch(filename)
-                    },
-                    onToggleRawView = {
-                        viewModel.serviceLogs.setRawViewEnabled(!rawViewEnabled)
-                        showMenu = false
-                    },
-                    onScrollToTop = {
-                        showMenu = false
-                        scope.launch {
-                            if (rawViewEnabled) {
-                                rawVerticalScrollState.animateScrollTo(0)
-                            } else if (entries.isNotEmpty()) {
-                                listState.animateScrollToItem(0)
+                Column {
+                    LogTopBar(
+                        color = barColor,
+                        scrollBehavior = scrollBehavior,
+                        showMenu = showMenu,
+                        rawViewEnabled = rawViewEnabled,
+                        showRawViewOption = selectedTerminalId == null,
+                        onShowMenuChange = { showMenu = it },
+                        onSave = {
+                            val prefix = selectedTerminalId?.let { "terminal_${it}_" } ?: ""
+                            val filename = prefix + SimpleDateFormat(
+                                "yyyyMMdd_HHmmss'.log'",
+                                Locale.getDefault(),
+                            ).format(Date())
+                            saveLauncher.launch(filename)
+                        },
+                        onToggleRawView = {
+                            viewModel.serviceLogs.setRawViewEnabled(!rawViewEnabled)
+                            showMenu = false
+                        },
+                        onScrollToTop = {
+                            showMenu = false
+                            scope.launch {
+                                when {
+                                    selectedTerminalId != null -> terminalVerticalScrollState.animateScrollTo(0)
+                                    rawViewEnabled -> rawVerticalScrollState.animateScrollTo(0)
+                                    entries.isNotEmpty() -> listState.animateScrollToItem(0)
+                                }
                             }
-                        }
-                    },
-                    onScrollToBottom = {
-                        showMenu = false
-                        scope.launch {
-                            if (rawViewEnabled) {
-                                rawVerticalScrollState.animateScrollTo(rawVerticalScrollState.maxValue)
-                            } else if (entries.isNotEmpty()) {
-                                listState.animateScrollToItem(entries.lastIndex)
+                        },
+                        onScrollToBottom = {
+                            showMenu = false
+                            scope.launch {
+                                when {
+                                    selectedTerminalId != null -> {
+                                        terminalVerticalScrollState.animateScrollTo(
+                                            terminalVerticalScrollState.maxValue,
+                                        )
+                                    }
+                                    rawViewEnabled -> {
+                                        rawVerticalScrollState.animateScrollTo(rawVerticalScrollState.maxValue)
+                                    }
+                                    entries.isNotEmpty() -> listState.animateScrollToItem(entries.lastIndex)
+                                }
                             }
-                        }
-                    },
-                    onClear = {
-                        showMenu = false
-                        viewModel.serviceLogs.clear()
-                    },
-                )
+                        },
+                        onClear = {
+                            showMenu = false
+                            selectedTerminalId?.let(viewModel.terminals::clearLogs)
+                                ?: viewModel.serviceLogs.clear()
+                        },
+                    )
+                    TabRow(
+                        tabs = tabs,
+                        selectedTabIndex = selectedTabIndex,
+                        onTabSelected = { index ->
+                            selectedTerminalId = if (index == 0) null else terminalIds.getOrNull(index - 1)
+                            showMenu = false
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        colors = TabRowDefaults.tabRowColors(
+                            backgroundColor = Color.Transparent,
+                        ),
+                    )
+                }
             }
         },
         popupHost = { },
@@ -188,9 +243,23 @@ fun LogScreen(
             modifier = (if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
                 .fillMaxSize(),
         ) {
-            if (rawViewEnabled) {
+            //TODO:我不希望看见任何暂无日志的提示！
+            if (selectedTerminalId != null) {
+                RawLogView(
+                    text = terminalText,
+                    emptyText = "终端 ${selectedTerminalId ?: ""} 暂无输出",
+                    verticalScrollState = terminalVerticalScrollState,
+                    horizontalScrollState = terminalHorizontalScrollState,
+                    scrollBehavior = scrollBehavior,
+                    topPadding = innerPadding.calculateTopPadding(),
+                    startPadding = innerPadding.calculateStartPadding(layoutDirection),
+                    endPadding = innerPadding.calculateEndPadding(layoutDirection),
+                    bottomPadding = bottomInnerPadding,
+                )
+            } else if (rawViewEnabled) {
                 RawLogView(
                     text = rawText,
+                    emptyText = "暂无服务日志",
                     verticalScrollState = rawVerticalScrollState,
                     horizontalScrollState = rawHorizontalScrollState,
                     scrollBehavior = scrollBehavior,
@@ -223,6 +292,7 @@ private fun LogTopBar(
     scrollBehavior: ScrollBehavior,
     showMenu: Boolean,
     rawViewEnabled: Boolean,
+    showRawViewOption: Boolean,
     onShowMenuChange: (Boolean) -> Unit,
     onSave: () -> Unit,
     onToggleRawView: () -> Unit,
@@ -249,34 +319,36 @@ private fun LogTopBar(
                     onDismissRequest = { onShowMenuChange(false) },
                     content = {
                         ListPopupColumn {
-                            DropdownImpl(
-                                text = "原始视图",
-                                isSelected = rawViewEnabled,
-                                optionSize = 4,
-                                index = 0,
-                                onSelectedIndexChange = { onToggleRawView() },
-                            )
-                            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                            if (showRawViewOption) {
+                                DropdownImpl(
+                                    text = "原始视图",
+                                    isSelected = rawViewEnabled,
+                                    optionSize = 4,
+                                    index = 0,
+                                    onSelectedIndexChange = { onToggleRawView() },
+                                )
+                                HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                            }
                             DropdownImpl(
                                 text = "滚动到顶部",
                                 isSelected = false,
-                                optionSize = 4,
-                                index = 1,
+                                optionSize = if (showRawViewOption) 4 else 3,
+                                index = if (showRawViewOption) 1 else 0,
                                 onSelectedIndexChange = { onScrollToTop() },
                             )
                             DropdownImpl(
                                 text = "滚动到底部",
                                 isSelected = false,
-                                optionSize = 4,
-                                index = 2,
+                                optionSize = if (showRawViewOption) 4 else 3,
+                                index = if (showRawViewOption) 2 else 1,
                                 onSelectedIndexChange = { onScrollToBottom() },
                             )
                             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                             DropdownImpl(
                                 text = "立即清空日志",
                                 isSelected = false,
-                                optionSize = 4,
-                                index = 3,
+                                optionSize = if (showRawViewOption) 4 else 3,
+                                index = if (showRawViewOption) 3 else 2,
                                 onSelectedIndexChange = { onClear() },
                             )
                         }
@@ -346,6 +418,7 @@ private fun LogCardList(
 @Composable
 private fun RawLogView(
     text: String,
+    emptyText: String,
     verticalScrollState: androidx.compose.foundation.ScrollState,
     horizontalScrollState: androidx.compose.foundation.ScrollState,
     scrollBehavior: ScrollBehavior,
@@ -363,7 +436,7 @@ private fun RawLogView(
     ) {
         SelectionContainer {
             Text(
-                text = text.ifEmpty { "暂无服务日志" },
+                text = text.ifEmpty { emptyText },
                 modifier = Modifier.padding(
                     top = topPadding + 12.dp,
                     start = startPadding + 12.dp,

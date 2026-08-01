@@ -5,5 +5,6 @@ import android.os.ParcelFileDescriptor;
 oneway interface IMainServiceCallback {
     void onWifiStateChanged(in ParcelFileDescriptor payload);
     void onSavedWifiListChanged(in ParcelFileDescriptor payload);
+    void onWifiInformationSourceStateChanged(int source, boolean initializing);
     void onServiceError(String source, String operation, String message, String details);
 }
