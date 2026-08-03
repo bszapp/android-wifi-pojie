@@ -6,4 +6,5 @@ object AndroidApiAction {
     const val WIFI_GET_SCAN_RESULTS = "wifi.getScanResults"
     const val WIFI_GET_SAVED_LIST = "wifi.getSavedList"
     const val WIFI_UPDATE_CONFIG = "wifi.updateConfig"
+    const val WIFI_DISCONNECT_CURRENT = "wifi.disconnectCurrent"
 }

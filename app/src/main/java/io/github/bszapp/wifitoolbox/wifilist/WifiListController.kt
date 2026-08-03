@@ -3,11 +3,14 @@
 package io.github.bszapp.wifitoolbox.wifilist
 
 import android.content.Context
+import android.net.Uri
 import android.os.DeadObjectException
 import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorPcapExportResult
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
@@ -17,11 +20,20 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.IMainServiceCallback
 import io.github.bszapp.wifitoolbox.tools.AndroidApiClient
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -51,6 +63,18 @@ class WifiListController(
     private val _informationSourceState = MutableStateFlow<WifiInformationSourceState?>(null)
     override val informationSourceState: StateFlow<WifiInformationSourceState?> =
         _informationSourceState.asStateFlow()
+
+    private val _monitorPcapExports = MutableSharedFlow<MonitorPcapExportResult>(
+        extraBufferCapacity = 8,
+    )
+    override val monitorPcapExports: SharedFlow<MonitorPcapExportResult> =
+        _monitorPcapExports.asSharedFlow()
+
+    private val _monitorHandshakeTestResults = MutableSharedFlow<MonitorHandshakeTestResult>(
+        extraBufferCapacity = 8,
+    )
+    override val monitorHandshakeTestResults: SharedFlow<MonitorHandshakeTestResult> =
+        _monitorHandshakeTestResults.asSharedFlow()
 
     @Volatile
     private var registeredService: IMainService? = null
@@ -131,20 +155,6 @@ class WifiListController(
                 .onSuccess {
                     if (isCurrentConnection(plan.generation, plan.callback)) {
                         Log.d(TAG, "已注册 Wi-Fi 数据回调，generation=${plan.generation}")
-                        runCatching { service.getWifiInformationSourceState() }
-                            .onSuccess { snapshot ->
-                                updateInformationSourceSnapshot(
-                                    snapshot = snapshot,
-                                    generation = plan.generation,
-                                    callback = plan.callback,
-                                )
-                            }
-                            .onFailure { error ->
-                                report(
-                                    operation = "读取当前 Wi-Fi 信息源",
-                                    error = error,
-                                )
-                            }
                     } else {
                         unregisterDetached(
                             DetachedConnection(service, binder, plan.callback),
@@ -192,16 +202,23 @@ class WifiListController(
         generation: Long,
         service: IMainService,
     ): IMainServiceCallback = object : IMainServiceCallback.Stub() {
-        override fun onWifiStateChanged(payload: ParcelFileDescriptor) {
-            if (!isCurrentConnection(generation, this)) {
-                runCatching { payload.close() }
-                return
-            }
+        override fun onWifiStateChanged(
+            snapshotGeneration: Long,
+            chunkCount: Int,
+            totalBytes: Int,
+        ) {
+            if (!isCurrentConnection(generation, this)) return
             val callback = this
 
             scope.launch(Dispatchers.IO) {
                 val result = runCatching {
-                    WifiParcelTransport.decodeWifiState(payload)
+                    WifiParcelTransport.decodeWifiState(
+                        generation = snapshotGeneration,
+                        chunkCount = chunkCount,
+                        totalBytes = totalBytes,
+                    ) { chunkIndex ->
+                        service.getWifiStateChunk(callback, snapshotGeneration, chunkIndex)
+                    }
                 }
 
                 if (!isCurrentConnection(generation, callback)) return@launch
@@ -217,20 +234,27 @@ class WifiListController(
                             )
                         }
                 }
-                acknowledgeWifiState(service, callback, generation)
+                acknowledgeWifiState(service, callback, generation, snapshotGeneration)
             }
         }
 
-        override fun onSavedWifiListChanged(payload: ParcelFileDescriptor) {
-            if (!isCurrentConnection(generation, this)) {
-                runCatching { payload.close() }
-                return
-            }
+        override fun onSavedWifiListChanged(
+            snapshotGeneration: Long,
+            chunkCount: Int,
+            totalBytes: Int,
+        ) {
+            if (!isCurrentConnection(generation, this)) return
             val callback = this
 
             scope.launch(Dispatchers.IO) {
                 val result = runCatching {
-                    WifiParcelTransport.decodeSavedWifiList(payload)
+                    WifiParcelTransport.decodeSavedWifiList(
+                        generation = snapshotGeneration,
+                        chunkCount = chunkCount,
+                        totalBytes = totalBytes,
+                    ) { chunkIndex ->
+                        service.getSavedWifiListChunk(callback, snapshotGeneration, chunkIndex)
+                    }
                 }
 
                 if (!isCurrentConnection(generation, callback)) return@launch
@@ -246,31 +270,85 @@ class WifiListController(
                             )
                         }
                 }
-                acknowledgeSavedWifiList(service, callback, generation)
+                acknowledgeSavedWifiList(service, callback, generation, snapshotGeneration)
             }
         }
 
         override fun onWifiInformationSourceStateChanged(
-            source: Int,
-            initializing: Boolean,
+            snapshotGeneration: Long,
+            chunkCount: Int,
+            totalBytes: Int,
+        ) {
+            if (!isCurrentConnection(generation, this)) return
+            val callback = this
+
+            scope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    WifiParcelTransport.decodeWifiInformationSourceState(
+                        generation = snapshotGeneration,
+                        chunkCount = chunkCount,
+                        totalBytes = totalBytes,
+                    ) { chunkIndex ->
+                        service.getWifiInformationSourceStateChunk(
+                            callback,
+                            snapshotGeneration,
+                            chunkIndex,
+                        )
+                    }
+                }
+
+                if (!isCurrentConnection(generation, callback)) return@launch
+
+                withContext(Dispatchers.Main.immediate) {
+                    if (!isCurrentConnection(generation, callback)) return@withContext
+                    result
+                        .onSuccess { _informationSourceState.value = it }
+                        .onFailure {
+                            report(
+                                operation = "解码 Wi-Fi 信息源状态",
+                                error = it,
+                            )
+                        }
+                }
+                acknowledgeWifiInformationSourceState(
+                    service,
+                    callback,
+                    generation,
+                    snapshotGeneration,
+                )
+            }
+        }
+
+        override fun onMonitorPcapExported(
+            requestId: String,
+            path: String,
+            fileName: String,
         ) {
             if (!isCurrentConnection(generation, this)) return
             val callback = this
             scope.launch(Dispatchers.Main.immediate) {
                 if (!isCurrentConnection(generation, callback)) return@launch
-                runCatching {
-                    WifiInformationSourceState(
-                        source = WifiInformationSource.fromWireValue(source),
-                        initializing = initializing,
-                    )
-                }.onSuccess {
-                    _informationSourceState.value = it
-                }.onFailure {
-                    report(
-                        operation = "解析 Wi-Fi 信息源状态",
-                        error = it,
-                    )
-                }
+                _monitorPcapExports.emit(
+                    MonitorPcapExportResult(
+                        requestId = requestId,
+                        path = path,
+                        fileName = fileName,
+                    ),
+                )
+            }
+        }
+
+        override fun onMonitorHandshakeTestResult(requestId: String, outcome: Int) {
+            if (!isCurrentConnection(generation, this)) return
+            val callback = this
+            scope.launch(Dispatchers.Main.immediate) {
+                if (!isCurrentConnection(generation, callback)) return@launch
+                _monitorHandshakeTestResults.emit(
+                    MonitorHandshakeTestResult(
+                        requestId = requestId,
+                        outcome = MonitorHandshakeTestOutcome.fromWireValue(outcome),
+                    ),
+                )
             }
         }
 
@@ -309,6 +387,127 @@ class WifiListController(
                 terminal.absolutePath,
             )
         }
+    }
+
+    override fun enterMonitorMode(
+        command: String,
+        targetChannel: Int,
+        targetFrequencyMhz: Int,
+    ) {
+        val appDataDirectory = requireNotNull(context.filesDir.parentFile)
+        val rootfs = File(appDataDirectory, "rootfs")
+        val runtime = File(context.noBackupFilesDir, "rftool-runtime")
+        val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
+        callService("进入监听模式，信道 $targetChannel，${targetFrequencyMhz} MHz") { service ->
+            service.enterMonitorMode(
+                command,
+                targetChannel,
+                targetFrequencyMhz,
+                rootfs.absolutePath,
+                runtime.absolutePath,
+                terminal.absolutePath,
+            )
+        }
+    }
+
+    override fun exportAllMonitorPcap(): String {
+        val requestId = UUID.randomUUID().toString()
+        callService("导出全部监听模式 PCAP") { service ->
+            service.exportMonitorPcap(
+                requestId,
+                "all",
+                "",
+                "",
+                emptyArray(),
+            )
+        }
+        return requestId
+    }
+
+    override fun exportMonitorDevicePcap(
+        bssid: String,
+        deviceMac: String,
+        subtypeIds: Set<String>,
+    ): String {
+        require(subtypeIds.isNotEmpty()) { "局部导出至少选择一种包类型" }
+        val requestId = UUID.randomUUID().toString()
+        callService("导出指定设备监听模式 PCAP") { service ->
+            service.exportMonitorPcap(
+                requestId,
+                "filtered",
+                bssid,
+                deviceMac,
+                subtypeIds.toTypedArray(),
+            )
+        }
+        return requestId
+    }
+
+    override fun releaseMonitorPcapExport(path: String) {
+        callService("释放监听模式 PCAP 临时文件") {
+            it.releaseMonitorPcapExport(path)
+        }
+    }
+
+    override fun saveMonitorPcapExport(path: String, destination: Uri) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                BufferedInputStream(FileInputStream(File(path))).use { input ->
+                    val output = context.contentResolver.openOutputStream(destination, "wt")
+                        ?: throw IOException("无法打开导出文件写入流")
+                    BufferedOutputStream(output).use { bufferedOutput ->
+                        val copiedBytes = input.copyTo(bufferedOutput)
+                        if (copiedBytes <= 0L) {
+                            throw IOException("导出的 PCAP 临时文件为空")
+                        }
+                    }
+                }
+            } catch (error: CancellationException) {
+                runCatching { context.contentResolver.delete(destination, null, null) }
+                throw error
+            } catch (error: Throwable) {
+                runCatching { context.contentResolver.delete(destination, null, null) }
+                report("保存监听模式 PCAP", error)
+            } finally {
+                releaseMonitorPcapExport(path)
+            }
+        }
+    }
+
+    override fun exportMonitorHandshakePcap(
+        bssid: String,
+        deviceMac: String,
+        handshakeId: String,
+    ): String {
+        val requestId = UUID.randomUUID().toString()
+        callService("导出握手包 PCAP") { service ->
+            service.exportMonitorHandshakePcap(
+                requestId,
+                bssid,
+                deviceMac,
+                handshakeId,
+            )
+        }
+        return requestId
+    }
+
+    override fun testMonitorHandshake(
+        bssid: String,
+        deviceMac: String,
+        handshakeId: String,
+        password: String,
+    ): String {
+        val requestId = UUID.randomUUID().toString()
+        callService("校验 WPA/WPA2 握手包") { service ->
+            service.testMonitorHandshake(
+                requestId,
+                bssid,
+                deviceMac,
+                handshakeId,
+                password,
+            )
+        }
+        return requestId
     }
 
     /**
@@ -387,22 +586,30 @@ class WifiListController(
         }
     }
 
-    private fun updateInformationSourceSnapshot(
-        snapshot: IntArray,
-        generation: Long,
-        callback: IMainServiceCallback,
-    ) {
-        if (!isCurrentConnection(generation, callback)) return
-        require(snapshot.size >= 2) { "Service 返回的 Wi-Fi 信息源状态不完整" }
-        val value = WifiInformationSourceState(
-            source = WifiInformationSource.fromWireValue(snapshot[0]),
-            initializing = snapshot[1] != 0,
-        )
-        scope.launch(Dispatchers.Main.immediate) {
-            if (isCurrentConnection(generation, callback) &&
-                _informationSourceState.value == null
-            ) {
-                _informationSourceState.value = value
+    override fun disconnectCurrentNetwork(networkId: Int) {
+        val lease = currentLease()
+        if (lease == null) {
+            report(
+                operation = "断开当前 Wi-Fi networkId=$networkId",
+                error = IllegalStateException("AndroidApiClient 不可用"),
+            )
+            return
+        }
+
+        scope.launch(Dispatchers.IO) {
+            if (!isCurrentLease(lease)) return@launch
+
+            val disconnected = runCatching {
+                lease.client.disconnectCurrentNetwork(networkId)
+            }.onFailure {
+                // AndroidApiClient 已广播详细错误。
+                Log.e(TAG, "断开当前 Wi-Fi 失败：${it.message}", it)
+            }.isSuccess
+
+            if (disconnected) {
+                callServiceNow("请求刷新已保存 Wi-Fi 列表", lease) {
+                    it.refreshSavedWifiNetworks()
+                }
             }
         }
     }
@@ -410,12 +617,15 @@ class WifiListController(
     private fun acknowledgeWifiState(
         service: IMainService,
         callback: IMainServiceCallback,
-        generation: Long,
+        connectionGeneration: Long,
+        snapshotGeneration: Long,
     ) {
-        if (!isCurrentConnection(generation, callback)) return
-        runCatching { service.acknowledgeWifiState(callback) }
+        if (!isCurrentConnection(connectionGeneration, callback)) return
+        runCatching { service.acknowledgeWifiState(callback, snapshotGeneration) }
             .onFailure { error ->
-                if (error is DeadObjectException || !isCurrentConnection(generation, callback)) {
+                if (error is DeadObjectException ||
+                    !isCurrentConnection(connectionGeneration, callback)
+                ) {
                     Log.d(TAG, "确认 WifiState 时连接已失效")
                 } else {
                     report(
@@ -429,12 +639,15 @@ class WifiListController(
     private fun acknowledgeSavedWifiList(
         service: IMainService,
         callback: IMainServiceCallback,
-        generation: Long,
+        connectionGeneration: Long,
+        snapshotGeneration: Long,
     ) {
-        if (!isCurrentConnection(generation, callback)) return
-        runCatching { service.acknowledgeSavedWifiList(callback) }
+        if (!isCurrentConnection(connectionGeneration, callback)) return
+        runCatching { service.acknowledgeSavedWifiList(callback, snapshotGeneration) }
             .onFailure { error ->
-                if (error is DeadObjectException || !isCurrentConnection(generation, callback)) {
+                if (error is DeadObjectException ||
+                    !isCurrentConnection(connectionGeneration, callback)
+                ) {
                     Log.d(TAG, "确认 SavedWifiList 时连接已失效")
                 } else {
                     report(
@@ -443,6 +656,29 @@ class WifiListController(
                     )
                 }
             }
+    }
+
+    private fun acknowledgeWifiInformationSourceState(
+        service: IMainService,
+        callback: IMainServiceCallback,
+        connectionGeneration: Long,
+        snapshotGeneration: Long,
+    ) {
+        if (!isCurrentConnection(connectionGeneration, callback)) return
+        runCatching {
+            service.acknowledgeWifiInformationSourceState(callback, snapshotGeneration)
+        }.onFailure { error ->
+            if (error is DeadObjectException ||
+                !isCurrentConnection(connectionGeneration, callback)
+            ) {
+                Log.d(TAG, "确认 Wi-Fi 信息源状态时连接已失效")
+            } else {
+                report(
+                    operation = "确认 Wi-Fi 信息源状态接收完成",
+                    error = error,
+                )
+            }
+        }
     }
 
     private fun callService(

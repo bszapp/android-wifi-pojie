@@ -6,6 +6,7 @@ import android.annotation.SuppressLint
 import android.content.AttributionSource
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
@@ -55,6 +56,10 @@ class AndroidApi(
                         ?: throw IllegalArgumentException("缺少 WifiConfigPatch 数据")
                     booleanResponse(updateWifiConfigDirect(networkId, patchBytes))
                 }
+                AndroidApiAction.WIFI_DISCONNECT_CURRENT -> {
+                    val networkId = request.arguments.getInt(AndroidApiKeys.NETWORK_ID)
+                    booleanResponse(disconnectCurrentNetworkDirect(networkId))
+                }
                 else -> throw IllegalArgumentException("未知 AndroidApi action：${request.action}")
             }
         }.getOrElse(AndroidApiResponse::failure)
@@ -67,6 +72,38 @@ class AndroidApi(
         },
     ) {
         getScanResultsInternal()
+    }
+
+    fun getConnectionInfoDirect(): WifiInfo = androidBusinessCall(
+        operation = "获取当前 Wi-Fi 连接信息",
+        successMessage = { info ->
+            "获取当前 Wi-Fi 连接信息成功：networkId=${info.networkId} bssid=${info.bssid}"
+        },
+    ) {
+        getConnectionInfoInternal()
+    }
+
+    private fun getConnectionInfoInternal(): WifiInfo {
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        val raw = systemApi(apiName = "getConnectionInfo") {
+            when {
+                sdk >= 30 -> clazz.getMethod(
+                    "getConnectionInfo",
+                    String::class.java,
+                    String::class.java,
+                ).invoke(wifiService, callerPackage, null)
+
+                sdk >= 28 -> clazz.getMethod(
+                    "getConnectionInfo",
+                    String::class.java,
+                ).invoke(wifiService, callerPackage)
+
+                else -> clazz.getMethod("getConnectionInfo").invoke(wifiService)
+            }
+        }
+        return raw as? WifiInfo
+            ?: throw IllegalStateException("getConnectionInfo 返回类型不是 WifiInfo：${raw?.javaClass?.name}")
     }
 
     private fun getScanResultsInternal(): List<ScanResult> {
@@ -229,48 +266,13 @@ class AndroidApi(
     private fun updateWifiConfigInternal(networkId: Int, patchBytes: ByteArray): Boolean {
         val patch = readWifiConfigPatch(patchBytes)
 
-        val wifiService = getWifiService()
-        val clazz = wifiService::class.java
-
         patch.enabled?.let { enabled ->
-            val result = systemApi(
-                apiName = if (enabled) "enableNetwork" else "disableNetwork",
-            ) {
-                if (enabled) {
-                    if (sdk >= 29) {
-                        clazz.getMethod(
-                            "enableNetwork",
-                            Int::class.java,
-                            Boolean::class.java,
-                            String::class.java
-                        ).invoke(wifiService, networkId, false, callerPackage)
-                    } else {
-                        clazz.getMethod(
-                            "enableNetwork",
-                            Int::class.java,
-                            Boolean::class.java
-                        ).invoke(wifiService, networkId, false)
-                    }
-                } else {
-                    if (sdk >= 29) {
-                        clazz.getMethod(
-                            "disableNetwork",
-                            Int::class.java,
-                            String::class.java
-                        ).invoke(wifiService, networkId, callerPackage)
-                    } else {
-                        clazz.getMethod(
-                            "disableNetwork",
-                            Int::class.java
-                        ).invoke(wifiService, networkId)
-                    }
-                }
-            }
-
-            requireBooleanSuccess(if (enabled) "enableNetwork" else "disableNetwork", result)
+            setNetworkEnabledInternal(networkId, enabled, disableOthers = false)
         }
 
         patch.autoJoin?.let { autoJoin ->
+            val wifiService = getWifiService()
+            val clazz = wifiService::class.java
             if (sdk >= 30) {
                 systemApi(
                     apiName = "allowAutojoin",
@@ -308,6 +310,87 @@ class AndroidApi(
         }
 
         return true
+    }
+
+    fun disconnectCurrentNetworkDirect(networkId: Int): Boolean = androidBusinessCall(
+        operation = "断开当前 Wi-Fi 并禁用配置",
+        details = "networkId=$networkId",
+        successMessage = {
+            "断开当前 Wi-Fi 并禁用配置成功：networkId=$networkId"
+        },
+    ) {
+        disconnectCurrentNetworkInternal(networkId)
+    }
+
+    private fun disconnectCurrentNetworkInternal(networkId: Int): Boolean {
+        require(networkId >= 0) { "当前连接没有有效的 networkId" }
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        val result = systemApi(apiName = "disconnect") {
+            if (sdk >= 28) {
+                clazz.getMethod("disconnect", String::class.java)
+                    .invoke(wifiService, callerPackage)
+            } else {
+                clazz.getMethod("disconnect").invoke(wifiService)
+            }
+        }
+        requireBooleanSuccess("disconnect", result)
+        setNetworkEnabledInternal(networkId, enabled = false, disableOthers = false)
+        return true
+    }
+
+    fun connectWifiByNetworkIdDirect(networkId: Int): Boolean = androidBusinessCall(
+        operation = "发送 enableNetwork 指令",
+        details = "networkId=$networkId",
+        successMessage = {
+            "enableNetwork 指令发送成功：networkId=$networkId"
+        },
+    ) {
+        require(networkId >= 0) { "networkId 必须大于等于 0" }
+        setNetworkEnabledInternal(networkId, enabled = true, disableOthers = true)
+        true
+    }
+
+    private fun setNetworkEnabledInternal(
+        networkId: Int,
+        enabled: Boolean,
+        disableOthers: Boolean,
+    ) {
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        val apiName = if (enabled) "enableNetwork" else "disableNetwork"
+        val result = systemApi(apiName = apiName) {
+            if (enabled) {
+                if (sdk >= 29) {
+                    clazz.getMethod(
+                        "enableNetwork",
+                        Int::class.java,
+                        Boolean::class.java,
+                        String::class.java,
+                    ).invoke(wifiService, networkId, disableOthers, callerPackage)
+                } else {
+                    clazz.getMethod(
+                        "enableNetwork",
+                        Int::class.java,
+                        Boolean::class.java,
+                    ).invoke(wifiService, networkId, disableOthers)
+                }
+            } else {
+                if (sdk >= 29) {
+                    clazz.getMethod(
+                        "disableNetwork",
+                        Int::class.java,
+                        String::class.java,
+                    ).invoke(wifiService, networkId, callerPackage)
+                } else {
+                    clazz.getMethod(
+                        "disableNetwork",
+                        Int::class.java,
+                    ).invoke(wifiService, networkId)
+                }
+            }
+        }
+        requireBooleanSuccess(apiName, result)
     }
 
     fun isWifiEnabledDirect(): Boolean = androidBusinessCall(

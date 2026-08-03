@@ -16,12 +16,20 @@ import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 
-/** 服务进程自己的、纯内存的 logcat 记录器。 */
-internal object ServiceLogRecorder {
+/** 一个日志来源对应一个纯内存 logcat 记录器；解析与缓存逻辑由所有来源共用。 */
+internal class LogcatRecorder(
+    private val recorderName: String,
+    private val threadName: String,
+    private val startMessage: String,
+    private val boundaryTag: String,
+    private val processId: Int? = null,
+    private val filterSpecs: List<String> = listOf("*:V"),
+    private val redirectStandardStreams: Boolean = false,
+) {
     private val lock = Any()
     private val entries = ArrayDeque<ServiceLogEntry>()
+    private val entryListeners = linkedSetOf<(ServiceLogEntry) -> Unit>()
 
-    private var totalCharacters = 0
     private var nextId = 1L
     private var logcatProcess: java.lang.Process? = null
     private var stopping = false
@@ -34,34 +42,28 @@ internal object ServiceLogRecorder {
             stopping = false
             val captureStartedAtMillis = System.currentTimeMillis()
             val captureBoundary = CaptureBoundary(
-                tag = LOGCAT_BOUNDARY_TAG,
+                tag = boundaryTag,
                 message = "${Process.myPid()}-${System.nanoTime()}",
             )
-            redirectStandardStreamsToLogcat()
-            appendLocked("[ServiceLogRecorder] 开始采集服务日志，pid=${Process.myPid()}")
+            if (redirectStandardStreams) redirectStandardStreamsToLogcat()
+            appendLocked("[$recorderName] $startMessage")
             Log.i(captureBoundary.tag, captureBoundary.message)
 
-            val command = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-                listOf(
-                    "logcat",
-                    "--proto",
-                    "--pid=${Process.myPid()}",
-                    "-T",
-                    logcatSinceArgument(captureStartedAtMillis - LOGCAT_BOUNDARY_LOOKBACK_MILLIS),
-                    "*:V",
-                )
-            } else {
-                listOf(
-                    "logcat",
-                    "--pid=${Process.myPid()}",
-                    "-v",
-                    "long",
-                    "-v",
-                    "epoch",
-                    "-T",
-                    logcatSinceArgument(captureStartedAtMillis - LOGCAT_BOUNDARY_LOOKBACK_MILLIS),
-                    "*:V",
-                )
+            val command = buildList {
+                add("logcat")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                    add("--proto")
+                }
+                processId?.let { add("--pid=$it") }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) {
+                    add("-v")
+                    add("long")
+                    add("-v")
+                    add("epoch")
+                }
+                add("-T")
+                add(logcatSinceArgument(captureStartedAtMillis - LOGCAT_BOUNDARY_LOOKBACK_MILLIS))
+                addAll(filterSpecs)
             }
             val created = runCatching {
                 ProcessBuilder(command)
@@ -69,7 +71,7 @@ internal object ServiceLogRecorder {
                     .start()
             }.getOrElse { error ->
                 appendLocked(
-                    "[ServiceLogRecorder] 无法启动 logcat：" +
+                    "[$recorderName] 无法启动 logcat：" +
                         (error.message ?: error.javaClass.name),
                 )
                 return
@@ -82,7 +84,7 @@ internal object ServiceLogRecorder {
         notifyCurrentVisibleRange()
         startLogcatReader(process.first.inputStream, process.second)
         startErrorReader(
-            name = "toolbox-service-logcat-error",
+            name = "$threadName-error",
             stream = process.first.errorStream,
             prefix = "[logcat stderr] ",
         )
@@ -95,12 +97,12 @@ internal object ServiceLogRecorder {
                 }
                 if (shouldRecord) {
                     append(
-                        "[ServiceLogRecorder] logcat 已退出" +
+                        "[$recorderName] logcat 已退出" +
                             (exitCode?.let { "，exitCode=$it" } ?: ""),
                     )
                 }
             },
-            "toolbox-service-logcat-waiter",
+            "$threadName-waiter",
         ).apply {
             isDaemon = true
             start()
@@ -115,6 +117,13 @@ internal object ServiceLogRecorder {
             visibleRangeLocked()
         }
         if (listener != null) runCatching { listener(range.first, range.second) }
+    }
+
+    fun subscribeEntries(listener: (ServiceLogEntry) -> Unit): AutoCloseable {
+        synchronized(lock) { entryListeners += listener }
+        return AutoCloseable {
+            synchronized(lock) { entryListeners -= listener }
+        }
     }
 
     fun latestId(): Long = synchronized(lock) { nextId - 1L }
@@ -140,7 +149,6 @@ internal object ServiceLogRecorder {
     fun clear() {
         val notification = synchronized(lock) {
             entries.clear()
-            totalCharacters = 0
             val range = visibleRangeLocked()
             Triple(onVisibleRangeChanged, range.first, range.second)
         }
@@ -153,6 +161,7 @@ internal object ServiceLogRecorder {
         val process = synchronized(lock) {
             stopping = true
             onVisibleRangeChanged = null
+            entryListeners.clear()
             logcatProcess.also { logcatProcess = null }
         }
 
@@ -178,13 +187,13 @@ internal object ServiceLogRecorder {
                     val shouldRecord = synchronized(lock) { !stopping }
                     if (shouldRecord) {
                         append(
-                            "[ServiceLogRecorder] 读取 toolbox-service-logcat-output 失败：" +
+                            "[$recorderName] 读取 $threadName-output 失败：" +
                                 (error.message ?: error.javaClass.name),
                         )
                     }
                 }
             },
-            "toolbox-service-logcat-output",
+            "$threadName-output",
         ).apply {
             isDaemon = true
             start()
@@ -208,7 +217,7 @@ internal object ServiceLogRecorder {
                     val shouldRecord = synchronized(lock) { !stopping }
                     if (shouldRecord) {
                         append(
-                            "[ServiceLogRecorder] 读取 $name 失败：" +
+                            "[$recorderName] 读取 $name 失败：" +
                                 (error.message ?: error.javaClass.name),
                         )
                     }
@@ -426,20 +435,35 @@ internal object ServiceLogRecorder {
 
     private fun append(line: String) {
         val notification = synchronized(lock) {
-            appendLocked(line)
-            visibleRangeNotificationLocked()
+            val entry = appendLocked(line)
+            EntryNotification(
+                entry = entry,
+                listeners = entryListeners.toList(),
+                visibleRange = visibleRangeNotificationLocked(),
+            )
         }
-        notifyVisibleRange(notification)
+        notifyEntry(notification)
     }
 
     private fun append(record: LogcatRecord) {
         val rawLine = formatThreadtimeRecord(record)
         val expanded = expandElidedStackFrames(rawLine.lineSequence().toList())
         val notification = synchronized(lock) {
-            appendLocked(expanded)
-            visibleRangeNotificationLocked()
+            val entry = appendLocked(expanded)
+            EntryNotification(
+                entry = entry,
+                listeners = entryListeners.toList(),
+                visibleRange = visibleRangeNotificationLocked(),
+            )
         }
-        notifyVisibleRange(notification)
+        notifyEntry(notification)
+    }
+
+    private fun notifyEntry(notification: EntryNotification) {
+        notification.listeners.forEach { listener ->
+            runCatching { listener(notification.entry) }
+        }
+        notifyVisibleRange(notification.visibleRange)
     }
 
     private fun appendLocked(line: String): ServiceLogEntry {
@@ -450,15 +474,8 @@ internal object ServiceLogRecorder {
         )
 
         entries.addLast(entry)
-        totalCharacters += entry.tag.length + entry.rawLine.length
 
-        while (
-            entries.size > MAX_BUFFER_ENTRIES ||
-            totalCharacters > MAX_BUFFER_CHARACTERS && entries.size > 1
-        ) {
-            val removed = entries.removeFirst()
-            totalCharacters -= removed.tag.length + removed.rawLine.length
-        }
+        while (entries.size > MAX_BUFFER_ENTRIES) entries.removeFirst()
         return entry
     }
 
@@ -628,7 +645,7 @@ internal object ServiceLogRecorder {
             )
         }.onFailure { error ->
             appendLocked(
-                "[ServiceLogRecorder] 标准输出转入 logcat 失败：" +
+                "[$recorderName] 标准输出转入 logcat 失败：" +
                     (error.message ?: error.javaClass.name),
             )
         }
@@ -738,6 +755,16 @@ internal object ServiceLogRecorder {
         val message: String,
     )
 
+    private data class EntryNotification(
+        val entry: ServiceLogEntry,
+        val listeners: List<(ServiceLogEntry) -> Unit>,
+        val visibleRange: Triple<
+            ((oldestAvailableId: Long, latestId: Long) -> Unit)?,
+            Long,
+            Long,
+        >,
+    )
+
     private data class StackTraceContext(
         val enclosingFrames: List<String> = emptyList(),
         val frames: MutableList<String> = mutableListOf(),
@@ -769,45 +796,74 @@ internal object ServiceLogRecorder {
         val message: String,
     )
 
-    private val THREADTIME_PATTERN = Regex(
-        """^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEFAS])\s+(.+?)\s*:\s?(.*)$""",
-    )
-    private val LONG_EPOCH_HEADER_PATTERN = Regex(
-        """^\[\s*(\d+)\.(\d+)\s+(\d+):\s*(\d+)\s+([VDIWEFAS])/(.*?)\s*]$""",
-    )
-    private val THROWABLE_HEADER_PATTERN = Regex(
-        """^(?:Exception in thread\s+.+|(?:[A-Za-z_\x24][\w\x24]*\.)*[A-Za-z_\x24][\w\x24]*(?:Exception|Error|Throwable)(?::.*)?)$""",
-    )
-    private val STACK_FRAME_PATTERN = Regex("""^at\s+.+\(.+\)$""")
-    private val ENCLOSED_THROWABLE_PATTERN = Regex(
-        """^(?:Caused by:|Suppressed:|Wrapped by:)\s*.+$""",
-    )
-    private val ELIDED_FRAME_PATTERN = Regex("""^\.\.\.\s+(\d+)\s+more$""")
-    private val threadtimeDateFormat = SimpleDateFormat(
-        "MM-dd HH:mm:ss.SSS",
-        Locale.US,
+    private companion object {
+        val THREADTIME_PATTERN = Regex(
+            """^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEFAS])\s+(.+?)\s*:\s?(.*)$""",
+        )
+        val LONG_EPOCH_HEADER_PATTERN = Regex(
+            """^\[\s*(\d+)\.(\d+)\s+(\d+):\s*(\d+)\s+([VDIWEFAS])/(.*?)\s*]$""",
+        )
+        val THROWABLE_HEADER_PATTERN = Regex(
+            """^(?:Exception in thread\s+.+|(?:[A-Za-z_\x24][\w\x24]*\.)*[A-Za-z_\x24][\w\x24]*(?:Exception|Error|Throwable)(?::.*)?)$""",
+        )
+        val STACK_FRAME_PATTERN = Regex("""^at\s+.+\(.+\)$""")
+        val ENCLOSED_THROWABLE_PATTERN = Regex(
+            """^(?:Caused by:|Suppressed:|Wrapped by:)\s*.+$""",
+        )
+        val ELIDED_FRAME_PATTERN = Regex("""^\.\.\.\s+(\d+)\s+more$""")
+        val threadtimeDateFormat = SimpleDateFormat(
+            "MM-dd HH:mm:ss.SSS",
+            Locale.US,
+        )
+
+        const val MAX_LOGCAT_MESSAGE_CHARACTERS = 3_000
+        const val MAX_BUFFER_ENTRIES = 50_000
+        const val STACK_TRACE_SPACES_PER_INDENT = 4
+        const val LOGCAT_BOUNDARY_LOOKBACK_MILLIS = 1_000L
+        const val LOGCAT_BUFFER_MARKER_PREFIX = "--------- beginning of"
+        const val PROTOBUF_SIZE_BYTES = 8
+        const val MAX_PROTOBUF_RECORD_BYTES = 1024 * 1024
+        const val PROTOBUF_NANOSECOND_DIGITS = 9
+        const val PROTOBUF_WIRE_TYPE_MASK = 0x07
+        const val PROTOBUF_VARINT_WIRE_TYPE = 0
+        const val PROTOBUF_FIXED_64_WIRE_TYPE = 1
+        const val PROTOBUF_LENGTH_DELIMITED_WIRE_TYPE = 2
+        const val PROTOBUF_FIXED_32_WIRE_TYPE = 5
+        const val PROTO_TIME_SEC_FIELD = 1
+        const val PROTO_TIME_NSEC_FIELD = 2
+        const val PROTO_PRIORITY_FIELD = 3
+        const val PROTO_PID_FIELD = 5
+        const val PROTO_TID_FIELD = 6
+        const val PROTO_TAG_FIELD = 7
+        const val PROTO_MESSAGE_FIELD = 8
+    }
+}
+
+/** 两种服务侧日志来源共用同一组进程级实例，入口和 Binder 服务均可幂等启动。 */
+internal object ServiceLogRecorders {
+    val service = LogcatRecorder(
+        recorderName = "ServiceLogRecorder",
+        threadName = "toolbox-service-logcat",
+        startMessage = "开始采集服务日志，pid=${Process.myPid()}",
+        boundaryTag = "SvcLogBoundary",
+        processId = Process.myPid(),
+        redirectStandardStreams = true,
     )
 
-    private const val MAX_LOGCAT_MESSAGE_CHARACTERS = 3_000
-    private const val MAX_BUFFER_ENTRIES = 4_000
-    private const val MAX_BUFFER_CHARACTERS = 512 * 1024
-    private const val STACK_TRACE_SPACES_PER_INDENT = 4
-    private const val LOGCAT_BOUNDARY_LOOKBACK_MILLIS = 1_000L
-    private const val LOGCAT_BOUNDARY_TAG = "SvcLogBoundary"
-    private const val LOGCAT_BUFFER_MARKER_PREFIX = "--------- beginning of"
-    private const val PROTOBUF_SIZE_BYTES = 8
-    private const val MAX_PROTOBUF_RECORD_BYTES = 1024 * 1024
-    private const val PROTOBUF_NANOSECOND_DIGITS = 9
-    private const val PROTOBUF_WIRE_TYPE_MASK = 0x07
-    private const val PROTOBUF_VARINT_WIRE_TYPE = 0
-    private const val PROTOBUF_FIXED_64_WIRE_TYPE = 1
-    private const val PROTOBUF_LENGTH_DELIMITED_WIRE_TYPE = 2
-    private const val PROTOBUF_FIXED_32_WIRE_TYPE = 5
-    private const val PROTO_TIME_SEC_FIELD = 1
-    private const val PROTO_TIME_NSEC_FIELD = 2
-    private const val PROTO_PRIORITY_FIELD = 3
-    private const val PROTO_PID_FIELD = 5
-    private const val PROTO_TID_FIELD = 6
-    private const val PROTO_TAG_FIELD = 7
-    private const val PROTO_MESSAGE_FIELD = 8
+    val systemWifi = LogcatRecorder(
+        recorderName = "SystemWifiLogRecorder",
+        threadName = "toolbox-system-wifi-logcat",
+        startMessage = "开始采集系统wifi日志",
+        boundaryTag = "WifiLogBoundary",
+        filterSpecs = listOf(
+            "wpa_supplicant:V",
+            "WifiLogBoundary:V",
+            "*:S",
+        ),
+    )
+
+    fun start() {
+        service.start()
+        systemWifi.start()
+    }
 }

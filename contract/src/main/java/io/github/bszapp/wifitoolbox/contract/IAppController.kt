@@ -6,6 +6,7 @@ import io.github.bszapp.wifitoolbox.contract.log.IServiceLogController
 import io.github.bszapp.wifitoolbox.contract.settings.ISettingsManager
 import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.terminal.ITerminalController
+import io.github.bszapp.wifitoolbox.contract.task.ITaskController
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,6 +16,7 @@ interface IAppController {
     val wifiList: IWifiListController
     val serviceLogs: IServiceLogController
     val terminals: ITerminalController
+    val tasks: ITaskController
     val settings: ISettingsManager
     val containers: IContainerController
     val errors: SharedFlow<AppError>

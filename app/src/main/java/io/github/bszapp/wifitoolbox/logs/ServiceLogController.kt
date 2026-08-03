@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,43 +22,50 @@ class ServiceLogController(
     private val scope: CoroutineScope,
 ) : IServiceLogController {
     private val lock = Any()
+    private val sourceStates = LogSource.entries.associateWith { LogSourceState() }
 
-    private val _entries = MutableStateFlow<List<ServiceLogEntry>>(emptyList())
-    override val entries: StateFlow<List<ServiceLogEntry>> = _entries.asStateFlow()
-
-    private val _latestId = MutableStateFlow(0L)
-    override val latestId: StateFlow<Long> = _latestId.asStateFlow()
-
-    private val _rawViewEnabled = MutableStateFlow(false)
-    override val rawViewEnabled: StateFlow<Boolean> = _rawViewEnabled.asStateFlow()
+    override val entries: StateFlow<List<ServiceLogEntry>> =
+        state(LogSource.Service).entries
+    override val latestId: StateFlow<Long> =
+        state(LogSource.Service).latestId
+    override val rawViewEnabled: StateFlow<Boolean> =
+        state(LogSource.Service).rawViewEnabled
+    override val systemWifiEntries: StateFlow<List<ServiceLogEntry>> =
+        state(LogSource.SystemWifi).entries
+    override val systemWifiLatestId: StateFlow<Long> =
+        state(LogSource.SystemWifi).latestId
+    override val systemWifiRawViewEnabled: StateFlow<Boolean> =
+        state(LogSource.SystemWifi).rawViewEnabled
 
     private var activeBinding: Binding? = null
 
     fun connect(service: IMainService) {
-        val updates = Channel<ServiceLogRange>(Channel.CONFLATED)
         lateinit var binding: Binding
         val callback = object : IServiceLogCallback.Stub() {
             override fun onServiceLogRangeChanged(
                 oldestAvailableId: Long,
                 latestId: Long,
             ) {
-                if (isCurrent(binding)) {
-                    updates.trySend(ServiceLogRange(oldestAvailableId, latestId))
-                }
+                submitRange(binding, LogSource.Service, oldestAvailableId, latestId)
+            }
+
+            override fun onSystemWifiLogRangeChanged(
+                oldestAvailableId: Long,
+                latestId: Long,
+            ) {
+                submitRange(binding, LogSource.SystemWifi, oldestAvailableId, latestId)
             }
         }
         binding = Binding(
             service = service,
             callback = callback,
-            updates = updates,
         )
 
         val previous = synchronized(lock) {
             activeBinding.also { activeBinding = binding }
         }
         release(previous)
-        _entries.value = emptyList()
-        _latestId.value = 0L
+        clearLocalEntries()
 
         binding.job = scope.launch(Dispatchers.IO) {
             try {
@@ -67,13 +75,19 @@ class ServiceLogController(
                     binding.registered = true
                 }
 
-                for (range in updates) {
-                    if (!isCurrent(binding)) break
-                    syncTo(binding, range)
+                coroutineScope {
+                    LogSource.entries.forEach { source ->
+                        launch {
+                            for (range in binding.updates.getValue(source)) {
+                                if (!isCurrent(binding)) break
+                                syncTo(binding, source, range)
+                            }
+                        }
+                    }
                 }
             } catch (error: Throwable) {
                 if (isActive && isCurrent(binding)) {
-                    Log.w(TAG, "同步 Service 日志失败：${error.message}", error)
+                    Log.w(TAG, "同步日志失败：${error.message}", error)
                 }
             }
         }
@@ -84,61 +98,91 @@ class ServiceLogController(
             activeBinding.also { activeBinding = null }
         }
         release(previous)
-        _entries.value = emptyList()
-        _latestId.value = 0L
+        clearLocalEntries()
     }
 
-    override fun clear() {
+    override fun clear() = clear(LogSource.Service)
+
+    override fun clearSystemWifi() = clear(LogSource.SystemWifi)
+
+    override fun setRawViewEnabled(enabled: Boolean) {
+        state(LogSource.Service).mutableRawViewEnabled.value = enabled
+    }
+
+    override fun setSystemWifiRawViewEnabled(enabled: Boolean) {
+        state(LogSource.SystemWifi).mutableRawViewEnabled.value = enabled
+    }
+
+    private fun clear(source: LogSource) {
         val binding = synchronized(lock) { activeBinding } ?: return
         scope.launch(Dispatchers.IO) {
             if (isCurrent(binding) && binding.service.asBinder().isBinderAlive) {
-                runCatching { binding.service.clearServiceLogs() }
-                    .onFailure { error ->
-                        if (isCurrent(binding)) {
-                            Log.w(TAG, "请求清空 Service 日志失败：${error.message}", error)
-                        }
+                runCatching {
+                    when (source) {
+                        LogSource.Service -> binding.service.clearServiceLogs()
+                        LogSource.SystemWifi -> binding.service.clearSystemWifiLogs()
                     }
+                }.onFailure { error ->
+                    if (isCurrent(binding)) {
+                        Log.w(TAG, "请求清空${source.displayName}失败：${error.message}", error)
+                    }
+                }
             }
         }
     }
 
-    override fun setRawViewEnabled(enabled: Boolean) {
-        _rawViewEnabled.value = enabled
+    private fun submitRange(
+        binding: Binding,
+        source: LogSource,
+        oldestAvailableId: Long,
+        latestId: Long,
+    ) {
+        if (isCurrent(binding)) {
+            binding.updates.getValue(source).trySend(
+                LogRange(oldestAvailableId, latestId),
+            )
+        }
     }
 
-    private suspend fun syncTo(binding: Binding, announcedRange: ServiceLogRange) {
+    private suspend fun syncTo(
+        binding: Binding,
+        source: LogSource,
+        announcedRange: LogRange,
+    ) {
+        val state = state(source)
         var oldestAvailableId = announcedRange.oldestAvailableId
         var targetId = announcedRange.latestId
-        applyVisibleRange(binding, oldestAvailableId, targetId)
+        applyVisibleRange(binding, state, oldestAvailableId, targetId)
 
         while (isCurrent(binding) && oldestAvailableId <= targetId) {
-            var localEntries = _entries.value
+            var localEntries = state.mutableEntries.value
             val fromId = maxOf(
                 oldestAvailableId,
-                localEntries.lastOrNull()?.id?.plus(1L)
-                    ?: maxOf(oldestAvailableId, targetId - MAX_APP_ENTRIES + 1L),
+                localEntries.lastOrNull()?.id?.plus(1L) ?: oldestAvailableId,
             )
             if (fromId > targetId) return
 
             val toId = min(fromId + FETCH_SIZE - 1L, targetId)
-            val descriptor = binding.service.getServiceLogs(fromId, toId)
+            val descriptor = when (source) {
+                LogSource.Service -> binding.service.getServiceLogs(fromId, toId)
+                LogSource.SystemWifi -> binding.service.getSystemWifiLogs(fromId, toId)
+            }
             val batch = ServiceLogTransport.decode(descriptor)
             if (!isCurrent(binding)) return
 
             oldestAvailableId = maxOf(oldestAvailableId, batch.oldestAvailableId)
             targetId = maxOf(targetId, batch.latestId)
-            applyVisibleRange(binding, oldestAvailableId, targetId)
+            applyVisibleRange(binding, state, oldestAvailableId, targetId)
             if (oldestAvailableId > targetId) return
 
-            localEntries = _entries.value
-
+            localEntries = state.mutableEntries.value
             val fetched = batch.entries.filter { it.id >= oldestAvailableId }
             if (fetched.isEmpty()) {
                 if (fromId < oldestAvailableId) continue
                 return
             }
 
-            val merged = if (
+            state.mutableEntries.value = if (
                 localEntries.isEmpty() ||
                 fetched.first().id == localEntries.last().id + 1L
             ) {
@@ -146,30 +190,39 @@ class ServiceLogController(
             } else {
                 fetched
             }
-            _entries.value = merged.takeLast(MAX_APP_ENTRIES)
         }
     }
 
     private fun applyVisibleRange(
         binding: Binding,
+        state: LogSourceState,
         oldestAvailableId: Long,
         latestId: Long,
     ) {
         if (!isCurrent(binding)) return
-        _entries.value = if (oldestAvailableId > latestId) {
+        state.mutableEntries.value = if (oldestAvailableId > latestId) {
             emptyList()
         } else {
-            _entries.value.dropWhile { it.id < oldestAvailableId }
+            state.mutableEntries.value.dropWhile { it.id < oldestAvailableId }
         }
-        if (latestId > _latestId.value) _latestId.value = latestId
+        if (latestId > state.mutableLatestId.value) state.mutableLatestId.value = latestId
     }
+
+    private fun clearLocalEntries() {
+        sourceStates.values.forEach { state ->
+            state.mutableEntries.value = emptyList()
+            state.mutableLatestId.value = 0L
+        }
+    }
+
+    private fun state(source: LogSource): LogSourceState = sourceStates.getValue(source)
 
     private fun isCurrent(binding: Binding): Boolean =
         synchronized(lock) { activeBinding === binding }
 
     private fun release(binding: Binding?) {
         if (binding == null) return
-        binding.updates.close()
+        binding.updates.values.forEach { it.close() }
         binding.job?.cancel()
         scope.launch(Dispatchers.IO) {
             synchronized(binding.registrationLock) {
@@ -183,23 +236,37 @@ class ServiceLogController(
         }
     }
 
+    private class LogSourceState {
+        val mutableEntries = MutableStateFlow<List<ServiceLogEntry>>(emptyList())
+        val entries = mutableEntries.asStateFlow()
+        val mutableLatestId = MutableStateFlow(0L)
+        val latestId = mutableLatestId.asStateFlow()
+        val mutableRawViewEnabled = MutableStateFlow(false)
+        val rawViewEnabled = mutableRawViewEnabled.asStateFlow()
+    }
+
     private class Binding(
         val service: IMainService,
         val callback: IServiceLogCallback,
-        val updates: Channel<ServiceLogRange>,
+        val updates: Map<LogSource, Channel<LogRange>> =
+            LogSource.entries.associateWith { Channel(Channel.CONFLATED) },
         val registrationLock: Any = Any(),
         @Volatile var registered: Boolean = false,
         @Volatile var job: Job? = null,
     )
 
-    private data class ServiceLogRange(
+    private data class LogRange(
         val oldestAvailableId: Long,
         val latestId: Long,
     )
 
+    private enum class LogSource(val displayName: String) {
+        Service("服务日志"),
+        SystemWifi("系统wifi日志"),
+    }
+
     companion object {
         private const val TAG = "ServiceLogController"
         private const val FETCH_SIZE = 500L
-        private const val MAX_APP_ENTRIES = 4_000
     }
 }

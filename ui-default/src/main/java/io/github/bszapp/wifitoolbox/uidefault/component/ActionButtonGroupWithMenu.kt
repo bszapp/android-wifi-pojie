@@ -1,5 +1,6 @@
 package io.github.bszapp.wifitoolbox.uidefault.component
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -41,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -102,6 +104,8 @@ private fun animatedMenuItemShapes(
 data class ActionButtonConfig(
     val icon: ImageVector,
     val text: String,
+    val containerColor: Color? = null,
+    val contentColor: Color? = null,
     val onClick: () -> Unit,
 )
 
@@ -136,6 +140,31 @@ fun ActionButtonGroupWithMenu(
     onMenuExpandedChange: (Boolean) -> Unit = {},
 ) {
     val groupInteractionSource = remember { MutableInteractionSource() }
+    val customContainerColor = buttonConfig.containerColor
+    val customContentColor = buttonConfig.contentColor
+    val leadingButtonColors = if (customContainerColor != null && customContentColor != null) {
+        ToggleButtonDefaults.toggleButtonColors(
+            containerColor = customContainerColor,
+            contentColor = customContentColor,
+            checkedContainerColor = customContainerColor,
+            checkedContentColor = customContentColor,
+        )
+    } else {
+        ToggleButtonDefaults.toggleButtonColors()
+    }
+    val trailingButtonColors = if (customContainerColor != null && customContentColor != null) {
+        ToggleButtonDefaults.toggleButtonColors(
+            containerColor = customContainerColor,
+            contentColor = customContentColor,
+            checkedContainerColor = customContainerColor,
+            checkedContentColor = customContentColor,
+        )
+    } else {
+        ToggleButtonDefaults.toggleButtonColors(
+            checkedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+            checkedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        )
+    }
 
     Row(
         modifier = modifier,
@@ -146,18 +175,26 @@ fun ActionButtonGroupWithMenu(
             checked = false,
             onCheckedChange = { buttonConfig.onClick() },
             shapes = ButtonGroupDefaults.connectedLeadingButtonShapes(),
+            colors = leadingButtonColors,
             contentPadding = PaddingValues(horizontal = 12.dp),
             modifier = Modifier
                 .requiredWidthIn(min = 0.dp)
                 .height(40.dp),
         ) {
-            Icon(
-                imageVector = buttonConfig.icon,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.size(6.dp))
-            Text(buttonConfig.text)
+            AnimatedContent(
+                targetState = buttonConfig.icon to buttonConfig.text,
+                label = "ActionButtonContent",
+            ) { (icon, text) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.size(6.dp))
+                    Text(text)
+                }
+            }
         }
 
         // ── 右侧更多按钮 + 下拉菜单 ──────────────────────
@@ -173,10 +210,7 @@ fun ActionButtonGroupWithMenu(
                     checked = menuExpanded,
                     onCheckedChange = onMenuExpandedChange,
                     shapes = ButtonGroupDefaults.connectedTrailingButtonShapes(),
-                    colors = ToggleButtonDefaults.toggleButtonColors(
-                        checkedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                        checkedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    ),
+                    colors = trailingButtonColors,
                     contentPadding = PaddingValues(horizontal = 4.dp),
                     modifier = Modifier
                         .requiredWidthIn(min = 0.dp)

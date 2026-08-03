@@ -3,6 +3,7 @@ package io.github.bszapp.wifitoolbox.service
 import android.os.Process
 import android.system.Os
 import android.system.OsConstants
+import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileInputStream
@@ -74,7 +75,7 @@ internal class ContainerTerminalController(
                 val rootfs = File(rootfsPath)
                 val runtime = File(runtimePath)
                 val terminal = File(terminalPath)
-                require(rootfsShellPresent(rootfs)) { "容器系统尚未安装" }
+                require(isContainerSystemInstalled(rootfs)) { "容器系统尚未安装" }
                 require(terminal.isFile && terminal.canExecute()) {
                     "libterminal.so 不可执行: ${terminal.absolutePath}"
                 }
@@ -234,13 +235,6 @@ internal class ContainerTerminalController(
         Os.mkfifo(eventPipe.absolutePath, 384)
         synchronized(lock) { pipeDirectory = directory }
         return PipeFiles(commandPipe, eventPipe)
-    }
-
-    private fun rootfsShellPresent(rootfs: File): Boolean {
-        return runCatching {
-            val type = Os.lstat(File(rootfs, "bin/sh").absolutePath).st_mode and OsConstants.S_IFMT
-            type == OsConstants.S_IFREG || type == OsConstants.S_IFLNK
-        }.getOrDefault(false)
     }
 
     private fun readEvents(input: FileInputStream) {

@@ -8,6 +8,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.RemoteCallbackList
 import android.util.Log
@@ -20,6 +21,7 @@ import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 统一处理 App 与 service 之间的通信：调用方校验、Provider 投递 Binder、callback 预留通道。
@@ -38,15 +40,16 @@ class ServiceCommunication(
     private val serviceLogCallbacks = RemoteCallbackList<IServiceLogCallback>()
     private val containerTerminalCallbacks = RemoteCallbackList<IContainerTerminalCallback>()
     private val terminalManagerCallbacks = RemoteCallbackList<ITerminalManagerCallback>()
-    private val serviceLogRangeLock = Any()
-    private var pendingServiceLogRange = ServiceLogRange(1L, 0L, 0L)
-    private val serviceLogDeliveryScheduled = AtomicBoolean(false)
+    private val logRangeLock = Any()
+    private val pendingLogRanges = mutableMapOf<LogSource, ServiceLogRange>()
+    private val logDeliveryScheduled = AtomicBoolean(false)
     private val terminalLogRangeLock = Any()
     private val pendingTerminalLogRanges = mutableMapOf<Long, TerminalLogRangeSnapshot>()
     private val terminalLogDeliveryScheduled = AtomicBoolean(false)
     private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
     }
+    private val snapshotGeneration = AtomicLong(0L)
     private val publisherLock = Any()
     private val sdk = Build.VERSION.SDK_INT
 
@@ -231,50 +234,88 @@ class ServiceCommunication(
         oldestAvailableId: Long,
         latestId: Long,
     ) {
-        runCatching { callback.onServiceLogRangeChanged(oldestAvailableId, latestId) }
-            .onFailure { serviceLogCallbacks.unregister(callback) }
+        pushLogRangeChanged(callback, LogSource.Service, oldestAvailableId, latestId)
+    }
+
+    fun pushSystemWifiLogRangeChanged(
+        callback: IServiceLogCallback,
+        oldestAvailableId: Long,
+        latestId: Long,
+    ) {
+        pushLogRangeChanged(callback, LogSource.SystemWifi, oldestAvailableId, latestId)
     }
 
     fun broadcastServiceLogRangeChanged(oldestAvailableId: Long, latestId: Long) {
-        synchronized(serviceLogRangeLock) {
-            pendingServiceLogRange = ServiceLogRange(
-                oldestAvailableId = maxOf(
-                    pendingServiceLogRange.oldestAvailableId,
-                    oldestAvailableId,
-                ),
-                latestId = maxOf(pendingServiceLogRange.latestId, latestId),
-                generation = pendingServiceLogRange.generation + 1L,
-            )
-        }
-        scheduleServiceLogDelivery()
+        broadcastLogRangeChanged(LogSource.Service, oldestAvailableId, latestId)
     }
 
-    private fun scheduleServiceLogDelivery() {
-        if (!serviceLogDeliveryScheduled.compareAndSet(false, true)) return
+    fun broadcastSystemWifiLogRangeChanged(oldestAvailableId: Long, latestId: Long) {
+        broadcastLogRangeChanged(LogSource.SystemWifi, oldestAvailableId, latestId)
+    }
+
+    private fun pushLogRangeChanged(
+        callback: IServiceLogCallback,
+        source: LogSource,
+        oldestAvailableId: Long,
+        latestId: Long,
+    ) {
+        runCatching {
+            when (source) {
+                LogSource.Service -> callback.onServiceLogRangeChanged(
+                    oldestAvailableId,
+                    latestId,
+                )
+                LogSource.SystemWifi -> callback.onSystemWifiLogRangeChanged(
+                    oldestAvailableId,
+                    latestId,
+                )
+            }
+        }.onFailure { serviceLogCallbacks.unregister(callback) }
+    }
+
+    private fun broadcastLogRangeChanged(
+        source: LogSource,
+        oldestAvailableId: Long,
+        latestId: Long,
+    ) {
+        synchronized(logRangeLock) {
+            val pending = pendingLogRanges[source]
+            pendingLogRanges[source] = ServiceLogRange(
+                source = source,
+                oldestAvailableId = maxOf(pending?.oldestAvailableId ?: 1L, oldestAvailableId),
+                latestId = maxOf(pending?.latestId ?: 0L, latestId),
+            )
+        }
+        scheduleLogDelivery()
+    }
+
+    private fun scheduleLogDelivery() {
+        if (!logDeliveryScheduled.compareAndSet(false, true)) return
         deliveryExecutor.execute {
-            var deliveredGeneration = 0L
             try {
                 while (true) {
-                    val range = synchronized(serviceLogRangeLock) { pendingServiceLogRange }
+                    val ranges = synchronized(logRangeLock) {
+                        if (pendingLogRanges.isEmpty()) return@synchronized emptyList()
+                        pendingLogRanges.values.toList().also { pendingLogRanges.clear() }
+                    }
+                    if (ranges.isEmpty()) break
                     forEachServiceLogCallback { callback ->
-                        pushServiceLogRangeChanged(
-                            callback = callback,
-                            oldestAvailableId = range.oldestAvailableId,
-                            latestId = range.latestId,
-                        )
+                        ranges.forEach { range ->
+                            pushLogRangeChanged(
+                                callback = callback,
+                                source = range.source,
+                                oldestAvailableId = range.oldestAvailableId,
+                                latestId = range.latestId,
+                            )
+                        }
                     }
-                    deliveredGeneration = range.generation
-                    val caughtUp = synchronized(serviceLogRangeLock) {
-                        pendingServiceLogRange.generation == range.generation
-                    }
-                    if (caughtUp) break
                 }
             } finally {
-                serviceLogDeliveryScheduled.set(false)
-                val hasPendingRange = synchronized(serviceLogRangeLock) {
-                    pendingServiceLogRange.generation > deliveredGeneration
+                logDeliveryScheduled.set(false)
+                val hasPendingRange = synchronized(logRangeLock) {
+                    pendingLogRanges.isNotEmpty()
                 }
-                if (hasPendingRange) scheduleServiceLogDelivery()
+                if (hasPendingRange) scheduleLogDelivery()
             }
         }
     }
@@ -291,136 +332,248 @@ class ServiceCommunication(
         forEachCallback { callback -> pushWifiInformationSourceState(callback, value) }
     }
 
-    fun pushWifiInformationSourceState(
-        callback: IMainServiceCallback,
-        value: WifiInformationSourceState,
+    fun broadcastMonitorPcapExported(
+        requestId: String,
+        path: String,
+        fileName: String,
     ) {
-        runCatching {
-            callback.onWifiInformationSourceStateChanged(
-                value.source.wireValue,
-                value.initializing,
-            )
-        }.onFailure {
-            Log.w(TAG, "推送 Wi-Fi 信息源状态失败：${it.message}", it)
+        forEachCallback { callback ->
+            runCatching {
+                callback.onMonitorPcapExported(requestId, path, fileName)
+            }.onFailure {
+                Log.w(TAG, "推送监听模式 PCAP 导出结果失败：${it.message}", it)
+            }
+        }
+    }
+
+    fun broadcastMonitorHandshakeTestResult(requestId: String, outcome: Int) {
+        forEachCallback { callback ->
+            runCatching {
+                callback.onMonitorHandshakeTestResult(requestId, outcome)
+            }.onFailure {
+                Log.w(TAG, "推送监听模式握手包校验结果失败：${it.message}", it)
+            }
         }
     }
 
     fun pushWifiState(callback: IMainServiceCallback, state: WifiState) {
-        val delivery = clientStates.getOrPut(callback.asBinder()) { ClientDeliveryState() }
-        val shouldSend = synchronized(delivery) {
-            if (delivery.wifiStateInFlight) {
-                delivery.pendingWifiState = state
-                false
-            } else {
-                delivery.wifiStateInFlight = true
-                true
-            }
-        }
-        if (shouldSend) deliverWifiState(callback, delivery, state)
+        val client = clientStates[callback.asBinder()] ?: return
+        enqueueSnapshot(
+            callback = callback,
+            client = client,
+            delivery = client.wifiState,
+            value = state,
+            label = "WifiState",
+            encode = WifiParcelTransport::encodeWifiState,
+            notify = IMainServiceCallback::onWifiStateChanged,
+        )
     }
 
     fun pushSavedWifiList(callback: IMainServiceCallback, value: SavedWifiList) {
-        val delivery = clientStates.getOrPut(callback.asBinder()) { ClientDeliveryState() }
-        val shouldSend = synchronized(delivery) {
-            if (delivery.savedWifiListInFlight) {
-                delivery.pendingSavedWifiList = value
+        val client = clientStates[callback.asBinder()] ?: return
+        enqueueSnapshot(
+            callback = callback,
+            client = client,
+            delivery = client.savedWifiList,
+            value = value,
+            label = "SavedWifiList",
+            encode = WifiParcelTransport::encodeSavedWifiList,
+            notify = IMainServiceCallback::onSavedWifiListChanged,
+        )
+    }
+
+    fun pushWifiInformationSourceState(
+        callback: IMainServiceCallback,
+        value: WifiInformationSourceState,
+    ) {
+        val client = clientStates[callback.asBinder()] ?: return
+        enqueueSnapshot(
+            callback = callback,
+            client = client,
+            delivery = client.wifiInformationSourceState,
+            value = value,
+            label = "Wi-Fi 信息源状态",
+            encode = WifiParcelTransport::encodeWifiInformationSourceState,
+            notify = IMainServiceCallback::onWifiInformationSourceStateChanged,
+        )
+    }
+
+    fun getWifiStateChunk(
+        callback: IMainServiceCallback,
+        generation: Long,
+        chunkIndex: Int,
+    ): ParcelFileDescriptor = getSnapshotChunk(
+        callback = callback,
+        generation = generation,
+        chunkIndex = chunkIndex,
+        delivery = { it.wifiState },
+    )
+
+    fun getSavedWifiListChunk(
+        callback: IMainServiceCallback,
+        generation: Long,
+        chunkIndex: Int,
+    ): ParcelFileDescriptor = getSnapshotChunk(
+        callback = callback,
+        generation = generation,
+        chunkIndex = chunkIndex,
+        delivery = { it.savedWifiList },
+    )
+
+    fun getWifiInformationSourceStateChunk(
+        callback: IMainServiceCallback,
+        generation: Long,
+        chunkIndex: Int,
+    ): ParcelFileDescriptor = getSnapshotChunk(
+        callback = callback,
+        generation = generation,
+        chunkIndex = chunkIndex,
+        delivery = { it.wifiInformationSourceState },
+    )
+
+    fun acknowledgeWifiState(callback: IMainServiceCallback, generation: Long) =
+        acknowledgeSnapshot(
+            callback = callback,
+            generation = generation,
+            delivery = { it.wifiState },
+            label = "WifiState",
+            encode = WifiParcelTransport::encodeWifiState,
+            notify = IMainServiceCallback::onWifiStateChanged,
+        )
+
+    fun acknowledgeSavedWifiList(callback: IMainServiceCallback, generation: Long) =
+        acknowledgeSnapshot(
+            callback = callback,
+            generation = generation,
+            delivery = { it.savedWifiList },
+            label = "SavedWifiList",
+            encode = WifiParcelTransport::encodeSavedWifiList,
+            notify = IMainServiceCallback::onSavedWifiListChanged,
+        )
+
+    fun acknowledgeWifiInformationSourceState(
+        callback: IMainServiceCallback,
+        generation: Long,
+    ) = acknowledgeSnapshot(
+        callback = callback,
+        generation = generation,
+        delivery = { it.wifiInformationSourceState },
+        label = "Wi-Fi 信息源状态",
+        encode = WifiParcelTransport::encodeWifiInformationSourceState,
+        notify = IMainServiceCallback::onWifiInformationSourceStateChanged,
+    )
+
+    private fun <T> enqueueSnapshot(
+        callback: IMainServiceCallback,
+        client: ClientDeliveryState,
+        delivery: SnapshotDelivery<T>,
+        value: T,
+        label: String,
+        encode: (T) -> WifiParcelTransport.EncodedSnapshot,
+        notify: (IMainServiceCallback, Long, Int, Int) -> Unit,
+    ) {
+        val shouldEncode = synchronized(delivery) {
+            if (delivery.encoding || delivery.inFlight != null) {
+                delivery.pendingLatest = value
                 false
             } else {
-                delivery.savedWifiListInFlight = true
+                delivery.encoding = true
                 true
             }
         }
-        if (shouldSend) deliverSavedWifiList(callback, delivery, value)
-    }
-
-    fun acknowledgeWifiState(callback: IMainServiceCallback) = callFromApp {
-        val delivery = clientStates[callback.asBinder()] ?: return@callFromApp
-        val next = synchronized(delivery) {
-            delivery.wifiStateInFlight = false
-            delivery.pendingWifiState.also {
-                delivery.pendingWifiState = null
-                if (it != null) delivery.wifiStateInFlight = true
-            }
+        if (shouldEncode) {
+            encodeAndNotify(callback, client, delivery, value, label, encode, notify)
         }
-        if (next != null) deliverWifiState(callback, delivery, next)
     }
 
-    fun acknowledgeSavedWifiList(callback: IMainServiceCallback) = callFromApp {
-        val delivery = clientStates[callback.asBinder()] ?: return@callFromApp
-        val next = synchronized(delivery) {
-            delivery.savedWifiListInFlight = false
-            delivery.pendingSavedWifiList.also {
-                delivery.pendingSavedWifiList = null
-                if (it != null) delivery.savedWifiListInFlight = true
-            }
-        }
-        if (next != null) deliverSavedWifiList(callback, delivery, next)
-    }
-
-    private fun deliverWifiState(
+    private fun <T> encodeAndNotify(
         callback: IMainServiceCallback,
-        delivery: ClientDeliveryState,
-        state: WifiState,
+        client: ClientDeliveryState,
+        delivery: SnapshotDelivery<T>,
+        value: T,
+        label: String,
+        encode: (T) -> WifiParcelTransport.EncodedSnapshot,
+        notify: (IMainServiceCallback, Long, Int, Int) -> Unit,
     ) {
         deliveryExecutor.execute {
-            val result = runCatching {
-                val payload = WifiParcelTransport.encodeWifiState(state)
-                try {
-                    callback.onWifiStateChanged(payload)
-                } finally {
-                    payload.close()
+            val snapshot = runCatching { encode(value) }
+                .getOrElse { error ->
+                    Log.w(TAG, "编码 $label 快照失败：${error.message}", error)
+                    failSnapshotDelivery(callback, client)
+                    return@execute
+                }
+            val generation = snapshotGeneration.incrementAndGet()
+            val shouldNotify = synchronized(delivery) {
+                if (clientStates[callback.asBinder()] !== client) {
+                    delivery.encoding = false
+                    false
+                } else {
+                    check(delivery.inFlight == null) { "$label 已存在未确认快照" }
+                    delivery.inFlight = InFlightSnapshot(generation, snapshot)
+                    delivery.encoding = false
+                    true
                 }
             }
-            result.onFailure {
-                Log.w(TAG, "推送 WifiState 失败：${it.message}", it)
-                failWifiStateDelivery(callback, delivery)
+            if (!shouldNotify) return@execute
+
+            runCatching {
+                notify(callback, generation, snapshot.chunkCount, snapshot.totalBytes)
+            }.onFailure { error ->
+                Log.w(TAG, "通知 $label 快照失败：${error.message}", error)
+                failSnapshotDelivery(callback, client)
             }
         }
     }
 
-    private fun deliverSavedWifiList(
+    private fun getSnapshotChunk(
         callback: IMainServiceCallback,
-        delivery: ClientDeliveryState,
-        value: SavedWifiList,
-    ) {
-        deliveryExecutor.execute {
-            val result = runCatching {
-                val payload = WifiParcelTransport.encodeSavedWifiList(value)
-                try {
-                    callback.onSavedWifiListChanged(payload)
-                } finally {
-                    payload.close()
-                }
+        generation: Long,
+        chunkIndex: Int,
+        delivery: (ClientDeliveryState) -> SnapshotDelivery<*>,
+    ): ParcelFileDescriptor = callFromApp {
+        val client = clientStates[callback.asBinder()]
+            ?: throw IllegalStateException("Wi-Fi 数据回调未注册")
+        val snapshotDelivery = delivery(client)
+        val inFlight = synchronized(snapshotDelivery) {
+            snapshotDelivery.inFlight
+                ?: throw IllegalStateException("Wi-Fi 数据快照不存在")
+        }
+        require(inFlight.generation == generation) {
+            "Wi-Fi 数据快照 generation 已过期：$generation != ${inFlight.generation}"
+        }
+        inFlight.snapshot.openChunk(generation, chunkIndex)
+    }
+
+    private fun <T> acknowledgeSnapshot(
+        callback: IMainServiceCallback,
+        generation: Long,
+        delivery: (ClientDeliveryState) -> SnapshotDelivery<T>,
+        label: String,
+        encode: (T) -> WifiParcelTransport.EncodedSnapshot,
+        notify: (IMainServiceCallback, Long, Int, Int) -> Unit,
+    ) = callFromApp {
+        val client = clientStates[callback.asBinder()] ?: return@callFromApp
+        val snapshotDelivery = delivery(client)
+        val next = synchronized(snapshotDelivery) {
+            val inFlight = snapshotDelivery.inFlight ?: return@synchronized null
+            if (inFlight.generation != generation) return@synchronized null
+            snapshotDelivery.inFlight = null
+            snapshotDelivery.pendingLatest.also { pending ->
+                snapshotDelivery.pendingLatest = null
+                snapshotDelivery.encoding = pending != null
             }
-            result.onFailure {
-                Log.w(TAG, "推送 SavedWifiList 失败：${it.message}", it)
-                failSavedWifiListDelivery(callback, delivery)
-            }
+        }
+        if (next != null) {
+            encodeAndNotify(callback, client, snapshotDelivery, next, label, encode, notify)
         }
     }
 
-    private fun failWifiStateDelivery(
+    private fun failSnapshotDelivery(
         callback: IMainServiceCallback,
-        delivery: ClientDeliveryState,
+        client: ClientDeliveryState,
     ) {
-        synchronized(delivery) {
-            delivery.wifiStateInFlight = false
-            delivery.pendingWifiState = null
-        }
         callbacks.unregister(callback)
-        clientStates.remove(callback.asBinder())
-    }
-
-    private fun failSavedWifiListDelivery(
-        callback: IMainServiceCallback,
-        delivery: ClientDeliveryState,
-    ) {
-        synchronized(delivery) {
-            delivery.savedWifiListInFlight = false
-            delivery.pendingSavedWifiList = null
-        }
-        callbacks.unregister(callback)
-        clientStates.remove(callback.asBinder())
+        clientStates.remove(callback.asBinder(), client)
     }
 
     fun broadcastServiceError(
@@ -474,10 +627,15 @@ class ServiceCommunication(
     }
 
     private data class ServiceLogRange(
+        val source: LogSource,
         val oldestAvailableId: Long,
         val latestId: Long,
-        val generation: Long,
     )
+
+    private enum class LogSource {
+        Service,
+        SystemWifi,
+    }
 
     fun startBinderPublisher() {
         synchronized(publisherLock) {
@@ -722,11 +880,21 @@ class ServiceCommunication(
     }
 
     private class ClientDeliveryState {
-        var wifiStateInFlight: Boolean = false
-        var pendingWifiState: WifiState? = null
-        var savedWifiListInFlight: Boolean = false
-        var pendingSavedWifiList: SavedWifiList? = null
+        val wifiState = SnapshotDelivery<WifiState>()
+        val savedWifiList = SnapshotDelivery<SavedWifiList>()
+        val wifiInformationSourceState = SnapshotDelivery<WifiInformationSourceState>()
     }
+
+    private class SnapshotDelivery<T> {
+        var encoding: Boolean = false
+        var inFlight: InFlightSnapshot? = null
+        var pendingLatest: T? = null
+    }
+
+    private data class InFlightSnapshot(
+        val generation: Long,
+        val snapshot: WifiParcelTransport.EncodedSnapshot,
+    )
 
     companion object {
         private const val TAG = "ServiceCommunication"

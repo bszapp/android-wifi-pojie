@@ -1,5 +1,7 @@
 package io.github.bszapp.wifitoolbox.contract.wifilist
 
+import android.net.Uri
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /** App 侧只负责接收 Service 的原始数据并向 UI 转发命令。 */
@@ -7,6 +9,8 @@ interface IWifiListController {
     val state: StateFlow<WifiState?>
     val savedWifiList: StateFlow<SavedWifiList?>
     val informationSourceState: StateFlow<WifiInformationSourceState?>
+    val monitorPcapExports: SharedFlow<MonitorPcapExportResult>
+    val monitorHandshakeTestResults: SharedFlow<MonitorHandshakeTestResult>
 
     /** 请求 Service 只更新独立的 SavedWifiList。 */
     fun updateSavedNetworks()
@@ -21,6 +25,35 @@ interface IWifiListController {
     /** 请求 Service 切换扫描信息源；选择状态和初始化状态都由 Service 保存。 */
     fun setInformationSource(source: WifiInformationSource)
 
+    /** 请求 Service 使用指定脚本、目标信道和该信道的实际频率进入监听模式。 */
+    fun enterMonitorMode(command: String, targetChannel: Int, targetFrequencyMhz: Int)
+
+    fun exportAllMonitorPcap(): String
+
+    fun exportMonitorDevicePcap(
+        bssid: String,
+        deviceMac: String,
+        subtypeIds: Set<String>,
+    ): String
+
+    fun releaseMonitorPcapExport(path: String)
+
+    fun saveMonitorPcapExport(path: String, destination: Uri)
+
+    fun exportMonitorHandshakePcap(
+        bssid: String,
+        deviceMac: String,
+        handshakeId: String,
+    ): String
+
+    fun testMonitorHandshake(
+        bssid: String,
+        deviceMac: String,
+        handshakeId: String,
+        password: String,
+    ): String
+
     fun setWifiEnabled(enabled: Boolean)
     fun updateWifiConfig(networkId: Int, patch: WifiConfigPatch)
+    fun disconnectCurrentNetwork(networkId: Int)
 }

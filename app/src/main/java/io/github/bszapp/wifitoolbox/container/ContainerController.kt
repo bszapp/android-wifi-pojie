@@ -2,8 +2,10 @@ package io.github.bszapp.wifitoolbox.container
 
 import android.content.Context
 import android.content.res.AssetFileDescriptor
+import android.os.Build
 import android.os.DeadObjectException
 import android.os.IBinder
+import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
@@ -13,6 +15,7 @@ import io.github.bszapp.wifitoolbox.contract.container.ContainerState
 import io.github.bszapp.wifitoolbox.contract.container.ContainerSystemStatus
 import io.github.bszapp.wifitoolbox.contract.container.ContainerTerminalStatus
 import io.github.bszapp.wifitoolbox.contract.container.IContainerController
+import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
 import io.github.bszapp.wifitoolbox.service.IContainerTerminalCallback
 import io.github.bszapp.wifitoolbox.service.IMainService
 import java.io.File
@@ -42,8 +45,10 @@ class ContainerController(
     override val state: StateFlow<ContainerState> = _state.asStateFlow()
 
     private val operationLock = Any()
+    private val progressUpdateLock = Any()
     private val connectionLock = Any()
     private var operationRunning = false
+    private var lastProgressUpdateElapsedRealtime = 0L
     private var connectionGeneration = 0L
     private var service: IMainService? = null
     private var serviceBinder: IBinder? = null
@@ -51,7 +56,7 @@ class ContainerController(
 
     init {
         scope.launch(Dispatchers.IO) {
-            val installed = rootfsReady()
+            val installed = isContainerSystemInstalled(rootfsDirectory())
             _state.update {
                 it.copy(
                     systemStatus = if (installed) ContainerSystemStatus.INSTALLED else ContainerSystemStatus.NOT_INSTALLED,
@@ -107,6 +112,10 @@ class ContainerController(
     override fun install() = runContainerOperation(ContainerOperation.INSTALL) {
         deletePartialRootfs()
         extractRootfs(ContainerOperation.INSTALL)
+    }
+
+    override fun update() = runContainerOperation(ContainerOperation.UPDATE) {
+        extractRootfs(ContainerOperation.UPDATE)
     }
 
     override fun reset() = runContainerOperation(ContainerOperation.RESET) {
@@ -173,7 +182,10 @@ class ContainerController(
             if (operationRunning) return
             operationRunning = true
         }
-        val installedBefore = rootfsReady()
+        val installedBefore = isContainerSystemInstalled(rootfsDirectory())
+        synchronized(progressUpdateLock) {
+            lastProgressUpdateElapsedRealtime = SystemClock.elapsedRealtime()
+        }
         _state.update {
             it.copy(
                 systemStatus = ContainerSystemStatus.WORKING,
@@ -186,7 +198,7 @@ class ContainerController(
         scope.launch(Dispatchers.IO) {
             try {
                 block()
-                val installed = rootfsReady()
+                val installed = isContainerSystemInstalled(rootfsDirectory())
                 _state.update {
                     it.copy(
                         systemStatus = if (installed) ContainerSystemStatus.INSTALLED else ContainerSystemStatus.NOT_INSTALLED,
@@ -200,7 +212,7 @@ class ContainerController(
                     )
                 }
             } catch (error: Throwable) {
-                val installed = rootfsReady()
+                val installed = isContainerSystemInstalled(rootfsDirectory())
                 _state.update {
                     it.copy(
                         systemStatus = ContainerSystemStatus.ERROR,
@@ -237,7 +249,9 @@ class ContainerController(
         } finally {
             archive.cleanup()
         }
-        if (!rootfsReady()) throw IOException("rootfs 解压完成但校验失败")
+        if (!isContainerSystemInstalled(rootfsDirectory())) {
+            throw IOException("rootfs 解压完成但校验失败")
+        }
         updateProgress(operation, "正在解压", "", 1f)
     }
 
@@ -314,8 +328,8 @@ class ContainerController(
                 updateProgress(operation, message, relativePath(event.optString("path", target.path)), overall)
             }
         }
-        if (!process.waitFor(300, TimeUnit.SECONDS)) {//TODO:报错啦，下一行也是：Call requires API level 26 (current min is 24): java.lang.Process#waitFor
-            process.destroyForcibly()
+        if (!process.waitForCompat(300, TimeUnit.SECONDS)) {//TODO:报错啦，下一行也是：Call requires API level 26 (current min is 24): java.lang.Process#waitFor
+            process.destroyForciblyCompat()
             throw IOException("删除容器超时: ${target.absolutePath}")
         }
         if (process.exitValue() != 0) {
@@ -332,6 +346,16 @@ class ContainerController(
         detail: String,
         fraction: Float,
     ) {
+        val now = SystemClock.elapsedRealtime()
+        val shouldPublish = synchronized(progressUpdateLock) {
+            if (now - lastProgressUpdateElapsedRealtime < PROGRESS_UPDATE_INTERVAL_MILLIS) {
+                false
+            } else {
+                lastProgressUpdateElapsedRealtime = now
+                true
+            }
+        }
+        if (!shouldPublish) return
         _state.update {
             it.copy(
                 progress = ContainerProgress(message, detail, fraction.coerceIn(0f, 1f)),
@@ -444,14 +468,6 @@ class ContainerController(
     private fun rootfsDirectory(): File = File(requireNotNull(context.filesDir.parentFile), "rootfs")
     private fun runtimeDirectory(): File = File(context.noBackupFilesDir, "rftool-runtime")
 
-    private fun rootfsReady(): Boolean {
-        val shell = File(rootfsDirectory(), "bin/sh")
-        return runCatching {
-            val type = Os.lstat(shell.absolutePath).st_mode and OsConstants.S_IFMT
-            type == OsConstants.S_IFREG || type == OsConstants.S_IFLNK
-        }.getOrDefault(false)
-    }
-
     private fun pathExists(file: File): Boolean = runCatching { Os.lstat(file.absolutePath) }.isSuccess
 
     private fun resolveTerminalBinary(): File {
@@ -511,5 +527,34 @@ class ContainerController(
     private companion object {
         const val TAG = "ContainerController"
         const val ROOTFS_ASSET = "rootfs.tar.xz"
+        const val PROGRESS_UPDATE_INTERVAL_MILLIS = 10L
     }
 }
+
+private fun Process.waitForCompat(timeout: Long, unit: TimeUnit): Boolean {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        return waitFor(timeout, unit)
+    }
+
+    val deadline = SystemClock.elapsedRealtime() + unit.toMillis(timeout)
+    while (true) {
+        try {
+            exitValue()
+            return true
+        } catch (_: IllegalThreadStateException) {
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0L) return false
+            Thread.sleep(minOf(remaining, PROCESS_WAIT_POLL_INTERVAL_MILLIS))
+        }
+    }
+}
+
+private fun Process.destroyForciblyCompat() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        destroyForcibly()
+    } else {
+        destroy()
+    }
+}
+
+private const val PROCESS_WAIT_POLL_INTERVAL_MILLIS = 50L

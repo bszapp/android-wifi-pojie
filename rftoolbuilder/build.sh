@@ -46,6 +46,9 @@ for required in \
   "$DIST_DIR/alpine/ncurses-terminfo-base-6.5_p20251123-r0.apk" \
   "$DIST_DIR/alpine/pcsc-lite-libs-2.4.0-r1.apk" \
   "$DIST_DIR/alpine/python3-3.12.13-r0.apk" \
+  "$DIST_DIR/alpine/py3-cparser-2.22-r1.apk" \
+  "$DIST_DIR/alpine/py3-cffi-1.17.1-r1.apk" \
+  "$DIST_DIR/alpine/py3-cryptography-46.0.7-r0.apk" \
   "$DIST_DIR/alpine/py3-wcwidth-0.2.13-r1.apk" \
   "$DIST_DIR/alpine/libpcap-1.10.5-r1.apk" \
   "$DIST_DIR/alpine/readline-8.3.1-r0.apk" \
@@ -62,6 +65,8 @@ for required in \
   "$DIST_DIR/alpine/grep-3.12-r0.apk" \
   "$DIST_DIR/alpine/sqlite-3.51.2-r0.apk" \
   "$DIST_DIR/alpine/aircrack-ng-1.7-r3.apk" \
+  "$DIST_DIR/alpine/scapy-2.6.1-r0.apk" \
+  "$DIST_DIR/alpine/py3-pyroute2-0.9.5-r0.apk" \
   "$DIST_DIR/alpine/xz-libs-5.8.3-r0.apk" \
   "$DIST_DIR/alpine/zlib-1.3.2-r0.apk"; do
   [ -f "$required" ] || die "missing distfile: $required"
@@ -91,6 +96,9 @@ for pkg in \
   ncurses-terminfo-base-6.5_p20251123-r0.apk \
   pcsc-lite-libs-2.4.0-r1.apk \
   python3-3.12.13-r0.apk \
+  py3-cparser-2.22-r1.apk \
+  py3-cffi-1.17.1-r1.apk \
+  py3-cryptography-46.0.7-r0.apk \
   py3-wcwidth-0.2.13-r1.apk \
   libpcap-1.10.5-r1.apk \
   readline-8.3.1-r0.apk \
@@ -107,6 +115,8 @@ for pkg in \
   grep-3.12-r0.apk \
   sqlite-3.51.2-r0.apk \
   aircrack-ng-1.7-r3.apk \
+  scapy-2.6.1-r0.apk \
+  py3-pyroute2-0.9.5-r0.apk \
   xz-libs-5.8.3-r0.apk \
   zlib-1.3.2-r0.apk; do
   tar -xzf "$DIST_DIR/alpine/$pkg" -C "$ROOTFS_STAGE"

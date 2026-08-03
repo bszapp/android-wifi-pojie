@@ -25,10 +25,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import io.github.bszapp.wifitoolbox.contract.container.ContainerSystemStatus
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ContainerProgressSheet
-import io.github.bszapp.wifitoolbox.uidefault.screen.settings.InstallContainerConfirmationSheet
+import io.github.bszapp.wifitoolbox.uidefault.screen.settings.InstallContainerConfirmationDialog
+import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ResetContainerConfirmationDialog
+import io.github.bszapp.wifitoolbox.uidefault.screen.settings.UninstallContainerConfirmationDialog
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.Update
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
@@ -58,17 +60,45 @@ fun SettingsScreen(
 ) {
     val containerState by viewModel.containerState.collectAsStateWithLifecycle()
     var showInstallConfirmation by rememberSaveable { mutableStateOf(false) }
+    var showUpdateConfirmation by rememberSaveable { mutableStateOf(false) }
+    var showResetConfirmation by rememberSaveable { mutableStateOf(false) }
+    var showUninstallConfirmation by rememberSaveable { mutableStateOf(false) }
     val navigator = LocalNavigator.current
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
 
-    InstallContainerConfirmationSheet(
+    InstallContainerConfirmationDialog(
         show = showInstallConfirmation,
         onDismiss = { showInstallConfirmation = false },
         onConfirm = {
             showInstallConfirmation = false
             viewModel.installContainer()
+        },
+    )
+    InstallContainerConfirmationDialog(
+        show = showUpdateConfirmation,
+        title = "更新容器系统",
+        onDismiss = { showUpdateConfirmation = false },
+        onConfirm = {
+            showUpdateConfirmation = false
+            viewModel.updateContainer()
+        },
+    )
+    ResetContainerConfirmationDialog(
+        show = showResetConfirmation,
+        onDismiss = { showResetConfirmation = false },
+        onConfirm = {
+            showResetConfirmation = false
+            viewModel.resetContainer()
+        },
+    )
+    UninstallContainerConfirmationDialog(
+        show = showUninstallConfirmation,
+        onDismiss = { showUninstallConfirmation = false },
+        onConfirm = {
+            showUninstallConfirmation = false
+            viewModel.uninstallContainer()
         },
     )
     ContainerProgressSheet(state = containerState)
@@ -119,18 +149,12 @@ fun SettingsScreen(
                     }
                 }
                 item {
-                    //TODO:容器重置二次确认？还有需要一个更新容器功能
                     SmallTitle(text = "容器系统")
                     Card(modifier = Modifier.fillMaxWidth()) {
                         if (!containerState.installed) {
                             ArrowPreference(
                                 title = "安装容器系统",
-                                summary = when (containerState.systemStatus) {
-                                    ContainerSystemStatus.CHECKING -> "正在检查容器状态"
-                                    ContainerSystemStatus.ERROR -> containerState.errorMessage ?: "容器操作失败"
-                                    else -> "解压 APK 内置的容器系统"
-                                },
-                                enabled = containerState.systemStatus != ContainerSystemStatus.CHECKING && !containerState.isBusy,
+                                summary = "解压所选来源的容器系统",
                                 startAction = {
                                     Icon(
                                         Icons.Rounded.Inventory2,
@@ -143,9 +167,21 @@ fun SettingsScreen(
                             )
                         } else {
                             ArrowPreference(
+                                title = "更新容器系统",
+                                summary = "将所选来源覆盖安装到当前容器系统",
+                                startAction = {
+                                    Icon(
+                                        Icons.Rounded.Inventory2,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                        contentDescription = null,
+                                        tint = colorScheme.onBackground,
+                                    )
+                                },
+                                onClick = { showUpdateConfirmation = true },
+                            )
+                            ArrowPreference(
                                 title = "重置容器",
                                 summary = "删除现有容器并重新解压内置容器系统",
-                                enabled = !containerState.isBusy,
                                 startAction = {
                                     Icon(
                                         Icons.Rounded.RestartAlt,
@@ -154,12 +190,11 @@ fun SettingsScreen(
                                         tint = colorScheme.onBackground,
                                     )
                                 },
-                                onClick = viewModel::resetContainer,
+                                onClick = { showResetConfirmation = true },
                             )
                             ArrowPreference(
                                 title = "卸载容器",
                                 summary = "删除已解压的容器系统",
-                                enabled = !containerState.isBusy,
                                 startAction = {
                                     Icon(
                                         Icons.Rounded.DeleteForever,
@@ -168,7 +203,7 @@ fun SettingsScreen(
                                         tint = colorScheme.onBackground,
                                     )
                                 },
-                                onClick = viewModel::uninstallContainer,
+                                onClick = { showUninstallConfirmation = true },
                             )
                         }
                     }

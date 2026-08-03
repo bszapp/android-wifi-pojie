@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
+import io.github.bszapp.wifitoolbox.ui.component.DebugWatermark
 import io.github.bszapp.wifitoolbox.ui.startup.StartupScreen
 import io.github.bszapp.wifitoolbox.ui.theme.WifiToolboxMaterialTheme
 import io.github.bszapp.wifitoolbox.uidefault.DefaultUI
@@ -53,6 +54,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+            DebugWatermark()
         }
     }
 }

@@ -8,13 +8,16 @@ import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.vectorResource
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.uidefault.R
@@ -27,9 +30,14 @@ import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 @Composable
 fun WifiGroupCardActions(
     group: MergedWifiGroup,
+    isConnected: Boolean,
+    buttonContainerColor: Color?,
+    buttonContentColor: Color?,
     onConnect: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
     onOpenDetail: () -> Unit = {},
     onConnectWithConfig: (WifiConfiguration) -> Unit = {},
+    onEnterMonitorMode: () -> Unit = {},
     onUpdateConfig: (networkId: Int, patch: WifiConfigPatch) -> Unit = { _, _ -> },
 ) {
     var menuExpanded by rememberSaveable { mutableStateOf(false) }
@@ -122,13 +130,31 @@ fun WifiGroupCardActions(
                 )
             )
         }
+
+        add(
+            MenuGroupConfig(
+                title = null,
+                items = listOf(
+                    MenuItemConfig(
+                        title = "进入监听模式",
+                        icon = Icons.Outlined.Radar,
+                        onCheckedChange = {
+                            menuExpanded = false
+                            onEnterMonitorMode()
+                        },
+                    ),
+                ),
+            ),
+        )
     }
 
     ActionButtonGroupWithMenu(
         buttonConfig = ActionButtonConfig(
-            icon = Icons.Outlined.Link,
-            text = "连接",
-            onClick = onConnect,
+            icon = if (isConnected) Icons.Outlined.LinkOff else Icons.Outlined.Link,
+            text = if (isConnected) "断开" else "连接",
+            containerColor = buttonContainerColor,
+            contentColor = buttonContentColor,
+            onClick = if (isConnected) onDisconnect else onConnect,
         ),
         menuGroups = menuGroups,
         menuExpanded = menuExpanded,

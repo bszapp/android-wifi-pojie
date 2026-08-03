@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.IAppController
+import io.github.bszapp.wifitoolbox.uidefault.model.task.TaskTracker
 
 class DefaultViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -14,6 +15,7 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     val errors = controller.errors
     val serviceLogs = controller.serviceLogs
     val terminals = controller.terminals
+    val tasks = controller.tasks
     val containerState = controller.containers.state
 
     val startup = StartupUiState(controller, viewModelScope)
@@ -21,8 +23,10 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
         controller = controller,
         scope = viewModelScope,
     )
+    val taskTracker = TaskTracker(controller.tasks, viewModelScope)
 
     fun installContainer() = controller.containers.install()
+    fun updateContainer() = controller.containers.update()
     fun resetContainer() = controller.containers.reset()
     fun uninstallContainer() = controller.containers.uninstall()
 

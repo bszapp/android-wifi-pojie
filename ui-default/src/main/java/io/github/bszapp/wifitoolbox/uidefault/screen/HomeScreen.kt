@@ -91,7 +91,6 @@ fun HomeScreen(
 
     ServiceStatusDialog(
         show = showSheet,
-        title = if (active) "服务运行中" else "服务未激活",
         modeText = modeText,
         pidText = pidText,
         uidStr = uidStr ?: "未知",
@@ -303,6 +302,5 @@ internal fun permissionName(uid: Int?): String = when (uid) {
     0 -> "ROOT"
     1000 -> "System"
     2000 -> "Shell"
-    null -> "未知"
     else -> "未知"
 }

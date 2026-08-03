@@ -104,6 +104,9 @@ alpine/musl-1.2.5-r23.apk|6a3edd924ead1fad88a69e28c5775809af3026b322f58428001cd0
 alpine/ncurses-terminfo-base-6.5_p20251123-r0.apk|6952a6b39abaf7bbc498cb085f0f59bf23619b53b3f7328b08fe50c0198a2bd4|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/ncurses-terminfo-base-6.5_p20251123-r0.apk
 alpine/pcsc-lite-libs-2.4.0-r1.apk|8b436b649abc801ff52c943d5248e1e4085599193c3340a458ff32417325bab4|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/pcsc-lite-libs-2.4.0-r1.apk
 alpine/python3-3.12.13-r0.apk|ede3fca8b8339f8f4854a3b2a42fe7e1cc9594cca2951019a4c023546410e029|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/python3-3.12.13-r0.apk
+alpine/py3-cparser-2.22-r1.apk|17ef4d76fea481c22a92f3a0b579f03a0706155866912d35183c66394693f921|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/py3-cparser-2.22-r1.apk
+alpine/py3-cffi-1.17.1-r1.apk|c08ee98914e49e8624476fafb84d045b4f701a81ec16897c6271f5d6b60a3d8a|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/py3-cffi-1.17.1-r1.apk
+alpine/py3-cryptography-46.0.7-r0.apk|062c266f04e43db566dbac93fc808b968a0268b6672686c3a9e58682f97e0092|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/py3-cryptography-46.0.7-r0.apk
 alpine/py3-wcwidth-0.2.13-r1.apk|debb55542573c7db5e0f3162cffda6c1f616f0df1f086fa7bda65dc82be7f6df|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/py3-wcwidth-0.2.13-r1.apk
 alpine/libpcap-1.10.5-r1.apk|8ef83f428101a4cd8fa11f39987c4016e8b78f62ec5c79867482fe42025ed755|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libpcap-1.10.5-r1.apk
 alpine/readline-8.3.1-r0.apk|70d288a6c3d8daf19b10fb220120d2ebd6f154011c96ca5bc84923b658cb21f7|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/readline-8.3.1-r0.apk
@@ -120,6 +123,8 @@ alpine/pcre2-10.47-r0.apk||https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarc
 alpine/grep-3.12-r0.apk||https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/grep-3.12-r0.apk
 alpine/sqlite-3.51.2-r0.apk||https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/sqlite-3.51.2-r0.apk
 alpine/aircrack-ng-1.7-r3.apk||https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/aircrack-ng-1.7-r3.apk
+alpine/scapy-2.6.1-r0.apk|5dfaeb20a77b08279944a0217a4cc77a5985bc7d39c20ca30106b72249f70741|https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/scapy-2.6.1-r0.apk
+alpine/py3-pyroute2-0.9.5-r0.apk|b99dfda33f413685d244d4fd01bab81cbdea8246f6285ef829a6dee2e634b59e|https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/py3-pyroute2-0.9.5-r0.apk
 alpine/xz-libs-5.8.3-r0.apk|6123d4fc5be222318236887639047b844214f609e75abee6b4e6528f44d76be4|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/xz-libs-5.8.3-r0.apk
 alpine/zlib-1.3.2-r0.apk|ecda4cc94fd18f90182f1d3a615889df5e0db9cf78926d11627dd23e06d2e6e8|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/zlib-1.3.2-r0.apk
 EOF

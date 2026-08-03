@@ -1,9 +1,15 @@
 package io.github.bszapp.wifitoolbox.service
 
+import android.os.Build
+import android.os.SystemClock
 import android.util.Log
+import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogBatch
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry
+import io.github.bszapp.wifitoolbox.contract.terminal.TerminalOutputAccumulator
+import io.github.bszapp.wifitoolbox.contract.terminal.TerminalOutputUpdate
 import java.io.BufferedWriter
+import java.io.File
 import java.io.IOException
 import java.util.ArrayDeque
 import java.util.concurrent.CompletableFuture
@@ -69,8 +75,8 @@ internal class TerminalManager(
                             "终端进程创建后管理器已关闭，立即强制结束: " +
                                 "id=$terminalId command=$displayCommand",
                         )
-                        process.destroyForcibly()//TODO:Call requires API level 26 (current min is 24): java.lang.Process#destroyForcibly，下一行也是
-                        process.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                        process.destroyForciblyCompat()//TODO:Call requires API level 26 (current min is 24): java.lang.Process#destroyForcibly，下一行也是
+                        process.waitForCompat(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                         throw IllegalStateException("终端管理器已关闭")
                     }
 
@@ -104,6 +110,39 @@ internal class TerminalManager(
             "终端 $terminalId owner thread 不一致"
         }
         terminal.id
+    }
+
+    fun createChrootTerminal(
+        rootfsPath: String,
+        runtimePath: String,
+        terminalPath: String,
+        onExit: (terminalId: Long, exitCode: Int) -> Unit = { _, _ -> },
+    ): Long {
+        require(android.os.Process.myUid() == 0) { "Chroot 终端要求 Root 工作模式" }
+        val rootfs = File(rootfsPath)
+        val runtime = File(runtimePath)
+        val terminal = File(terminalPath)
+        require(isContainerSystemInstalled(rootfs)) { "容器系统尚未安装" }
+        require(terminal.isFile && terminal.canExecute()) {
+            "libterminal.so 不可执行: ${terminal.absolutePath}"
+        }
+        require(runtime.isDirectory || runtime.mkdirs()) {
+            "无法创建终端运行目录: ${runtime.absolutePath}"
+        }
+        return createTerminal(
+            command = listOf(
+                terminal.absolutePath,
+                "session",
+                "chroot",
+                "--rootfs",
+                rootfs.absolutePath,
+                "--runtime",
+                runtime.absolutePath,
+                "--host-path",
+                HOST_TOOL_PATH,
+            ),
+            onExit = onExit,
+        )
     }
 
     private fun awaitTerminalStart(startup: CompletableFuture<ManagedTerminal>): ManagedTerminal {
@@ -163,15 +202,15 @@ internal class TerminalManager(
                 "thread=${Thread.currentThread().name}",
         )
         terminal.process.destroy()
-        if (!terminal.process.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {//TODO:Call requires API level 26 (current min is 24): java.lang.Process#destroyForcibly，下面几行也有问题
+        if (!terminal.process.waitForCompat(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {//TODO:Call requires API level 26 (current min is 24): java.lang.Process#destroyForcibly，下面几行也有问题
             synchronized(terminal.lock) { terminal.forcedStop = true }
             Log.w(
                 TAG,
                 "终端在 ${STOP_TIMEOUT_MILLIS}ms 内未退出，执行强制结束: " +
                     "id=$terminalId reason=$reason",
             )
-            terminal.process.destroyForcibly()
-            if (!terminal.process.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            terminal.process.destroyForciblyCompat()
+            if (!terminal.process.waitForCompat(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                 Log.e(TAG, "强制结束后终端仍未确认退出: id=$terminalId reason=$reason")
             }
         }
@@ -185,6 +224,8 @@ internal class TerminalManager(
         synchronized(lock) { terminals.values.toList() }.map(ManagedTerminal::rangeSnapshot)
 
     fun getLogCount(terminalId: Long): Int = requireTerminal(terminalId).rangeSnapshot().lineCount
+
+    fun getInputPrompt(terminalId: Long): String? = requireTerminal(terminalId).inputPrompt()
 
     fun getLogRange(terminalId: Long): TerminalLogRangeSnapshot =
         requireTerminal(terminalId).rangeSnapshot()
@@ -222,11 +263,20 @@ internal class TerminalManager(
     private fun collectOutput(terminal: ManagedTerminal) {
         var exitCode = -1
         try {
-            terminal.process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+            terminal.process.inputStream.reader(Charsets.UTF_8).use { reader ->
+                val buffer = CharArray(DEFAULT_BUFFER_SIZE)
                 while (true) {
-                    val line = reader.readLine() ?: break
-                    Log.d(TAG, "终端 ${terminal.id}: $line")
-                    onTerminalLogRangeChanged(terminal.appendLog(line))
+                    val count = reader.read(buffer)
+                    if (count <= 0) break
+                    val update = terminal.outputAccumulator.consume(
+                        String(buffer, 0, count),
+                    )
+                    terminal.applyOutput(update)?.let { range ->
+                        update.completedLines
+                            .filter(String::isNotEmpty)
+                            .forEach { line -> Log.d(TAG, "终端 ${terminal.id}: $line") }
+                        onTerminalLogRangeChanged(range)
+                    }
                 }
             }
             exitCode = terminal.process.waitFor()
@@ -282,11 +332,13 @@ internal class TerminalManager(
     ) {
         val lock = Any()
         val logs = ArrayDeque<TerminalLogEntry>()
+        val outputAccumulator = TerminalOutputAccumulator()
         var nextLogId = 1L
         var logGeneration = 0L
         var stopping = false
         var forcedStop = false
         var stopReason: String? = null
+        var currentInputPrompt: String? = null
 
         fun exitState(): TerminalExitState = synchronized(lock) {
             TerminalExitState(
@@ -296,12 +348,22 @@ internal class TerminalManager(
             )
         }
 
-        fun appendLog(text: String): TerminalLogRangeSnapshot = synchronized(lock) {
-            logs.addLast(TerminalLogEntry(nextLogId++, text))
+        fun applyOutput(update: TerminalOutputUpdate): TerminalLogRangeSnapshot? = synchronized(lock) {
+            var changed = update.inputPromptChanged
+            update.completedLines.forEach { line ->
+                if (line.isNotEmpty()) {
+                    logs.addLast(TerminalLogEntry(nextLogId++, line))
+                    changed = true
+                }
+            }
             while (logs.size > MAX_LOG_LINES) logs.removeFirst()
+            currentInputPrompt = update.inputPrompt
+            if (!changed) return@synchronized null
             logGeneration++
             rangeSnapshotLocked()
         }
+
+        fun inputPrompt(): String? = synchronized(lock) { currentInputPrompt }
 
         fun clearLogs(): TerminalLogRangeSnapshot = synchronized(lock) {
             logs.clear()
@@ -337,9 +399,11 @@ internal class TerminalManager(
 
     companion object {
         private const val TAG = "TerminalManager"
-        private const val MAX_LOG_LINES = 5_000
+        private const val MAX_LOG_LINES = 50_000
         private const val STOP_TIMEOUT_MILLIS = 1_500L
         private const val OWNER_THREAD_JOIN_MILLIS = 1_500L
+        private const val HOST_TOOL_PATH =
+            "/system/bin:/system/xbin:/system_ext/bin:/product/bin:/vendor/bin:/odm/bin:/apex/com.android.runtime/bin"
 
         private fun formatCommand(command: List<String>): String = command.joinToString(" ") { value ->
             if (value.all { it.isLetterOrDigit() || it in "/._:-" }) {
@@ -360,6 +424,34 @@ internal class TerminalManager(
         }
     }
 }
+
+private fun Process.waitForCompat(timeout: Long, unit: TimeUnit): Boolean {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        return waitFor(timeout, unit)
+    }
+
+    val deadline = SystemClock.elapsedRealtime() + unit.toMillis(timeout)
+    while (true) {
+        try {
+            exitValue()
+            return true
+        } catch (_: IllegalThreadStateException) {
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0L) return false
+            Thread.sleep(minOf(remaining, PROCESS_WAIT_POLL_INTERVAL_MILLIS))
+        }
+    }
+}
+
+private fun Process.destroyForciblyCompat() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        destroyForcibly()
+    } else {
+        destroy()
+    }
+}
+
+private const val PROCESS_WAIT_POLL_INTERVAL_MILLIS = 50L
 
 private data class TerminalExitState(
     val stopRequested: Boolean,

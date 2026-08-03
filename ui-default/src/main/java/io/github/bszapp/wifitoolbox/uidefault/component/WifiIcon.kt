@@ -15,8 +15,9 @@ import androidx.compose.ui.unit.dp
 fun WifiIcon(
     modifier: Modifier = Modifier,
     level: Int = 0,
+    color: Color = MaterialTheme.colorScheme.onSurface,
 ) {
-    val baseIconColor = MaterialTheme.colorScheme.onSurface
+    val baseIconColor = color
 
     val activeAlpha = 1.0f
     val inactiveAlpha = 0.24f

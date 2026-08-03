@@ -3,6 +3,7 @@
 package io.github.bszapp.wifitoolbox.contract.wifilist
 
 import android.net.wifi.ScanResult
+import android.net.wifi.WifiInfo
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
@@ -25,6 +26,7 @@ sealed interface WifiState : Parcelable {
         data class Enabled(
             val scanResults: List<ScanResult>,
             val isScanning: Boolean,
+            val connection: WifiInfo?,
         ) : Data
     }
 

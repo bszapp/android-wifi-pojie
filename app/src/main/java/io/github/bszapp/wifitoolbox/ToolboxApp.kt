@@ -15,6 +15,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
 import io.github.bszapp.wifitoolbox.logs.ServiceLogController
 import io.github.bszapp.wifitoolbox.terminal.TerminalController
+import io.github.bszapp.wifitoolbox.task.TaskController
 import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
 import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
@@ -40,6 +41,7 @@ class ToolboxApp : Application(), IAppController {
     private lateinit var wifiListController: WifiListController
     private lateinit var serviceLogController: ServiceLogController
     private lateinit var terminalController: TerminalController
+    private lateinit var taskController: TaskController
     private lateinit var containerController: ContainerController
     override lateinit var settings: SettingsManager
         private set
@@ -80,6 +82,9 @@ class ToolboxApp : Application(), IAppController {
     override val terminals: TerminalController
         get() = terminalController
 
+    override val tasks: TaskController
+        get() = taskController
+
     override val containers: IContainerController
         get() = containerController
 
@@ -95,7 +100,15 @@ class ToolboxApp : Application(), IAppController {
             reportError = ::publishError,
         )
         serviceLogController = ServiceLogController(scope = appScope)
-        terminalController = TerminalController(scope = appScope)
+        terminalController = TerminalController(
+            context = this,
+            scope = appScope,
+            reportError = ::publishError,
+        )
+        taskController = TaskController(
+            scope = appScope,
+            reportError = ::publishError,
+        )
         containerController = ContainerController(
             context = this,
             scope = appScope,
@@ -115,12 +128,14 @@ class ToolboxApp : Application(), IAppController {
                 wifiListController.connect(service, androidApi)
                 serviceLogController.connect(service)
                 terminalController.connect(service)
+                taskController.connect(service)
                 containerController.connect(service)
             },
             onServiceDisconnected = {
                 wifiListController.disconnect()
                 serviceLogController.disconnect()
                 terminalController.disconnect()
+                taskController.disconnect()
                 containerController.disconnect()
             },
         )
@@ -192,6 +207,7 @@ class ToolboxApp : Application(), IAppController {
     override fun onTerminate() {
         super.onTerminate()
         predictiveBackController.stop()
+        terminalController.close()
         appScope.cancel()
     }
 

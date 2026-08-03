@@ -21,6 +21,7 @@ data class TerminalLogState(
     val latestId: Long = 0L,
     val lineCount: Int = 0,
     val entries: List<TerminalLogEntry> = emptyList(),
+    val inputPrompt: String? = null,
 )
 
 data class TerminalManagerState(

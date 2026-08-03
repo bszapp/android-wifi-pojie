@@ -4,10 +4,14 @@ package io.github.bszapp.wifitoolbox.uidefault.widget.wifilist
 
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -20,6 +24,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogWindowProvider
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
+import kotlinx.coroutines.launch
 
 // ── 详情底部弹窗 ──────────────────────────────────────────────────────────────
 
@@ -57,8 +64,6 @@ fun WifiDetailSheet(
             }
         }
         Column(modifier = Modifier.fillMaxWidth()) {
-
-            // ── 固定头部（不参与滚动）──
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -92,7 +97,7 @@ fun WifiDetailSheet(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "${group.networks.size} 个接入点" +
+                            text = "${group.accessPointCount} 个接入点" +
                                     if (group.savedWifiList.isNotEmpty()) " · ${group.savedWifiList.size} 条已保存配置" else "",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -102,63 +107,189 @@ fun WifiDetailSheet(
                 }
             }
 
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 16.dp)
-            ) {
-
-                // ── 接入点区域 ──
-                SectionHeader(
-                    icon = {
-                        Icon(
-                            Icons.Rounded.Router,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
+            if (group.connection != null) {
+                val pagerState = rememberPagerState(pageCount = { 2 })
+                val scope = rememberCoroutineScope()
+                SecondaryTabRow(selectedTabIndex = pagerState.currentPage) {
+                    listOf("网络详情", "连接信息").forEachIndexed { index, title ->
+                        Tab(
+                            selected = pagerState.currentPage == index,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
+                            text = { Text(title) },
                         )
-                    },
-                    title = "接入点",
-                    badge = group.networks.size.toString()
-                )
-
-                // 双列瀑布流卡片
-                TwoColumnCardFlow(
-                    items = group.networks,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                ) { ap ->
-                    ApCard(ap = ap)
-                }
-
-                // ── 已保存配置区域 ──
-                if (group.savedWifiList.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-
-                    SectionHeader(
-                        icon = {
-                            Icon(
-                                Icons.Rounded.Lock,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        },
-                        title = "已保存的配置",
-                        badge = group.savedWifiList.size.toString()
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        group.savedWifiList.forEach { config ->
-                            SavedWifiConfigCard(config = config)
-                        }
                     }
+                }
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                ) { page ->
+                    when (page) {
+                        0 -> WifiNetworkDetailPage(group)
+                        else -> WifiConnectionInfoPage(group.connection)
+                    }
+                }
+            } else {
+                WifiNetworkDetailPage(group)
+            }
+        }
+    }
+}
+
+@Composable
+private fun WifiNetworkDetailPage(group: MergedWifiGroup) {
+    val accessPoints = buildList<DetailAccessPoint> {
+        group.networks.forEach { add(DetailAccessPoint.Scanned(it)) }
+        group.virtualAccessPoint?.let { add(DetailAccessPoint.Virtual(it)) }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(top = 16.dp)
+            .padding(bottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding() + 16.dp),
+    ) {
+        SectionHeader(
+            icon = {
+                Icon(
+                    Icons.Rounded.Router,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+            },
+            title = "接入点",
+            badge = group.accessPointCount.toString(),
+        )
+
+        TwoColumnCardFlow(
+            items = accessPoints,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        ) { item ->
+            when (item) {
+                is DetailAccessPoint.Scanned -> ApCard(
+                    ap = item.value,
+                    isCurrent = group.isCurrentAccessPoint(item.value),
+                )
+                is DetailAccessPoint.Virtual -> VirtualApCard(item.value)
+            }
+        }
+
+        if (group.savedWifiList.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            SectionHeader(
+                icon = {
+                    Icon(
+                        Icons.Rounded.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                },
+                title = "已保存的配置",
+                badge = group.savedWifiList.size.toString(),
+            )
+            Spacer(Modifier.height(8.dp))
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                group.savedWifiList.forEach { config ->
+                    SavedWifiConfigCard(
+                        config = config,
+                        isCurrent = group.isCurrentConfiguration(config),
+                    )
                 }
             }
         }
+    }
+}
+
+private sealed interface DetailAccessPoint {
+    data class Scanned(val value: ScanResult) : DetailAccessPoint
+    data class Virtual(val value: WifiInfo) : DetailAccessPoint
+}
+
+@Composable
+private fun WifiConnectionInfoPage(info: WifiInfo) {
+    val rows = buildList {
+        add("状态" to "已连接")
+        add("SSID" to info.ssid.removeSurrounding("\""))
+        info.bssid?.takeIf { it.isNotBlank() }?.let { add("BSSID" to it) }
+        add("配置 ID" to info.networkId.toString())
+        info.macAddress?.takeIf { it.isNotBlank() }?.let { add("当前连接 MAC" to it) }
+        add("信号强度" to "${info.rssi} dBm")
+        add("频率" to "${info.frequency} MHz")
+        add("信道" to (frequencyToChannel(info.frequency)?.toString() ?: "未知"))
+        add("频段" to frequencyBand(info.frequency))
+        wifiSecurityType(info)?.let { add("安全类型" to it) }
+        add("Supplicant 状态" to info.supplicantState.name)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            add("Wi-Fi 标准" to wifiStandardName(info.wifiStandard))
+        }
+        if (info.linkSpeed >= 0) add("当前链路速率" to "${info.linkSpeed} Mbps")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (info.txLinkSpeedMbps >= 0) add("发送链路速率" to "${info.txLinkSpeedMbps} Mbps")
+            if (info.rxLinkSpeedMbps >= 0) add("接收链路速率" to "${info.rxLinkSpeedMbps} Mbps")
+        }
+        if (info.ipAddress != 0) add("IPv4 地址" to formatIpv4(info.ipAddress))
+        add("隐藏网络" to if (info.hiddenSSID) "是" else "否")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            info.apMldMacAddress?.let { add("AP MLD 地址" to it.toString()) }
+            if (info.apMloLinkId >= 0) add("MLO Link ID" to info.apMloLinkId.toString())
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 16.dp)
+            .padding(bottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                rows.forEachIndexed { index, (label, value) ->
+                    if (index > 0) {
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f),
+                        )
+                    }
+                    ConnectionInfoRow(label, value)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnectionInfoRow(label: String, value: String) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            softWrap = true,
+        )
     }
 }
 
@@ -242,16 +373,41 @@ private fun <T> TwoColumnCardFlow(
 // ── 单个 AP 卡片 ──────────────────────────────────────────────────────────────
 
 @Composable
-private fun ApCard(ap: ScanResult) {
-    val signalLevel = WifiManager.calculateSignalLevel(ap.level, 5)
-    val (signalLabel, signalColor) = signalInfo(signalLevel)
+private fun ApCard(
+    ap: ScanResult,
+    isCurrent: Boolean,
+) {
+    val isUnknownSignal = ap.level == 0
+    val signalLevel = if (isUnknownSignal) 0 else WifiManager.calculateSignalLevel(ap.level, 5)
+    val (signalLabel, signalColor) = if (isUnknownSignal) {
+        "未知" to MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        signalInfo(signalLevel)
+    }
     val isSecure = ap.capabilities.contains("WPA") || ap.capabilities.contains("WEP")
+    val containerColor by animateColorAsState(
+        targetValue = if (isCurrent) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        label = "AccessPointContainer",
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isCurrent) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurface
+        },
+        label = "AccessPointContent",
+    )
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            containerColor = containerColor,
+            contentColor = contentColor,
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
@@ -273,15 +429,28 @@ private fun ApCard(ap: ScanResult) {
                     color = signalColor,
                     modifier = Modifier.size(width = 22.dp, height = 16.dp)
                 )
-                Icon(
-                    imageVector = if (isSecure) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
-                    contentDescription = null,
-                    tint = if (isSecure)
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    else
-                        MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.size(14.dp)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isCurrent) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = contentColor.copy(alpha = 0.1f),
+                        ) {
+                            Text(
+                                text = "当前接入点",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = contentColor,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Icon(
+                        imageVector = if (isSecure) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                        contentDescription = null,
+                        tint = contentColor.copy(alpha = 0.7f),
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
             }
 
             // dBm + 信号等级
@@ -290,18 +459,20 @@ private fun ApCard(ap: ScanResult) {
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = "${ap.level}",
+                    text = if (isUnknownSignal) "未知" else "${ap.level}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = signalColor,
                     fontFamily = FontFamily.Monospace,
                 )
-                Text(
-                    text = "dBm",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 1.dp)
-                )
+                if (!isUnknownSignal) {
+                    Text(
+                        text = "dBm",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = contentColor.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(bottom = 1.dp),
+                    )
+                }
                 Spacer(Modifier.weight(1f))
                 Text(
                     text = signalLabel,
@@ -321,7 +492,7 @@ private fun ApCard(ap: ScanResult) {
                 text = ap.BSSID!!,
                 style = MaterialTheme.typography.labelMedium,
                 fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = contentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -339,10 +510,87 @@ private fun ApCard(ap: ScanResult) {
                     text = capShort,
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = contentColor.copy(alpha = 0.7f),
                     lineHeight = 14.sp,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VirtualApCard(info: WifiInfo) {
+    val contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = contentColor,
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SignalBars(
+                    level = 0,
+                    color = contentColor,
+                    modifier = Modifier.size(width = 22.dp, height = 16.dp),
+                )
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = contentColor.copy(alpha = 0.1f),
+                ) {
+                    Text(
+                        text = "当前接入点",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = contentColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            Text(
+                text = "未知",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = contentColor,
+            )
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = contentColor.copy(alpha = 0.3f),
+            )
+            info.bssid?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = contentColor,
+                    softWrap = true,
+                )
+            }
+            if (info.frequency > 0) {
+                Text(
+                    text = "${info.frequency} MHz · ${frequencyBand(info.frequency)} · " +
+                        "信道 ${frequencyToChannel(info.frequency) ?: "未知"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = contentColor.copy(alpha = 0.75f),
+                    softWrap = true,
+                )
+            }
+            wifiSecurityType(info)?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = contentColor.copy(alpha = 0.75f),
+                    softWrap = true,
                 )
             }
         }
@@ -401,12 +649,32 @@ private fun SignalBars(
 
 @Suppress("DEPRECATION")
 @Composable
-private fun SavedWifiConfigCard(config: WifiConfiguration) {
+private fun SavedWifiConfigCard(
+    config: WifiConfiguration,
+    isCurrent: Boolean,
+) {
+    val containerColor by animateColorAsState(
+        targetValue = if (isCurrent) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        label = "SavedConfigContainer",
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isCurrent) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurface
+        },
+        label = "SavedConfigContent",
+    )
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            containerColor = containerColor,
+            contentColor = contentColor,
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
@@ -428,6 +696,20 @@ private fun SavedWifiConfigCard(config: WifiConfiguration) {
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f)
                 )
+                if (isCurrent) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = contentColor.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(horizontal = 6.dp),
+                    ) {
+                        Text(
+                            text = "正在使用",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = contentColor,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
@@ -540,6 +822,7 @@ private fun SavedWifiConfigCard(config: WifiConfiguration) {
 
 @Composable
 private fun SavedInfoRow(label: String, value: String) {
+    val contentColor = LocalContentColor.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -550,14 +833,14 @@ private fun SavedInfoRow(label: String, value: String) {
         Text(
             text = label,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = contentColor.copy(alpha = 0.7f),
             modifier = Modifier.weight(0.38f)
         )
         Text(
             text = value,
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = contentColor,
             modifier = Modifier.weight(0.62f),
             textAlign = TextAlign.End
         )
@@ -574,3 +857,41 @@ private fun signalInfo(level: Int): Pair<String, Color> = when (level) {
     1 -> "较弱" to MaterialTheme.colorScheme.onSurfaceVariant
     else -> "很弱" to MaterialTheme.colorScheme.error
 }
+
+private fun wifiSecurityType(info: WifiInfo): String? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+    return when (info.currentSecurityType) {
+        WifiInfo.SECURITY_TYPE_OPEN -> "开放网络"
+        WifiInfo.SECURITY_TYPE_WEP -> "WEP"
+        WifiInfo.SECURITY_TYPE_PSK -> "WPA/WPA2-PSK"
+        WifiInfo.SECURITY_TYPE_EAP -> "WPA/WPA2-EAP"
+        WifiInfo.SECURITY_TYPE_SAE -> "WPA3-SAE"
+        WifiInfo.SECURITY_TYPE_EAP_WPA3_ENTERPRISE_192_BIT -> "WPA3-Enterprise 192-bit"
+        WifiInfo.SECURITY_TYPE_OWE -> "OWE"
+        WifiInfo.SECURITY_TYPE_WAPI_PSK -> "WAPI-PSK"
+        WifiInfo.SECURITY_TYPE_WAPI_CERT -> "WAPI-CERT"
+        WifiInfo.SECURITY_TYPE_EAP_WPA3_ENTERPRISE -> "WPA3-Enterprise"
+        WifiInfo.SECURITY_TYPE_OSEN -> "OSEN"
+        WifiInfo.SECURITY_TYPE_PASSPOINT_R1_R2 -> "Passpoint R1/R2"
+        WifiInfo.SECURITY_TYPE_PASSPOINT_R3 -> "Passpoint R3"
+        WifiInfo.SECURITY_TYPE_DPP -> "DPP"
+        else -> null
+    }
+}
+
+private fun wifiStandardName(standard: Int): String = when (standard) {
+    ScanResult.WIFI_STANDARD_LEGACY -> "Legacy"
+    ScanResult.WIFI_STANDARD_11N -> "Wi-Fi 4 (802.11n)"
+    ScanResult.WIFI_STANDARD_11AC -> "Wi-Fi 5 (802.11ac)"
+    ScanResult.WIFI_STANDARD_11AX -> "Wi-Fi 6/6E (802.11ax)"
+    ScanResult.WIFI_STANDARD_11AD -> "WiGig (802.11ad)"
+    ScanResult.WIFI_STANDARD_11BE -> "Wi-Fi 7 (802.11be)"
+    else -> "未知"
+}
+
+private fun formatIpv4(address: Int): String = listOf(
+    address and 0xff,
+    address shr 8 and 0xff,
+    address shr 16 and 0xff,
+    address shr 24 and 0xff,
+).joinToString(".")

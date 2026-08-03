@@ -3,7 +3,6 @@ import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.InputDirectory
-import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -11,8 +10,11 @@ import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.Exec
 import org.gradle.work.DisableCachingByDefault
 import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Properties
 import java.util.Base64
+import java.util.Date
+import java.util.Locale
 
 @DisableCachingByDefault(because = "Stages the generated terminal executable for APK packaging.")
 abstract class StageTerminalLibTask : DefaultTask() {
@@ -101,12 +103,18 @@ android {
         minSdk = 24
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "3.1.0-Alpha.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += "arm64-v8a"
         }
+
+        val buildTime = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
+        val gitId = getGitCommitId()
+
+        buildConfigField("String", "BUILD_DATE", "\"$buildTime\"")
+        buildConfigField("String", "GIT_ID", "\"$gitId\"")
     }
 
     androidResources {
@@ -290,6 +298,17 @@ val buildTerminal = tasks.register<Exec>("buildTerminal") {
         )
     } else {
         commandLine("bash", "-lc", buildTerminalCommand)
+    }
+}
+
+fun getGitCommitId(): String {
+    return try {
+        val process = ProcessBuilder("git", "rev-parse", "--short", "HEAD").start()
+        val text = process.inputStream.bufferedReader().readText().trim()
+        process.waitFor()
+        text.ifEmpty { "unknown" }
+    } catch (_: Exception) {
+        "unknown"
     }
 }
 

@@ -5,6 +5,7 @@ package io.github.bszapp.wifitoolbox.uidefault.widget
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,20 +30,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.rounded.Inbox
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
 import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -57,6 +63,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskInput
+import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
+import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
 import io.github.bszapp.wifitoolbox.uidefault.component.WifiIcon
@@ -64,6 +73,13 @@ import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeAccessPoint
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheetTarget
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.frequencyToChannel
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -75,7 +91,13 @@ fun WifiList(
 ) {
     val wifiState by vm.wifiList.state.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
-    var selectedIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+    val currentTask by vm.taskTracker.currentTask.collectAsStateWithLifecycle()
+    val trackedTask by vm.taskTracker.trackedTask.collectAsStateWithLifecycle()
+    var selectedSsid by rememberSaveable { mutableStateOf<String?>(null) }
+    var connectSheetContent by remember { mutableStateOf<ConnectWifiSheetContent?>(null) }
+    var monitorModeTarget by remember { mutableStateOf<MonitorModeSheetTarget?>(null) }
+    var isSubmittingTask by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     // WifiState 与 SavedWifiList 是两种同级数据：
     // 扫描结果只来自 Enabled，已保存配置只来自独立的 SavedWifiList。
@@ -85,12 +107,21 @@ fun WifiList(
     }
     val savedNetworks: List<WifiConfiguration> =
         savedWifiList?.networks ?: emptyList()
+    val connection = (wifiState as? WifiState.Data.Enabled)?.connection
 
-    val groups = remember(scanResults, savedNetworks) {
+    val groups = remember(scanResults, savedNetworks, connection) {
         MergedWifiGroup.buildFrom(
             results = scanResults,
             savedWifiList = savedNetworks,
+            connection = connection,
         )
+    }
+    val selectedGroup = selectedSsid?.let { ssid ->
+        groups.firstOrNull { it.ssid == ssid }
+    }
+
+    LaunchedEffect(selectedSsid, selectedGroup) {
+        if (selectedSsid != null && selectedGroup == null) selectedSsid = null
     }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -111,6 +142,21 @@ fun WifiList(
                 contentPadding = contentPadding,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                currentTask?.let { task ->
+                    item(key = "running-task-${task.taskId}") {
+                        RunningTaskCard(
+                            taskId = task.taskId,
+                            stage = (task.progress as? TaskProgress.ConnectWifi)
+                                ?.stage
+                                ?.name
+                                .orEmpty(),
+                            onClick = {
+                                vm.taskTracker.track(task.taskId)
+                                connectSheetContent = ConnectWifiSheetContent.Task(task.taskId)
+                            },
+                        )
+                    }
+                }
                 if (groups.isEmpty()) {
                     item(key = "wifi-empty") {
                         // 空状态仍放在可滚动容器中，保证 PullToRefresh 能收到 nested scroll。
@@ -119,27 +165,192 @@ fun WifiList(
                         )
                     }
                 } else {
-                    itemsIndexed(
-                        items = groups,
-                        key = { _, item -> item.strongest.BSSID!! },
-                    ) { index, group ->
-                        WifiGroupCard(
-                            vm = vm,
-                            group = group,
-                            modifier = Modifier.animateItem(),
-                            onClick = { selectedIndex = index },
-                        )
+                    groups.forEachIndexed { index, group ->
+                        val startsUnknownSignalSection =
+                            !group.isConnected && group.hasUnknownSignal &&
+                                groups.take(index).none {
+                                    !it.isConnected && it.hasUnknownSignal
+                                }
+                        if (startsUnknownSignalSection) {
+                            item(key = "wifi-unknown-signal-section") {
+                                Text(
+                                    text = "未知信号",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(
+                                        start = 12.dp,
+                                        top = 12.dp,
+                                        bottom = 4.dp,
+                                    ),
+                                )
+                            }
+                        }
+                        item(key = group.ssid) {
+                            WifiGroupCard(
+                                vm = vm,
+                                group = group,
+                                modifier = Modifier.animateItem(),
+                                onClick = { selectedSsid = group.ssid },
+                                onConnectWithConfig = { config ->
+                                    connectSheetContent = ConnectWifiSheetContent.Configuration(
+                                        networkId = config.networkId,
+                                        ssid = group.displaySsid,
+                                    )
+                                },
+                                onEnterMonitorMode = {
+                                    val frequency = group.strongest?.frequency
+                                        ?: group.virtualAccessPoint?.frequency
+                                        ?: 0
+                                    val channel = frequencyToChannel(frequency)
+                                    if (channel != null) {
+                                        val accessPoints = scanResults
+                                            .asSequence()
+                                            .filter {
+                                                frequencyToChannel(it.frequency) == channel
+                                            }
+                                            .distinctBy { it.BSSID.lowercase() }
+                                            .map {
+                                                MonitorModeAccessPoint(
+                                                    name = it.SSID
+                                                        ?.takeIf(String::isNotEmpty)
+                                                        ?: "<隐藏的网络>",
+                                                    mac = it.BSSID,
+                                                )
+                                            }
+                                            .toMutableList()
+                                        group.virtualAccessPoint?.let { virtual ->
+                                            val bssid = virtual.bssid
+                                            if (
+                                                frequencyToChannel(virtual.frequency) == channel &&
+                                                !bssid.isNullOrBlank() &&
+                                                accessPoints.none {
+                                                    it.mac.equals(bssid, ignoreCase = true)
+                                                }
+                                            ) {
+                                                accessPoints += MonitorModeAccessPoint(
+                                                    name = virtual.ssid
+                                                        ?.takeUnless {
+                                                            it == WifiManager.UNKNOWN_SSID
+                                                        }
+                                                        ?.removeSurrounding("\"")
+                                                        ?.takeIf(String::isNotEmpty)
+                                                        ?: "<隐藏的网络>",
+                                                    mac = bssid,
+                                                )
+                                            }
+                                        }
+                                        monitorModeTarget = MonitorModeSheetTarget(
+                                            channel = channel,
+                                            frequencyMhz = frequency,
+                                            accessPoints = accessPoints,
+                                        )
+                                    }
+                                },
+                            )
+                        }
                     }
                 }
             }
         }
     }
 
-    selectedIndex?.let { index ->
-        groups.getOrNull(index)?.let { group ->
-            WifiDetailSheet(group = group, onDismiss = { selectedIndex = null })
+    selectedGroup?.let { group ->
+        WifiDetailSheet(group = group, onDismiss = { selectedSsid = null })
+    }
+
+    monitorModeTarget?.let { target ->
+        MonitorModeSheet(
+            target = target,
+            onDismiss = { monitorModeTarget = null },
+            onExecute = { command, channel, frequencyMhz ->
+                monitorModeTarget = null
+                vm.wifiList.enterMonitorMode(command, channel, frequencyMhz)
+            },
+        )
+    }
+
+    connectSheetContent?.let { content ->
+        ConnectWifiTaskSheet(
+            content = content,
+            trackedTask = trackedTask,
+            isSubmitting = isSubmittingTask,
+            onStart = { config ->
+                val configuration = content as? ConnectWifiSheetContent.Configuration
+                    ?: return@ConnectWifiTaskSheet
+                if (!isSubmittingTask) {
+                    isSubmittingTask = true
+                    scope.launch {
+                        runCatching {
+                            vm.taskTracker.startTask(
+                                TaskStartRequest.connectWifi(
+                                    input = ConnectWifiTaskInput(configuration.networkId),
+                                    config = config,
+                                ),
+                            )
+                        }.onSuccess { taskId ->
+                            connectSheetContent = ConnectWifiSheetContent.Task(taskId)
+                        }
+                        isSubmittingTask = false
+                    }
+                }
+            },
+            onStop = vm.taskTracker::stopTrackedTask,
+            onDismiss = {
+                if (content is ConnectWifiSheetContent.Task) {
+                    vm.taskTracker.clearTracking()
+                }
+                connectSheetContent = null
+                isSubmittingTask = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun RunningTaskCard(
+    taskId: Long,
+    stage: String,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors = androidx.compose.material3.CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.PlayArrow,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "任务运行中 · #$taskId",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    text = stage.toTaskStageText(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
+                )
+            }
         }
     }
+}
+
+private fun String.toTaskStageText(): String = when (this) {
+    "ROUTER_COMMUNICATION" -> "与路由器建立通信"
+    "WPA_HANDSHAKE_1_OF_4" -> "WPA 握手 1/4"
+    "WPA_HANDSHAKE_2_OF_4" -> "WPA 握手 2/4"
+    "WPA_HANDSHAKE_3_OF_4" -> "WPA 握手 3/4"
+    "WPA_HANDSHAKE_4_OF_4" -> "WPA 握手 4/4"
+    else -> "加载中"
 }
 
 @Composable
@@ -271,15 +482,35 @@ private fun WifiGroupCard(
     group: MergedWifiGroup,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onConnectWithConfig: (WifiConfiguration) -> Unit,
+    onEnterMonitorMode: () -> Unit,
 ) {
-    val levelIndex = if (group.strongest.level == 0) 0
-    else WifiManager.calculateSignalLevel(group.strongest.level, 5)
+    val isConnected = group.isConnected
+    val levelIndex = group.signalDbm?.let {
+        WifiManager.calculateSignalLevel(it, 5)
+    } ?: 0
+    val backgroundColor by animateColorAsState(
+        targetValue = if (isConnected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            Color.Transparent
+        },
+        label = "WifiCardBackground",
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isConnected) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurface
+        },
+        label = "WifiCardContent",
+    )
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(Color.Transparent)
+            .background(backgroundColor)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
@@ -291,7 +522,8 @@ private fun WifiGroupCard(
         ) {
             WifiIcon(
                 modifier = Modifier.size(28.dp),
-                level = levelIndex
+                level = levelIndex,
+                color = contentColor,
             )
 
             Spacer(Modifier.width(12.dp))
@@ -305,16 +537,33 @@ private fun WifiGroupCard(
                         text = group.displaySsid,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
+                        color = contentColor,
                         overflow = TextOverflow.Visible,
                         softWrap = true,
                     )
 
-                    val hasTags = group.networks.size > 1 || group.savedWifiList.isNotEmpty()
+                    if (isConnected) {
+                        Spacer(Modifier.width(4.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = contentColor.copy(alpha = 0.1f),
+                        ) {
+                            Text(
+                                text = "已连接",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = contentColor,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+
+                    val hasTags = group.accessPointCount > 1 || group.savedWifiList.isNotEmpty()
                     if (hasTags) {
                         Spacer(Modifier.width(4.dp))
-                        if (group.networks.size > 1) {
+                        if (group.accessPointCount > 1) {
                             TagItem(
-                                text = group.networks.size.toString(),
+                                text = group.accessPointCount.toString(),
                                 icon = Icons.Default.Layers,
                                 style = TagStyle.Tertiary
                             )
@@ -334,16 +583,23 @@ private fun WifiGroupCard(
                     text = group.signalDisplay,
                     style = MaterialTheme.typography.bodySmall,
                     lineHeight = 16.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = contentColor.copy(alpha = 0.7f),
                 )
             }
 
             Spacer(Modifier.width(12.dp))
             WifiGroupCardActions(
                 group = group,
+                isConnected = isConnected,
+                buttonContainerColor = MaterialTheme.colorScheme.primary.takeIf { isConnected },
+                buttonContentColor = MaterialTheme.colorScheme.onPrimary.takeIf { isConnected },
                 onConnect = { /* TODO */ },
+                onDisconnect = {
+                    group.connection?.networkId?.let(vm.wifiList::disconnectCurrentNetwork)
+                },
                 onOpenDetail = { onClick() },
-                onConnectWithConfig = { /* TODO */ },
+                onConnectWithConfig = onConnectWithConfig,
+                onEnterMonitorMode = onEnterMonitorMode,
                 onUpdateConfig = { networkId, patch ->
                     vm.wifiList.updateWifiConfig(networkId, patch)
                 },
@@ -352,4 +608,3 @@ private fun WifiGroupCard(
         }
     }
 }
-

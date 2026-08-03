@@ -1,5 +1,6 @@
 package io.github.bszapp.wifitoolbox.terminal
 
+import android.content.Context
 import android.os.DeadObjectException
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.terminal.ITerminalController
@@ -9,6 +10,7 @@ import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogTransport
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalManagerState
 import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.ITerminalManagerCallback
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,11 +26,20 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.min
 
 class TerminalController(
+    private val context: Context,
     private val scope: CoroutineScope,
+    private val reportError: (
+        source: String,
+        operation: String,
+        error: Throwable,
+        remoteDetails: String?,
+    ) -> Unit,
 ) : ITerminalController {
     private val connectionLock = Any()
     private val _state = MutableStateFlow(TerminalManagerState())
     override val state: StateFlow<TerminalManagerState> = _state.asStateFlow()
+    private val appTerminalManager = AppTerminalManager(context, scope, reportError)
+    override val appState: StateFlow<TerminalManagerState> = appTerminalManager.state
     private var activeBinding: Binding? = null
 
     fun connect(service: IMainService) {
@@ -118,6 +129,45 @@ class TerminalController(
         _state.value = TerminalManagerState()
     }
 
+    override fun createServiceTerminal() {
+        val binding = synchronized(connectionLock) { activeBinding }
+        if (binding == null) {
+            reportError(
+                "App.TerminalController",
+                "新建服务 chroot 终端",
+                IllegalStateException("service 未连接"),
+                null,
+            )
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            if (!isCurrent(binding) || !binding.service.asBinder().isBinderAlive) return@launch
+            val rootfs = File(requireNotNull(context.filesDir.parentFile), "rootfs")
+            val runtime = File(context.noBackupFilesDir, "rftool-runtime")
+            val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
+            runCatching {
+                binding.service.createServiceTerminal(
+                    rootfs.absolutePath,
+                    runtime.absolutePath,
+                    terminal.absolutePath,
+                )
+            }.onFailure { error ->
+                if (isCurrent(binding)) {
+                    reportError(
+                        "App.TerminalController",
+                        "新建服务 chroot 终端",
+                        error,
+                        null,
+                    )
+                }
+            }
+        }
+    }
+
+    override fun createAppTerminal() {
+        appTerminalManager.createTerminal()
+    }
+
     override fun clearLogs(terminalId: Long) {
         val binding = synchronized(connectionLock) { activeBinding } ?: return
         scope.launch(Dispatchers.IO) {
@@ -129,6 +179,49 @@ class TerminalController(
                     }
                 }
         }
+    }
+
+    override fun clearAppLogs(terminalId: Long) {
+        appTerminalManager.clearLogs(terminalId)
+    }
+
+    override fun sendInput(terminalId: Long, text: String) {
+        val binding = synchronized(connectionLock) { activeBinding } ?: return
+        scope.launch(Dispatchers.IO) {
+            if (!isCurrent(binding) || !binding.service.asBinder().isBinderAlive) return@launch
+            runCatching {
+                binding.service.sendTerminalInput(terminalId, text)
+            }.onFailure { error ->
+                if (isCurrent(binding)) {
+                    Log.w(TAG, "发送终端 $terminalId 输入失败：${error.message}", error)
+                }
+            }
+        }
+    }
+
+    override fun sendAppInput(terminalId: Long, text: String) {
+        appTerminalManager.writeInput(terminalId, text)
+    }
+
+    override fun closeTerminal(terminalId: Long) {
+        val binding = synchronized(connectionLock) { activeBinding } ?: return
+        scope.launch(Dispatchers.IO) {
+            if (!isCurrent(binding) || !binding.service.asBinder().isBinderAlive) return@launch
+            runCatching { binding.service.stopTerminal(terminalId) }
+                .onFailure { error ->
+                    if (isCurrent(binding)) {
+                        Log.w(TAG, "关闭终端 $terminalId 失败：${error.message}", error)
+                    }
+                }
+        }
+    }
+
+    override fun closeAppTerminal(terminalId: Long) {
+        appTerminalManager.stopTerminal(terminalId)
+    }
+
+    fun close() {
+        appTerminalManager.close()
     }
 
     private suspend fun drainPending(binding: Binding) {
@@ -269,7 +362,7 @@ class TerminalController(
                 fromId = target.oldestAvailableId
                 continue
             }
-            local = (local + fetched).takeLast(MAX_APP_LOG_LINES)
+            local = local + fetched
             fromId = fetched.last().id + 1L
         }
 
@@ -291,13 +384,10 @@ class TerminalController(
         var target = initialRange
         var entries = emptyList<io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry>()
         var fromId = target.oldestAvailableId
-        var reloadCount = 0
         while (
             isCurrent(binding) &&
-            fromId <= target.latestId &&
-            reloadCount < MAX_RELOAD_BATCHES
+            fromId <= target.latestId
         ) {
-            reloadCount++
             val toId = min(fromId + FETCH_SIZE - 1L, target.latestId)
             val batch = TerminalLogTransport.decode(
                 binding.service.getTerminalLogs(target.terminalId, fromId, toId),
@@ -312,7 +402,7 @@ class TerminalController(
                 fromId = target.oldestAvailableId
                 continue
             }
-            entries = (entries + fetched).takeLast(MAX_APP_LOG_LINES)
+            entries = entries + fetched
             fromId = fetched.last().id + 1L
         }
         return LoadedTerminal(target, entries)
@@ -323,6 +413,8 @@ class TerminalController(
         range: RangeUpdate,
         entries: List<io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry>,
     ) {
+        if (!isCurrent(binding)) return
+        val inputPrompt = binding.service.getTerminalInputPrompt(range.terminalId)
         if (!isCurrent(binding)) return
         _state.update { current ->
             if (range.terminalId !in current.aliveTerminalIds) return@update current
@@ -335,6 +427,7 @@ class TerminalController(
                         latestId = range.latestId,
                         lineCount = range.lineCount,
                         entries = entries,
+                        inputPrompt = inputPrompt,
                     )
                 ),
             )
@@ -352,7 +445,7 @@ class TerminalController(
             oldestAvailableId = values[1],
             latestId = values[2],
             lineCount = values[3].also { count ->
-                require(count in 0L..MAX_APP_LOG_LINES.toLong()) {
+                require(count in 0L..Int.MAX_VALUE.toLong()) {
                     "终端 $terminalId 日志行数非法：$count"
                 }
             }.toInt(),
@@ -438,9 +531,7 @@ class TerminalController(
     companion object {
         private const val TAG = "TerminalController"
         private const val FETCH_SIZE = 500L
-        private const val MAX_APP_LOG_LINES = 5_000
         private const val MAX_EMPTY_FETCH_RETRIES = 2
-        private const val MAX_RELOAD_BATCHES = 20
         private const val MAX_ALIVE_SNAPSHOT_RETRIES = 3
         private const val RANGE_VALUE_COUNT = 4
         private const val EVENT_COALESCE_MILLIS = 50L

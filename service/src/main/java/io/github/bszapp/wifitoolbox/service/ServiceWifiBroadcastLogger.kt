@@ -20,6 +20,7 @@ import java.lang.reflect.Method
 @SuppressLint("PrivateApi")
 internal class ServiceWifiBroadcastLogger(
     private val onWifiStateChanged: () -> Unit,
+    private val onWifiNetworkStateChanged: (clientRole: Int, status: Int) -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
     @Volatile
@@ -72,6 +73,7 @@ internal class ServiceWifiBroadcastLogger(
                     "[$PATH_NETWORK_STATE_CALLBACK] onWifiNetworkStateChanged(" +
                         "clientRole=$clientRole, status=$status)",
                 )
+                onWifiNetworkStateChanged(clientRole, status)
                 readWifiStateChange()?.let { change ->
                     Log.d(TAG, "[$PATH_NETWORK_STATE_CALLBACK] WIFI_STATE ${change.previous} -> ${change.current}")
                     onWifiStateChanged()

@@ -47,7 +47,7 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
                 .redirectErrorStream(true)
                 .start()
         } catch (_: java.io.IOException) {
-            throw Exception("su命令执行失败，请确认设备已经root，然后在管理器授权本应用")
+            throw buildSuFailureException("su命令执行失败，请确认设备已经root，然后在管理器授权本应用")
         }
 
         val output = StringBuilder()
@@ -80,7 +80,7 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
         if (finishedHolder[0]) {
             val exit = exitHolder[0]
             if (exit != 0) {
-                throw Exception(buildString {
+                throw buildSuFailureException(buildString {
                     append("su命令执行失败，请在管理器授权本应用")
                     val detail = output.toString().trim()
                     if (detail.isNotEmpty()) append("：").append(detail)
@@ -91,6 +91,22 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
             Log.d(TAG, "root 启动命令已提交，继续等待服务 Binder")
         }
     }
+
+    private fun buildSuFailureException(message: String): Exception = Exception(buildString {
+        append(message)
+        ROOT_MANAGERS.forEach { manager ->
+            val isInstalled = runCatching {
+                context.packageManager.getPackageInfo(manager.packageName, 0)
+            }.isSuccess
+            if (isInstalled) {
+                append("\n<a open=\"")
+                append(manager.packageName)
+                append("\">打开")
+                append(manager.name)
+                append("</a>")
+            }
+        }
+    })
 
     private fun buildDetachedCommand(className: String): String {
         val classPath = buildClassPath()
@@ -158,5 +174,18 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
 
     companion object {
         private const val TAG = "RootLauncher"
+
+        private val ROOT_MANAGERS = listOf(
+            RootManager("Magisk", "com.topjohnwu.magisk"),
+            RootManager("KernelSU", "me.weishu.kernelsu"),
+            RootManager("KernelSU Next", "com.rifsxd.ksunext"),
+            RootManager("APatch", "me.bmax.apatch"),
+            RootManager("SukiSU Ultra", "com.sukisu.ultra"),
+        )
     }
+
+    private data class RootManager(
+        val name: String,
+        val packageName: String,
+    )
 }

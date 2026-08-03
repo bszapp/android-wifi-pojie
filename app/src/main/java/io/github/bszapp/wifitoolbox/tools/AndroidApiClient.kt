@@ -63,6 +63,18 @@ class AndroidApiClient(
             }
         }
 
+    fun disconnectCurrentNetwork(networkId: Int) =
+        invoke("断开当前 Wi-Fi networkId=$networkId") {
+            val disconnected = execute(
+                AndroidApiAction.WIFI_DISCONNECT_CURRENT,
+                Bundle().apply { putInt(AndroidApiKeys.NETWORK_ID, networkId) },
+            ).requireSuccess().getBoolean(AndroidApiKeys.RESULT)
+
+            if (!disconnected) {
+                throw IllegalStateException("系统拒绝断开 networkId=$networkId")
+            }
+        }
+
     private inline fun <T> invoke(operation: String, block: () -> T): T {
         return try {
             block()

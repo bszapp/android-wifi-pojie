@@ -6,6 +6,7 @@ interface IContainerController {
     val state: StateFlow<ContainerState>
 
     fun install()
+    fun update()
     fun reset()
     fun uninstall()
     fun startTerminal()
@@ -42,6 +43,7 @@ enum class ContainerSystemStatus {
 
 enum class ContainerOperation(val title: String) {
     INSTALL("安装容器系统"),
+    UPDATE("更新容器系统"),
     RESET("重置容器"),
     UNINSTALL("卸载容器"),
 }
