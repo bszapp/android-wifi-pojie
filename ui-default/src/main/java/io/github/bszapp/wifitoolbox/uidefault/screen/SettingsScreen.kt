@@ -48,6 +48,7 @@ import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Update
 import top.yukonga.miuix.kmp.basic.SmallTitle
+import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -122,15 +123,16 @@ fun SettingsScreen(
                     .fillMaxHeight()
                     .scrollEndHaptic()
                     .overScrollVertical()
-                    .nestedScroll(scrollBehavior.nestedScrollConnection)
-                    .padding(horizontal = 12.dp),
+                    .nestedScroll(scrollBehavior.nestedScrollConnection),
                 contentPadding = innerPadding,
                 overscrollEffect = null,
             ) {
                 item {
+                    SmallTitle(text = "主题外观")
                     Card(
                         modifier = Modifier
-                            .padding(top = 12.dp)
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp)
                             .fillMaxWidth(),
                     ) {
                         ArrowPreference(
@@ -150,7 +152,12 @@ fun SettingsScreen(
                 }
                 item {
                     SmallTitle(text = "容器系统")
-                    Card(modifier = Modifier.fillMaxWidth()) {
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp)
+                            .fillMaxWidth(),
+                    ) {
                         if (!containerState.installed) {
                             ArrowPreference(
                                 title = "安装容器系统",
@@ -207,7 +214,27 @@ fun SettingsScreen(
                             )
                         }
                     }
-                    Spacer(Modifier.height(bottomInnerPadding))
+                }
+
+                item {
+                    SmallTitle(text = "关于")
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = "当前为预览版本，仅能尝鲜使用容器终端、抓包、扫描等功能。与GitHub上最后一个发行版不属于同一项目，故绝大多数功能未实现。\n源码位于https://github.com/bszapp/android-wifi-pojie中的master分支。\n\n借鉴（上一版本有名词注释）了以下内容：\nKernelSU的界面\niamr0s/Ruto-GLM的服务启动方式\nShizuku的服务常驻原理\nLSPosed的日志页面(逆向)\nInstallerxRevived的启动页部分样式\nStryker的终端原理(部分)\nAndroidStudio的日志分类方式(逆向)\nLogFox的日志logcat启动命令\n\n其他作者：Claude(应用最初的架构)、ChatGPT(应用的的最新架构、终端容器构建、pcap包实时解析导出等)",
+                            modifier = Modifier.padding(
+                                horizontal = 16.dp,
+                                vertical = 14.dp,
+                            ),
+                            color = colorScheme.onSurfaceVariantSummary,
+                            style = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.body2,
+                        )
+                    }
+
+                    Spacer(Modifier.height(bottomInnerPadding + 12.dp))
                 }
             }
         }

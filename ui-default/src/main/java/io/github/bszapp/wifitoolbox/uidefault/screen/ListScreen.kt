@@ -154,40 +154,38 @@ fun ListScreen(
                                 onDismissRequest = { showTopPopup.value = false },
                                 content = {
                                     ListPopupColumn {
-                                        //TODO:错了！是分组，选项都叫扫描，不是给每个选项加小标题
                                         SmallTitle(text = "系统模式")
                                         DropdownImpl(
                                             text = "扫描",
                                             isSelected = selectedSource == WifiInformationSource.SYSTEM,
-                                            optionSize = 1,
+                                            optionSize = 3,
                                             onSelectedIndexChange = {
                                                 showTopPopup.value = false
                                                 viewModel.wifiList.setInformationSource(
                                                     WifiInformationSource.SYSTEM,
                                                 )
                                             },
-                                            index = 0,
+                                            index = 1,
                                         )
-                                        SmallTitle(text = "混合模式")
+                                        SmallTitle(text = "网卡模式")
                                         DropdownImpl(
-                                            text = "扫描",
+                                            text = "混合扫描",
                                             isSelected = selectedSource == WifiInformationSource.HYBRID,
-                                            optionSize = 1,
+                                            optionSize = 3,
                                             onSelectedIndexChange = {
                                                 showTopPopup.value = false
                                                 viewModel.wifiList.setInformationSource(
                                                     WifiInformationSource.HYBRID,
                                                 )
                                             },
-                                            index = 0,
+                                            index = 1,
                                         )
-                                        SmallTitle(text = "命令模式")
                                         DropdownImpl(
                                             text = "监听模式",
                                             isSelected = selectedSource == WifiInformationSource.MONITOR,
-                                            optionSize = 1,
+                                            optionSize = 3,
                                             onSelectedIndexChange = {},
-                                            index = 0,
+                                            index = 2,
                                         )
                                     }
                                 },

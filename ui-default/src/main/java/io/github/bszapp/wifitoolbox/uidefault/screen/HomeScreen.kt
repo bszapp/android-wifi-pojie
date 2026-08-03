@@ -220,7 +220,7 @@ private fun ServiceStatusCard(
                     Spacer(Modifier.height(2.dp))
                     Text(
                         modifier = Modifier.fillMaxWidth(),
-                        text = if (active) "版本：$versionText" else "点击重新选择工作模式",
+                        text = if (active) "v$versionText" else "点击重新选择工作模式",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
                         color = colorScheme.onSurface,

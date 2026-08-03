@@ -7,8 +7,8 @@ enum class WifiInformationSource(
     val wireValue: Int,
     val displayName: String,
 ) {
-    SYSTEM(0, "系统模式"),
-    HYBRID(1, "混合模式"),
+    SYSTEM(0, "扫描"),
+    HYBRID(1, "混合扫描"),
     MONITOR(2, "监听模式");
 
     companion object {

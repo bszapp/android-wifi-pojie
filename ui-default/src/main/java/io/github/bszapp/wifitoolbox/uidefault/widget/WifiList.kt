@@ -23,20 +23,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Wifi
-import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
-import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -62,24 +57,26 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskInput
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
 import io.github.bszapp.wifitoolbox.uidefault.component.WifiIcon
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeAccessPoint
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheetTarget
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.frequencyToChannel
 import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -96,6 +93,7 @@ fun WifiList(
     var selectedSsid by rememberSaveable { mutableStateOf<String?>(null) }
     var connectSheetContent by remember { mutableStateOf<ConnectWifiSheetContent?>(null) }
     var monitorModeTarget by remember { mutableStateOf<MonitorModeSheetTarget?>(null) }
+    var showMonitorModeSheet by remember { mutableStateOf(false) }
     var isSubmittingTask by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -244,6 +242,7 @@ fun WifiList(
                                             frequencyMhz = frequency,
                                             accessPoints = accessPoints,
                                         )
+                                        showMonitorModeSheet = true
                                     }
                                 },
                             )
@@ -261,9 +260,12 @@ fun WifiList(
     monitorModeTarget?.let { target ->
         MonitorModeSheet(
             target = target,
-            onDismiss = { monitorModeTarget = null },
+            show = showMonitorModeSheet,
+            onDismiss = {
+                showMonitorModeSheet = false
+            },
             onExecute = { command, channel, frequencyMhz ->
-                monitorModeTarget = null
+                showMonitorModeSheet = false
                 vm.wifiList.enterMonitorMode(command, channel, frequencyMhz)
             },
         )
@@ -379,80 +381,46 @@ private fun WifiEmptyContent(
 }
 
 @Composable
-private fun WifiDisabledContent(onEnableWifi: () -> Unit) {
+private fun WifiDisabledContent(
+    onEnableWifi: () -> Unit,
+) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
         Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(horizontal = 32.dp),
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Box(
-                    modifier = Modifier
-                        .size(144.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)),
-                )
-                Box(
-                    modifier = Modifier
-                        .size(104.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.errorContainer),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.WifiOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(52.dp),
-                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
-            }
+            Text(
+                text = "WiFi 未开启",
+                color = MiuixTheme.colorScheme.onSurface,
+                style = MiuixTheme.textStyles.title1,
+                textAlign = TextAlign.Center,
+            )
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(
+                modifier = Modifier.height(8.dp),
+            )
+
             Text(
-                text = "Wi-Fi 未开启",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
+                text = "开启 WiFi 后即可扫描附近的无线网络",
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                style = MiuixTheme.textStyles.body2,
                 textAlign = TextAlign.Center,
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "开启 Wi-Fi 后即可扫描附近的无线网络",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                lineHeight = 22.sp,
+
+            Spacer(
+                modifier = Modifier.height(24.dp),
             )
-            Spacer(Modifier.height(40.dp))
-            Button(
+
+            TextButton(
+                text = "开启 WiFi",
                 onClick = onEnableWifi,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                shape = RoundedCornerShape(28.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                ),
-                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Wifi,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "开启 Wi-Fi",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Spacer(Modifier.height(12.dp))
+                colors = top.yukonga.miuix.kmp.basic.ButtonDefaults.textButtonColorsPrimary(),
+            )
         }
     }
 }
