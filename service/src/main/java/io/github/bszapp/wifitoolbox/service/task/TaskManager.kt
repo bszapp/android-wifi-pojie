@@ -47,7 +47,7 @@ internal class TaskManager(
     private var closed = false
 
     fun start(request: TaskStartRequest): Long {
-        validate(request)
+        val hybridEnvironment = validate(request)
         val record = synchronized(lock) {
             check(!closed) { "任务管理器已关闭" }
             check(currentTaskId == null) { "已有任务正在运行：taskId=$currentTaskId" }
@@ -60,6 +60,7 @@ internal class TaskManager(
                     state = TaskExecutionState.RUNNING,
                     progress = null,
                 ),
+                hybridEnvironment = hybridEnvironment,
             ).also {
                 records[taskId] = it
                 currentTaskId = taskId
@@ -98,15 +99,6 @@ internal class TaskManager(
             }
         }
         return task.update(update)
-    }
-
-    fun stopHybridTaskIfRunning() {
-        val taskId = synchronized(lock) {
-            currentTaskId?.takeIf { id ->
-                records[id]?.snapshot?.request?.payload is TaskRequestPayload.WpsPbc
-            }
-        }
-        taskId?.let(::stop)
     }
 
     fun currentTaskId(): Long = synchronized(lock) { currentTaskId ?: NO_TASK_ID }
@@ -270,8 +262,9 @@ internal class TaskManager(
                 }
                 is TaskRequestPayload.WpsPbc -> WpsPbcTask(
                     input = payload.input,
-                    environment = hybridTaskEnvironmentProvider()
-                        ?: throw IllegalStateException("WPS-PBC 任务只能在已就绪的混合扫描模式运行"),
+                    environment = synchronized(lock) {
+                        records[taskId]?.hybridEnvironment
+                    } ?: throw IllegalStateException("WPS-PBC 任务缺少启动时捕获的混合扫描环境"),
                     terminalManager = terminalManager,
                     androidApi = androidApi,
                     onSavedWifiNetworksChanged = onSavedWifiNetworksChanged,
@@ -318,7 +311,7 @@ internal class TaskManager(
         broadcastManagerChanged(snapshot)
     }
 
-    private fun validate(request: TaskStartRequest) {
+    private fun validate(request: TaskStartRequest): HybridTaskEnvironment? {
         when (val payload = request.payload) {
             is TaskRequestPayload.ConnectWifi -> {
                 val connect = payload.request
@@ -347,11 +340,12 @@ internal class TaskManager(
                 payload.input.targetMac?.let { mac ->
                     require(MAC_ADDRESS.matches(mac)) { "目标设备 MAC 格式非法：$mac" }
                 }
-                check(hybridTaskEnvironmentProvider() != null) {
+                return checkNotNull(hybridTaskEnvironmentProvider()) {
                     "WPS-PBC 任务只能在已就绪的混合扫描模式运行"
                 }
             }
         }
+        return null
     }
 
     private fun validateUpdate(request: TaskStartRequest, update: TaskUpdateRequest) {
@@ -459,6 +453,7 @@ internal class TaskManager(
 
     private data class TaskRecord(
         var snapshot: TaskSnapshot,
+        val hybridEnvironment: HybridTaskEnvironment?,
         val logs: ArrayDeque<TaskLogEntry> = ArrayDeque(),
         var nextLogId: Long = 1L,
         var logGeneration: Long = 0L,

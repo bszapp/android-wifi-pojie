@@ -230,9 +230,6 @@ open class MainService(
         terminalPath: String,
     ) = communication.callFromApp {
         val resolvedSource = WifiInformationSource.fromWireValue(source)
-        if (resolvedSource != WifiInformationSource.HYBRID) {
-            taskManager.stopHybridTaskIfRunning()
-        }
         wifiListController.setInformationSource(
             source = resolvedSource,
             rootfsPath = rootfsPath,
@@ -249,7 +246,6 @@ open class MainService(
         runtimePath: String,
         terminalPath: String,
     ) = communication.callFromApp {
-        taskManager.stopHybridTaskIfRunning()
         wifiListController.enterMonitorMode(
             command = command,
             targetChannel = targetChannel,

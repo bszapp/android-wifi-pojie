@@ -82,7 +82,6 @@ class TaskController(
             activeBinding.also { activeBinding = binding }
         }
         release(previous)
-        _state.value = TaskControllerState()
 
         binding.job = scope.launch(Dispatchers.IO) {
             try {
@@ -109,7 +108,7 @@ class TaskController(
             activeBinding.also { activeBinding = null }
         }
         release(previous)
-        _state.value = TaskControllerState()
+        _state.update { it.copy(currentTaskId = null) }
     }
 
     override suspend fun startTask(request: TaskStartRequest): Long {
@@ -121,6 +120,18 @@ class TaskController(
                     "service 未连接"
                 }
                 binding.service.startTask(request).also { taskId ->
+                    val snapshot = binding.service.getTaskSnapshot(taskId)
+                    _state.update { current ->
+                        current.copy(
+                            tasks = current.tasks + (
+                                taskId to TrackedTaskState(
+                                    snapshot = snapshot,
+                                    logs = current.tasks[taskId]?.logs
+                                        ?: TaskLogState(scopeTaskId = taskId),
+                                )
+                            ),
+                        )
+                    }
                     synchronized(binding.pendingLock) { binding.pendingTaskIds += taskId }
                     binding.signal.trySend(Unit)
                 }

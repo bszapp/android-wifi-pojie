@@ -57,15 +57,13 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQua
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStep
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSignalStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
+import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.collect
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -102,10 +100,11 @@ internal fun MonitorDeviceDetailSheet(
     accessPoint: MonitorAccessPoint,
     device: MonitorDevice,
     savedNetworks: List<WifiConfiguration>,
-    handshakeTestResults: SharedFlow<MonitorHandshakeTestResult>,
+    handshakeTest: MonitorHandshakeTestUiState,
+    onClearHandshakeTestResult: () -> Unit,
     onDismiss: () -> Unit,
     onExport: (Set<String>) -> Unit,
-    onTestHandshake: (handshakeId: String, password: String) -> String,
+    onTestHandshake: (handshakeId: String, password: String) -> Unit,
     onExportHandshake: (handshakeId: String) -> String,
     onSaveHc22000: (content: String, fileName: String) -> Unit,
     showDeviceDetails: Boolean = true,
@@ -133,12 +132,6 @@ internal fun MonitorDeviceDetailSheet(
     }
     var handshakeTestPassword by remember(accessPoint.bssid, device.mac) {
         mutableStateOf("")
-    }
-    var pendingHandshakeTestRequestId by remember(accessPoint.bssid, device.mac) {
-        mutableStateOf<String?>(null)
-    }
-    var handshakeTestOutcome by remember(accessPoint.bssid, device.mac) {
-        mutableStateOf<MonitorHandshakeTestOutcome?>(null)
     }
     var handshakeExportTarget by remember(accessPoint.bssid, device.mac) {
         mutableStateOf<MonitorHandshakeRecord?>(null)
@@ -174,16 +167,10 @@ internal fun MonitorDeviceDetailSheet(
         }
     }
 
-    LaunchedEffect(handshakeTestResults) {
-        handshakeTestResults.collect { result ->
-            if (result.requestId == pendingHandshakeTestRequestId) {
-                pendingHandshakeTestRequestId = null
-                if (result.outcome == MonitorHandshakeTestOutcome.FAILED) {
-                    onInitialActionFinished()
-                } else {
-                    handshakeTestOutcome = result.outcome
-                }
-            }
+    LaunchedEffect(handshakeTest.outcome) {
+        if (handshakeTest.outcome == MonitorHandshakeTestOutcome.FAILED) {
+            onClearHandshakeTestResult()
+            onInitialActionFinished()
         }
     }
 
@@ -271,7 +258,7 @@ internal fun MonitorDeviceDetailSheet(
                         SmallTitle(text = "握手包")
                         HandshakeRecordsCard(
                             records = device.handshakes,
-                            testing = pendingHandshakeTestRequestId != null,
+                            testing = handshakeTest.requestId != null,
                             onTest = { record ->
                                 handshakeTestPassword = savedConfiguration
                                     ?.preSharedKey
@@ -446,7 +433,7 @@ internal fun MonitorDeviceDetailSheet(
                         TextButton(
                             text = "执行校验",
                             onClick = {
-                                pendingHandshakeTestRequestId = onTestHandshake(
+                                onTestHandshake(
                                     target.id,
                                     handshakeTestPassword,
                                 )
@@ -546,21 +533,21 @@ internal fun MonitorDeviceDetailSheet(
     )
 
     OverlayDialog(
-        show = handshakeTestOutcome != null,
-        title = when (handshakeTestOutcome) {
+        show = handshakeTest.outcome != null,
+        title = when (handshakeTest.outcome) {
             MonitorHandshakeTestOutcome.MATCHED -> "校验通过"
             MonitorHandshakeTestOutcome.NOT_MATCHED -> "校验失败"
             else -> "握手包校验"
         },
         onDismissRequest = {
-            handshakeTestOutcome = null
+            onClearHandshakeTestResult()
             if (initialHandshakeAction != null) onInitialActionFinished()
         },
         content = {
             TextButton(
                 text = "确定",
                 onClick = {
-                    handshakeTestOutcome = null
+                    onClearHandshakeTestResult()
                     if (initialHandshakeAction != null) onInitialActionFinished()
                 },
                 modifier = Modifier.fillMaxWidth(),

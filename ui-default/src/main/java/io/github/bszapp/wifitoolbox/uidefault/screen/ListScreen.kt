@@ -38,7 +38,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,6 +61,10 @@ import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.WifiProtectedSetup
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
+import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
 import io.github.bszapp.wifitoolbox.contract.wifilist.isScanning
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
@@ -73,18 +76,21 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQua
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorPcapExportResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
+import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
 import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
 import io.github.bszapp.wifitoolbox.uidefault.widget.WifiList
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorDeviceDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorHandshakeAction
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WpsPbcTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatHandshakeDuration
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatHandshakeStartTime
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.handshakeStatusText
@@ -92,7 +98,6 @@ import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.handshakeStepText
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatMonitorByteCount
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.frequencyBand
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.DropdownImpl
@@ -140,11 +145,14 @@ fun ListScreen(
     val savedWifiList by viewModel.wifiList.savedWifiList.collectAsStateWithLifecycle()
     val monitorMapFilterState by
         viewModel.wifiList.monitorMapFilterState.collectAsStateWithLifecycle()
+    val monitorHandshakeTest by
+        viewModel.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
+    val displayedTask by viewModel.displayedTask.collectAsStateWithLifecycle()
     val selectedSource = informationSourceState?.source ?: WifiInformationSource.SYSTEM
     val isInitializing = informationSourceState?.initializing == true
     val isScanning = wifiState.isScanning || isSendingScanRequest
     val controlsBusy = isScanning || isInitializing
-    var wpsPbcStartSignal by remember { mutableIntStateOf(0) }
+    val taskActionScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val pullState = rememberPullToRefreshState()
     val scrollBehavior = MiuixScrollBehavior()
@@ -261,7 +269,11 @@ fun ListScreen(
                         } else {
                             if (selectedSource == WifiInformationSource.HYBRID) {
                                 IconButton(
-                                    onClick = { wpsPbcStartSignal++ },
+                                    onClick = {
+                                        taskActionScope.launch {
+                                            runCatching { viewModel.startWpsPbcTask() }
+                                        }
+                                    },
                                     enabled = !isInitializing,
                                 ) {
                                     Icon(
@@ -313,7 +325,9 @@ fun ListScreen(
                     else -> MonitorModeContent(
                         statistics = informationSourceState?.monitorStatistics,
                         savedNetworks = savedWifiList?.networks.orEmpty(),
-                        handshakeTestResults = viewModel.wifiList.monitorHandshakeTestResults,
+                        handshakeTest = monitorHandshakeTest,
+                        onClearHandshakeTestResult =
+                            viewModel.wifiList::clearMonitorHandshakeTestResult,
                         onExportDevicePcap = { bssid, deviceMac, subtypeIds ->
                             viewModel.wifiList.exportMonitorDevicePcap(
                                 bssid = bssid,
@@ -400,11 +414,59 @@ fun ListScreen(
                             end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
                             bottom = bottomInnerPadding + 8.dp,
                         ),
-                        wpsPbcStartSignal = wpsPbcStartSignal,
                     )
                 }
             }
         }
+    }
+
+    displayedTask?.let { task ->
+        DisplayedTaskSheet(viewModel = viewModel, task = task)
+    }
+}
+
+@Composable
+private fun DisplayedTaskSheet(
+    viewModel: DefaultViewModel,
+    task: TrackedTaskState,
+) {
+    when (task.snapshot.request.payload) {
+        is TaskRequestPayload.ConnectWifi -> ConnectWifiTaskSheet(
+            content = ConnectWifiSheetContent.Task,
+            trackedTask = task,
+            isSubmitting = false,
+            dismissRequested = false,
+            onSubmit = {},
+            onStop = viewModel::stopDisplayedTask,
+            onDismiss = viewModel::closeDisplayedTask,
+        )
+
+        is TaskRequestPayload.WpsPbc -> WpsPbcTaskSheet(
+            trackedTask = task,
+            isStarting = false,
+            onContinuousCaptureChange = { enabled ->
+                viewModel.updateDisplayedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcContinuousCapture(enabled)),
+                )
+            },
+            onAutoSaveToDeviceChange = { enabled ->
+                viewModel.updateDisplayedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcAutoSaveToDevice(enabled)),
+                )
+            },
+            onUseIncompleteProtocolChange = { enabled ->
+                viewModel.updateDisplayedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcUseIncompleteProtocol(enabled)),
+                )
+            },
+            onIgnoreRepeatedDevicesChange = { enabled ->
+                viewModel.updateDisplayedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices(enabled)),
+                )
+            },
+            onStop = viewModel::stopDisplayedTask,
+            onDismiss = viewModel::closeDisplayedTask,
+        )
     }
 }
 
@@ -431,7 +493,8 @@ private fun InitializingContent(bottomInnerPadding: Dp) {
 private fun MonitorModeContent(
     statistics: MonitorModeStatistics?,
     savedNetworks: List<WifiConfiguration>,
-    handshakeTestResults: SharedFlow<MonitorHandshakeTestResult>,
+    handshakeTest: MonitorHandshakeTestUiState,
+    onClearHandshakeTestResult: () -> Unit,
     onExportDevicePcap: (
         bssid: String,
         deviceMac: String,
@@ -442,7 +505,7 @@ private fun MonitorModeContent(
         deviceMac: String,
         handshakeId: String,
         password: String,
-    ) -> String,
+    ) -> Unit,
     onExportHandshake: (
         bssid: String,
         deviceMac: String,
@@ -609,7 +672,8 @@ private fun MonitorModeContent(
                 accessPoint = accessPoint,
                 device = device,
                 savedNetworks = savedNetworks,
-                handshakeTestResults = handshakeTestResults,
+                handshakeTest = handshakeTest,
+                onClearHandshakeTestResult = onClearHandshakeTestResult,
                 onDismiss = { selectedDevice = null },
                 onExport = { subtypeIds ->
                     selectedDevice = null
@@ -643,7 +707,8 @@ private fun MonitorModeContent(
                 accessPoint = accessPoint,
                 device = device,
                 savedNetworks = savedNetworks,
-                handshakeTestResults = handshakeTestResults,
+                handshakeTest = handshakeTest,
+                onClearHandshakeTestResult = onClearHandshakeTestResult,
                 onDismiss = { handshakeAction = null },
                 onExport = { _ -> },
                 onTestHandshake = { handshakeId, password ->

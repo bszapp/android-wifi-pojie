@@ -63,7 +63,8 @@ import kotlinx.parcelize.Parcelize
  * 进入下一轮。自动保存只改变 Service 收到新凭据后的保存行为。
  * 保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，不触发连接。捕获
  * 结果按每次获取顺序保留，不按 BSSID、SSID 或密码去重；其中 mac 表示目标接入点 BSSID。
- * 离开混合扫描模式或停止任务时，Service 必须结束当前任务终端。
+ * 混合扫描模式只约束任务的启动时机。任务获得 ID 后独立运行，切换信息源不得停止任务；
+ * 只有显式停止任务、任务自行结束或 Service 进程结束时才结束当前任务终端。
  */
 
 enum class TaskExecutionState {

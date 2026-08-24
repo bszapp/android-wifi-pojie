@@ -5,6 +5,7 @@ import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -33,7 +34,9 @@ class WifiListUiState(
 
     val monitorPcapExports = controller.wifiList.monitorPcapExports
 
-    val monitorHandshakeTestResults = controller.wifiList.monitorHandshakeTestResults
+    private val _monitorHandshakeTest = MutableStateFlow(MonitorHandshakeTestUiState())
+    val monitorHandshakeTest: StateFlow<MonitorHandshakeTestUiState> =
+        _monitorHandshakeTest.asStateFlow()
 
     val monitorMapFilterState = controller.monitorMapFilterState
 
@@ -62,6 +65,15 @@ class WifiListUiState(
                         !current.isScanning
 
                 if (shouldAutoScan) startScan()
+            }
+        }
+        scope.launch {
+            controller.wifiList.monitorHandshakeTestResults.collect { result ->
+                if (result.requestId == _monitorHandshakeTest.value.requestId) {
+                    _monitorHandshakeTest.value = MonitorHandshakeTestUiState(
+                        outcome = result.outcome,
+                    )
+                }
             }
         }
     }
@@ -116,12 +128,19 @@ class WifiListUiState(
         deviceMac: String,
         handshakeId: String,
         password: String,
-    ) = controller.wifiList.testMonitorHandshake(
-        bssid = bssid,
-        deviceMac = deviceMac,
-        handshakeId = handshakeId,
-        password = password,
-    )
+    ) {
+        val requestId = controller.wifiList.testMonitorHandshake(
+            bssid = bssid,
+            deviceMac = deviceMac,
+            handshakeId = handshakeId,
+            password = password,
+        )
+        _monitorHandshakeTest.value = MonitorHandshakeTestUiState(requestId = requestId)
+    }
+
+    fun clearMonitorHandshakeTestResult() {
+        _monitorHandshakeTest.value = MonitorHandshakeTestUiState()
+    }
 
     suspend fun saveWifiNetwork(ssid: String, password: String): Int =
         controller.wifiList.saveWifiNetwork(ssid, password)
@@ -158,3 +177,8 @@ class WifiListUiState(
     fun disconnectCurrentNetwork(networkId: Int) =
         controller.wifiList.disconnectCurrentNetwork(networkId)
 }
+
+data class MonitorHandshakeTestUiState(
+    val requestId: String? = null,
+    val outcome: MonitorHandshakeTestOutcome? = null,
+)

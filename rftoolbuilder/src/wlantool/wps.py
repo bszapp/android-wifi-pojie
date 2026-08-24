@@ -14,6 +14,9 @@ import csv
 import argparse
 
 
+RESTART_AFTER_EXCLUDED_AP = object()
+
+
 def get_hex(line):
     a = line.split(':', 3)
     return a[2].replace(' ', '').upper()
@@ -67,8 +70,15 @@ class Companion:
 
     def __init_wpa_supplicant(self):
         print('[*] Running wpa_supplicant…')
-        cmd = 'wpa_supplicant -K -d -Dnl80211,wext,hostapd,wired -i{} -c{}'.format(self.interface, self.tempconf)
-        self.wpas = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+        cmd = [
+            'wpa_supplicant',
+            '-K',
+            '-d',
+            '-Dnl80211,wext,hostapd,wired',
+            '-i{}'.format(self.interface),
+            '-c{}'.format(self.tempconf),
+        ]
+        self.wpas = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
         # Waiting for wpa_supplicant control interface initialization
         while True:
@@ -78,6 +88,29 @@ class Companion:
             if os.path.exists(self.wpas_ctrl_path):
                 break
             time.sleep(.1)
+
+    def __stop_wpa_supplicant(self):
+        if not hasattr(self, 'wpas'):
+            return
+        if self.wpas.poll() is None:
+            self.wpas.terminate()
+            try:
+                self.wpas.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.wpas.kill()
+                self.wpas.wait()
+        if self.wpas.stdout is not None:
+            self.wpas.stdout.close()
+
+    def __restart_wpa_supplicant(self):
+        # An excluded AP may already have WPS messages buffered in the old
+        # process. Never reuse that process after it was selected.
+        self.__stop_wpa_supplicant()
+        try:
+            os.remove(self.wpas_ctrl_path)
+        except FileNotFoundError:
+            pass
+        self.__init_wpa_supplicant()
 
     def sendOnly(self, command):
         """Sends command to wpa_supplicant"""
@@ -171,13 +204,8 @@ class Companion:
         elif pbc_mode and ('selected BSS ' in line):
             found_bssid = line.split('selected BSS ')[-1].split()[0].upper()
             if found_bssid in self.exclude_macs:
-                print(f'[*] Ignored excluded AP: {found_bssid}. Cancelling and retrying PBC...')
-                self.sendOnly('WPS_CANCEL')
-                self.sendOnly(f'BLACKLIST {found_bssid}')
-                self.sendOnly(f'BSSID_IGNORE {found_bssid}')
-                time.sleep(0.5)
-                self.sendOnly('WPS_PBC')
-                self.connection_status.clear()
+                print(f'[*] Ignored excluded AP: {found_bssid}. Aborting this WPS session...')
+                self.connection_status.status = 'EXCLUDED_AP'
                 return True
 
             self.connection_status.bssid = found_bssid
@@ -185,12 +213,8 @@ class Companion:
         elif 'Trying to authenticate with' in line:
             target_bssid = line.split('Trying to authenticate with ')[-1].split()[0].upper()
             if target_bssid in self.exclude_macs:
-                print(f'[*] Excluded AP {target_bssid} is authenticating. Cancelling and retrying...')
-                self.sendOnly('WPS_CANCEL')
-                self.sendOnly('DISCONNECT')
-                time.sleep(0.5)
-                self.sendOnly('WPS_PBC')
-                self.connection_status.clear()
+                print(f'[*] Excluded AP {target_bssid} is authenticating. Aborting this WPS session...')
+                self.connection_status.status = 'EXCLUDED_AP'
                 return True
 
             self.connection_status.status = 'authenticating'
@@ -253,14 +277,29 @@ class Companion:
         print(f'[i] Credentials saved to {filename}.txt, {filename}.csv')
 
     def single_connection(self, bssid=None, pin=None, pbc_mode=False, verbose=None):
+        while True:
+            result = self.__single_connection_attempt(
+                bssid=bssid,
+                pin=pin,
+                pbc_mode=pbc_mode,
+                verbose=verbose,
+            )
+            if result is not RESTART_AFTER_EXCLUDED_AP:
+                return result
+            print('[*] Recreating wpa_supplicant before retrying PBC selection…')
+            self.__restart_wpa_supplicant()
+            time.sleep(0.5)
+
+    def __single_connection_attempt(self, bssid=None, pin=None, pbc_mode=False, verbose=None):
         self.connection_status.clear()
         self.wpas.stdout.read(300)   # Clean the pipe
 
         if pbc_mode:
-            # Send BLACKLIST command for any excluded MACs
+            # Consume each reply before WPS_PBC so a stale blacklist reply
+            # cannot be mistaken for the WPS_PBC response.
             for mac in self.exclude_macs:
-                self.sendOnly(f'BLACKLIST {mac}')
-                self.sendOnly(f'BSSID_IGNORE {mac}')
+                self.sendAndReceive(f'BLACKLIST {mac}')
+                self.sendAndReceive(f'BSSID_IGNORE {mac}')
 
             if bssid:
                 print(f"[*] Starting WPS push button connection to {bssid}…")
@@ -294,12 +333,23 @@ class Companion:
                 break
             elif self.connection_status.status == 'WPS_FAIL':
                 break
+            elif self.connection_status.status == 'EXCLUDED_AP':
+                break
+
+        if self.connection_status.status == 'EXCLUDED_AP':
+            # Do not let an excluded AP reach WSC_Done. Confirm cancellation,
+            # then discard the entire process and its buffered handshake output.
+            self.sendAndReceive('WPS_CANCEL')
+            return RESTART_AFTER_EXCLUDED_AP
 
         # In the historical/incomplete mode, stop immediately after M8 exposes
         # the Network Key. In complete mode wpa_supplicant must be allowed to
         # build and transmit WSC_Done; WPS-SUCCESS confirms that protocol end.
         if not self.connection_status.protocol_completed:
-            self.sendOnly('WPS_CANCEL')
+            # The process can be cleaned up immediately after this method
+            # returns, so do not merely queue WPS_CANCEL. Waiting for its reply
+            # guarantees wpa_supplicant handled the incomplete termination.
+            self.sendAndReceive('WPS_CANCEL')
 
         if self.connection_status.wpa_psk:
             final_bssid = bssid
@@ -319,7 +369,7 @@ class Companion:
 
     def cleanup(self):
         self.retsock.close()
-        self.wpas.terminate()
+        self.__stop_wpa_supplicant()
         os.remove(self.res_socket_file)
         shutil.rmtree(self.tempdir, ignore_errors=True)
         os.remove(self.tempconf)

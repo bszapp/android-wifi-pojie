@@ -80,9 +80,7 @@ internal sealed interface ConnectWifiSheetContent {
         val hasSavedConfiguration: Boolean,
     ) : ConnectWifiSheetContent
 
-    data class Task(
-        val taskId: Long,
-    ) : ConnectWifiSheetContent
+    data object Task : ConnectWifiSheetContent
 }
 
 internal enum class ConnectWifiOperation {
@@ -325,7 +323,7 @@ internal fun ConnectWifiTaskSheet(
 
                     ConnectWifiAnimatedPage.TASK -> {
                         ConnectWifiTaskLogContent(
-                            taskId = taskContent?.taskId,
+                            taskId = trackedTask?.snapshot?.taskId,
                             taskType = taskType,
                             running = running,
                             entries = trackedTask
