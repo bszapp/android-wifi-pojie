@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -53,6 +54,8 @@ internal fun WpsPbcTaskSheet(
     isStarting: Boolean,
     onContinuousCaptureChange: (Boolean) -> Unit,
     onAutoSaveToDeviceChange: (Boolean) -> Unit,
+    onUseIncompleteProtocolChange: (Boolean) -> Unit,
+    onIgnoreRepeatedDevicesChange: (Boolean) -> Unit,
     onStop: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -108,6 +111,16 @@ internal fun WpsPbcTaskSheet(
                         checked = progress.autoSaveToDevice,
                         onCheckedChange = onAutoSaveToDeviceChange,
                     )
+                    WpsOptionRow(
+                        title = "不使用完整协议",
+                        checked = progress.useIncompleteProtocol,
+                        onCheckedChange = onUseIncompleteProtocolChange,
+                    )
+                    WpsOptionRow(
+                        title = "忽略重复握手的设备",
+                        checked = progress.ignoreRepeatedDevices,
+                        onCheckedChange = onIgnoreRepeatedDevicesChange,
+                    )
                 }
             }
             if (running) {
@@ -141,7 +154,10 @@ private fun WpsCapturedNetworksPage(progress: TaskProgress.WpsPbc?) {
             contentPadding = PaddingValues(vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(networks, key = { "${it.mac}\u0000${it.ssid}" }) { network ->
+            itemsIndexed(
+                items = networks,
+                key = { index, _ -> index },
+            ) { _, network ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     BasicComponent(
                         title = network.ssid,

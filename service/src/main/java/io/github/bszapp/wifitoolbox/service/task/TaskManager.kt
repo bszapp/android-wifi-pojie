@@ -359,6 +359,8 @@ internal class TaskManager(
         when (update.payload) {
             is TaskUpdatePayload.WpsPbcContinuousCapture,
             is TaskUpdatePayload.WpsPbcAutoSaveToDevice,
+            is TaskUpdatePayload.WpsPbcUseIncompleteProtocol,
+            is TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices,
             -> Unit
         }
     }

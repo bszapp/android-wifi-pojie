@@ -426,6 +426,16 @@ fun WifiList(
                     TaskUpdateRequest(TaskUpdatePayload.WpsPbcAutoSaveToDevice(enabled)),
                 )
             },
+            onUseIncompleteProtocolChange = { enabled ->
+                vm.taskTracker.updateTrackedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcUseIncompleteProtocol(enabled)),
+                )
+            },
+            onIgnoreRepeatedDevicesChange = { enabled ->
+                vm.taskTracker.updateTrackedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices(enabled)),
+                )
+            },
             onStop = vm.taskTracker::stopTrackedTask,
             onDismiss = {
                 vm.taskTracker.clearTracking()

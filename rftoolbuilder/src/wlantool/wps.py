@@ -21,11 +21,14 @@ def get_hex(line):
 
 class ConnectionStatus:
     def __init__(self):
-        self.status = ''   # Must be WSC_NACK, WPS_FAIL or GOT_PSK
+        self.status = ''
         self.last_m_message = 0
         self.essid = ''
         self.wpa_psk = ''
         self.bssid = ''
+        self.wsc_done_built = False
+        self.wps_success_received = False
+        self.protocol_completed = False
 
     def isFirstHalfValid(self):
         return self.last_m_message > 5
@@ -36,11 +39,13 @@ class ConnectionStatus:
 
 class Companion:
     """Main application part"""
-    def __init__(self, interface, save_result=False, print_debug=False, bssid=None, exclude_macs=None):
+    def __init__(self, interface, save_result=False, print_debug=False, bssid=None,
+                 exclude_macs=None, complete_protocol=False):
         self.interface = interface
         self.save_result = save_result
         self.print_debug = print_debug
         self.exclude_macs = exclude_macs or []
+        self.complete_protocol = complete_protocol
 
         self.tempdir = tempfile.mkdtemp()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
@@ -106,7 +111,10 @@ class Companion:
             sys.stderr.write(line + '\n')
 
         if line.startswith('WPS: '):
-            if 'Building Message M' in line:
+            if 'Building Message WSC_Done' in line:
+                self.connection_status.wsc_done_built = True
+                self.__print_with_indicators('*', 'Sending WPS Message WSC_Done…')
+            elif 'Building Message M' in line:
                 n = int(line.split('Building Message M')[1].replace('D', ''))
                 self.connection_status.last_m_message = n
                 self.__print_with_indicators('*', 'Sending WPS Message M{}…'.format(n))
@@ -139,6 +147,24 @@ class Companion:
             if '-> SCANNING' in line:
                 self.connection_status.status = 'scanning'
                 self.__print_with_indicators('*', 'Scanning…')
+        elif 'WPS-SUCCESS' in line:
+            self.connection_status.wps_success_received = True
+        elif (
+            'EAPOL: SUPP_BE entering state RECEIVE' in line
+            and self.connection_status.wsc_done_built
+            and self.connection_status.wps_success_received
+        ):
+            # This state is entered after eapol_send() returns, so the WSC_Done
+            # response has reached the driver instead of merely being built.
+            self.connection_status.status = 'WPS_SUCCESS'
+            self.connection_status.protocol_completed = True
+            print('[+] WPS protocol completed')
+        elif 'WPS-TIMEOUT' in line:
+            self.connection_status.status = 'WPS_FAIL'
+            print('[-] wpa_supplicant returned WPS-TIMEOUT')
+        elif 'WPS-OVERLAP-DETECTED' in line:
+            self.connection_status.status = 'WPS_FAIL'
+            print('[-] wpa_supplicant detected WPS PBC overlap')
         elif ('WPS-FAIL' in line) and (self.connection_status.status != ''):
             self.connection_status.status = 'WPS_FAIL'
             print('[-] wpa_supplicant returned WPS-FAIL')
@@ -262,14 +288,20 @@ class Companion:
                 break
             if self.connection_status.status == 'WSC_NACK':
                 break
-            elif self.connection_status.status == 'GOT_PSK':
+            elif self.connection_status.status == 'GOT_PSK' and not self.complete_protocol:
+                break
+            elif self.connection_status.status == 'WPS_SUCCESS':
                 break
             elif self.connection_status.status == 'WPS_FAIL':
                 break
 
-        self.sendOnly('WPS_CANCEL')
+        # In the historical/incomplete mode, stop immediately after M8 exposes
+        # the Network Key. In complete mode wpa_supplicant must be allowed to
+        # build and transmit WSC_Done; WPS-SUCCESS confirms that protocol end.
+        if not self.connection_status.protocol_completed:
+            self.sendOnly('WPS_CANCEL')
 
-        if self.connection_status.status == 'GOT_PSK':
+        if self.connection_status.wpa_psk:
             final_bssid = bssid
             if pbc_mode and self.connection_status.bssid:
                 final_bssid = self.connection_status.bssid
@@ -279,7 +311,7 @@ class Companion:
             self.__credentialPrint(display_pin, self.connection_status.wpa_psk, self.connection_status.essid)
             if self.save_result:
                 self.__saveResult(final_bssid, self.connection_status.essid, display_pin, self.connection_status.wpa_psk)
-            return True
+            return not self.complete_protocol or self.connection_status.protocol_completed
         return False
 
     def __print_with_indicators(self, level, msg):
@@ -347,6 +379,20 @@ if __name__ == '__main__':
         type=str,
         help='Comma-separated list of MAC addresses to exclude in PBC any mode (e.g. xx:xx:xx:xx:xx:xx,yy:yy:yy:yy:yy:yy)'
     )
+    protocol_group = parser.add_mutually_exclusive_group()
+    protocol_group.add_argument(
+        '--incomplete-protocol',
+        dest='complete_protocol',
+        action='store_false',
+        help='Stop after receiving credentials without waiting for WSC_Done (default)'
+    )
+    protocol_group.add_argument(
+        '--complete-protocol',
+        dest='complete_protocol',
+        action='store_true',
+        help='Wait for wpa_supplicant to send WSC_Done and report WPS-SUCCESS'
+    )
+    parser.set_defaults(complete_protocol=False)
     parser.add_argument(
         '-w', '--write',
         action='store_true',
@@ -384,7 +430,14 @@ if __name__ == '__main__':
         die('Unable to up interface "{}"'.format(args.interface))
 
     try:
-        companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=args.bssid, exclude_macs=exclude_macs)
+        companion = Companion(
+            args.interface,
+            args.write,
+            print_debug=args.verbose,
+            bssid=args.bssid,
+            exclude_macs=exclude_macs,
+            complete_protocol=args.complete_protocol,
+        )
         companion.single_connection(bssid=args.bssid, pin=args.pin, pbc_mode=args.pbc)
     except KeyboardInterrupt:
         print("\nAborting…")

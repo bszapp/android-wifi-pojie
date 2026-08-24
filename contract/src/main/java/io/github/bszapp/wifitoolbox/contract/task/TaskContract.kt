@@ -55,11 +55,15 @@ import kotlinx.parcelize.Parcelize
  * chroot 终端运行 `/wlantool` 工作目录中的 `python wps.py -i wlan0 --pbc`；指定目标时追加
  * `-mac <BSSID>`。Service 必须把脚本 stdout 与 stderr 的每一条非空输出原样写入任务日志，
  * 并从脚本输出的 Selected AP、WPA PSK 和 AP SSID 行组合出捕获结果。App 可以在任务运行
- * 期间更新持续捕获与自动保存选项。持续捕获完全由 Service 控制：本轮脚本结束后，根据最新
- * 配置重新运行同一脚本；脚本本身不接收持续捕获控制命令。自动保存只改变 Service 收到新
- * 凭据后的保存行为。保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，
- * 不触发连接。捕获结果中的 mac 表示目标接入点 BSSID。离开混合扫描模式或停止任务时，
- * Service 必须结束当前任务终端。
+ * 期间更新持续捕获、自动保存、不使用完整协议和忽略重复握手设备选项。持续捕获完全由
+ * Service 控制：本轮脚本结束后，根据最新配置重新运行同一脚本；脚本本身不接收持续捕获
+ * 控制命令。每轮脚本启动都必须显式传入当时的不使用完整协议选项；开启忽略重复握手设备时，
+ * 还必须通过 `-exclude` 传入本任务此前已经捕获到的全部 BSSID。运行时更新这两个脚本选项时，
+ * Service 必须结束当前一轮脚本，并立即使用更新后的完整参数重新启动；不得等待持续捕获自然
+ * 进入下一轮。自动保存只改变 Service 收到新凭据后的保存行为。
+ * 保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，不触发连接。捕获
+ * 结果按每次获取顺序保留，不按 BSSID、SSID 或密码去重；其中 mac 表示目标接入点 BSSID。
+ * 离开混合扫描模式或停止任务时，Service 必须结束当前任务终端。
  */
 
 enum class TaskExecutionState {
@@ -76,6 +80,8 @@ sealed class TaskProgress : Parcelable {
     data class WpsPbc(
         val continuousCapture: Boolean,
         val autoSaveToDevice: Boolean,
+        val useIncompleteProtocol: Boolean,
+        val ignoreRepeatedDevices: Boolean,
         val networks: List<WpsCapturedNetwork>,
     ) : TaskProgress()
 }
@@ -146,6 +152,8 @@ data class ConnectWifiTaskRequest(
 data class WpsPbcTaskInput(
     val continuousCapture: Boolean = false,
     val autoSaveToDevice: Boolean = true,
+    val useIncompleteProtocol: Boolean = true,
+    val ignoreRepeatedDevices: Boolean = true,
     val targetMac: String? = null,
 ) : Parcelable
 
@@ -174,6 +182,14 @@ sealed class TaskUpdatePayload : Parcelable {
     ) : TaskUpdatePayload()
 
     data class WpsPbcAutoSaveToDevice(
+        val enabled: Boolean,
+    ) : TaskUpdatePayload()
+
+    data class WpsPbcUseIncompleteProtocol(
+        val enabled: Boolean,
+    ) : TaskUpdatePayload()
+
+    data class WpsPbcIgnoreRepeatedDevices(
         val enabled: Boolean,
     ) : TaskUpdatePayload()
 }

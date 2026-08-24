@@ -21,9 +21,12 @@ internal class WpsPbcTask(
 ) : ServiceTask {
     private val lock = Any()
     private val events = LinkedBlockingQueue<Event>()
-    private val networks = linkedMapOf<String, WpsCapturedNetwork>()
+    private val networks = mutableListOf<WpsCapturedNetwork>()
     private var continuousCapture = input.continuousCapture
     private var autoSaveToDevice = input.autoSaveToDevice
+    private var useIncompleteProtocol = input.useIncompleteProtocol
+    private var ignoreRepeatedDevices = input.ignoreRepeatedDevices
+    private var scriptSettingsRevision = 0L
     private val targetMac = input.targetMac?.lowercase()
     private var terminalId: Long? = null
     private var context: TaskContext? = null
@@ -33,6 +36,7 @@ internal class WpsPbcTask(
         publishProgress(context)
         context.log(
             "启动 WPS-PBC：持续捕获=$continuousCapture 自动保存=$autoSaveToDevice " +
+                "不使用完整协议=$useIncompleteProtocol 忽略重复握手设备=$ignoreRepeatedDevices " +
                 "目标设备=${targetMac ?: "任意"}",
         )
 
@@ -41,9 +45,18 @@ internal class WpsPbcTask(
             context.ensureRunning()
             attempt++
             context.log("开始第 $attempt 次 WPS-PBC 捕获")
-            val exitCode = runSingleAttempt(context)
-            if (exitCode != 0) {
-                throw IllegalStateException("WPS-PBC 脚本异常退出：exitCode=$exitCode")
+            when (val result = runSingleAttempt(context)) {
+                AttemptResult.RestartForSettingsUpdate -> {
+                    context.log("WPS-PBC 脚本参数已更新，使用最新选项重新开始本轮捕获")
+                    continue
+                }
+                is AttemptResult.Exited -> {
+                    if (result.exitCode != 0) {
+                        throw IllegalStateException(
+                            "WPS-PBC 脚本异常退出：exitCode=${result.exitCode}",
+                        )
+                    }
+                }
             }
 
             val shouldContinue = synchronized(lock) { continuousCapture }
@@ -65,6 +78,18 @@ internal class WpsPbcTask(
                 is TaskUpdatePayload.WpsPbcAutoSaveToDevice -> {
                     autoSaveToDevice = payload.enabled
                 }
+                is TaskUpdatePayload.WpsPbcUseIncompleteProtocol -> {
+                    if (useIncompleteProtocol != payload.enabled) {
+                        useIncompleteProtocol = payload.enabled
+                        scriptSettingsRevision++
+                    }
+                }
+                is TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices -> {
+                    if (ignoreRepeatedDevices != payload.enabled) {
+                        ignoreRepeatedDevices = payload.enabled
+                        scriptSettingsRevision++
+                    }
+                }
             }
             progressContext = context
         }
@@ -75,6 +100,10 @@ internal class WpsPbcTask(
                         "持续捕获已更新为 ${payload.enabled}"
                     is TaskUpdatePayload.WpsPbcAutoSaveToDevice ->
                         "自动保存已更新为 ${payload.enabled}"
+                    is TaskUpdatePayload.WpsPbcUseIncompleteProtocol ->
+                        "不使用完整协议已更新为 ${payload.enabled}"
+                    is TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices ->
+                        "忽略重复握手设备已更新为 ${payload.enabled}"
                 },
             )
             publishProgress(it)
@@ -82,8 +111,9 @@ internal class WpsPbcTask(
         return true
     }
 
-    private fun runSingleAttempt(context: TaskContext): Int {
+    private fun runSingleAttempt(context: TaskContext): AttemptResult {
         val outputParser = AttemptOutputParser(targetMac)
+        val settings = captureAttemptSettings()
         val id = terminalManager.createChrootTerminal(
             rootfsPath = environment.rootfsPath,
             runtimePath = environment.runtimePath,
@@ -100,9 +130,14 @@ internal class WpsPbcTask(
         synchronized(lock) { terminalId = id }
 
         try {
-            terminalManager.writeInput(id, buildStartCommand())
+            val startCommand = buildStartCommand(settings)
+            context.log("启动脚本：$startCommand")
+            terminalManager.writeInput(id, startCommand)
             while (true) {
                 context.ensureRunning()
+                if (hasScriptSettingsChanged(settings.revision)) {
+                    return AttemptResult.RestartForSettingsUpdate
+                }
                 when (val event = events.poll(EVENT_POLL_MILLIS, TimeUnit.MILLISECONDS)) {
                     null -> Unit
                     is Event.OutputLine -> {
@@ -128,7 +163,7 @@ internal class WpsPbcTask(
                     is Event.TerminalExited -> {
                         if (event.terminalId != id) continue
                         outputParser.incompleteResultMessage()?.let(context::log)
-                        return event.exitCode
+                        return AttemptResult.Exited(event.exitCode)
                     }
                 }
             }
@@ -145,7 +180,7 @@ internal class WpsPbcTask(
         network: WpsCapturedNetwork,
     ) {
         synchronized(lock) {
-            networks["${network.mac}\u0000${network.ssid}"] = network
+            networks += network
         }
         context.log("已获取网络：ssid=${network.ssid} mac=${network.mac}")
         publishProgress(context)
@@ -172,16 +207,58 @@ internal class WpsPbcTask(
             TaskProgress.WpsPbc(
                 continuousCapture = continuousCapture,
                 autoSaveToDevice = autoSaveToDevice,
-                networks = networks.values.toList(),
+                useIncompleteProtocol = useIncompleteProtocol,
+                ignoreRepeatedDevices = ignoreRepeatedDevices,
+                networks = networks.toList(),
             )
         }
         context.updateProgress(progress)
         context.log("WPS-PBC 进度已发布：networkCount=${progress.networks.size}")
     }
 
-    private fun buildStartCommand(): String = buildString {
-        append("exec python wps.py -i wlan0 --pbc")
+    private fun captureAttemptSettings(): AttemptSettings = synchronized(lock) {
+        AttemptSettings(
+            revision = scriptSettingsRevision,
+            useIncompleteProtocol = useIncompleteProtocol,
+            excludedMacs = if (ignoreRepeatedDevices) {
+                networks.asSequence().map { it.mac.lowercase() }.distinct().toList()
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    private fun hasScriptSettingsChanged(revision: Long): Boolean = synchronized(lock) {
+        scriptSettingsRevision != revision
+    }
+
+    private fun buildStartCommand(settings: AttemptSettings): String = buildString {
+        append("exec python wps.py -i wlan0 --pbc ")
+        append(
+            if (settings.useIncompleteProtocol) {
+                "--incomplete-protocol"
+            } else {
+                "--complete-protocol"
+            },
+        )
         targetMac?.let { append(" -mac ").append(it) }
+        if (settings.excludedMacs.isNotEmpty()) {
+            append(" -exclude ").append(settings.excludedMacs.joinToString(","))
+        }
+    }
+
+    private data class AttemptSettings(
+        val revision: Long,
+        val useIncompleteProtocol: Boolean,
+        val excludedMacs: List<String>,
+    )
+
+    private sealed interface AttemptResult {
+        data object RestartForSettingsUpdate : AttemptResult
+
+        data class Exited(
+            val exitCode: Int,
+        ) : AttemptResult
     }
 
     private class AttemptOutputParser(initialMac: String?) {
