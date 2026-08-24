@@ -13,14 +13,14 @@ import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogTransport
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogTransport
 import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 import io.github.bszapp.wifitoolbox.service.task.TaskManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 
 @Keep
 open class MainService(
-    //TODO:这咋neverused？
-    serviceContext: Context? = null,
+    private val serviceContext: Context? = null,
 ) : IMainService.Stub() {
 
     private val serviceLogRecorder = ServiceLogRecorders.service
@@ -35,14 +35,9 @@ open class MainService(
         initializeFromStartupInfo(startupInfo)
     }
 
-    private val initializer = ServiceInitializer()
+    private val initializer = ServiceInitializer(serviceContext)
 
     private val wifiLogAnalyzer = WifiLogAnalyzer(systemWifiLogRecorder)
-
-    private val taskManager = TaskManager(
-        androidApiProvider = { initializer.androidApi },
-        wifiLogAnalyzer = wifiLogAnalyzer,
-    )
 
     private val communication = ServiceCommunication(
         startupInfoProvider = { initializer.requireStartupInfo() },
@@ -75,13 +70,26 @@ open class MainService(
         onWifiStateChanged = communication::broadcastWifiState,
         onSavedWifiListChanged = communication::broadcastSavedWifiList,
         onInformationSourceStateChanged = communication::broadcastWifiInformationSourceState,
+        onMonitorRecordedBytesChanged = communication::broadcastMonitorRecordedBytes,
         onMonitorPcapExported = communication::broadcastMonitorPcapExported,
-        onMonitorHandshakeTestResult = { requestId, outcome ->
-            communication.broadcastMonitorHandshakeTestResult(requestId, outcome.wireValue)
-        },
         onError = { operation, error ->
             communication.broadcastServiceError(
                 source = "Service.WifiListController",
+                operation = operation,
+                error = error,
+            )
+        },
+    )
+
+    private val taskManager = TaskManager(
+        androidApiProvider = { initializer.androidApi },
+        wifiLogAnalyzer = wifiLogAnalyzer,
+        terminalManager = terminalManager,
+        hybridTaskEnvironmentProvider = wifiListController::getHybridTaskEnvironment,
+        onSavedWifiNetworksChanged = wifiListController::refreshSavedNetworks,
+        onError = { operation, error ->
+            communication.broadcastServiceError(
+                source = "Service.WpsPbcTask",
                 operation = operation,
                 error = error,
             )
@@ -186,6 +194,17 @@ open class MainService(
         wifiListController.refreshSavedNetworks()
     }
 
+    override fun saveWifiNetwork(ssid: String, password: String): Int =
+        communication.callFromApp {
+            try {
+                initializer.androidApi
+                    ?.saveWifiNetwork(ssid, password)
+                    ?: throw IllegalStateException("AndroidApi 尚未初始化")
+            } finally {
+                wifiListController.refreshSavedNetworks()
+            }
+        }
+
     override fun startWifiScan(): Boolean = communication.callFromApp {
         Log.d(TAG, "应用同步请求启动 Wi-Fi 扫描")
         try {
@@ -210,8 +229,12 @@ open class MainService(
         runtimePath: String,
         terminalPath: String,
     ) = communication.callFromApp {
+        val resolvedSource = WifiInformationSource.fromWireValue(source)
+        if (resolvedSource != WifiInformationSource.HYBRID) {
+            taskManager.stopHybridTaskIfRunning()
+        }
         wifiListController.setInformationSource(
-            source = WifiInformationSource.fromWireValue(source),
+            source = resolvedSource,
             rootfsPath = rootfsPath,
             runtimePath = runtimePath,
             terminalPath = terminalPath,
@@ -226,6 +249,7 @@ open class MainService(
         runtimePath: String,
         terminalPath: String,
     ) = communication.callFromApp {
+        taskManager.stopHybridTaskIfRunning()
         wifiListController.enterMonitorMode(
             command = command,
             targetChannel = targetChannel,
@@ -270,19 +294,17 @@ open class MainService(
         )
     }
 
-    override fun testMonitorHandshake(
+    override fun exportMonitorDisconnectionPcap(
         requestId: String,
         bssid: String,
         deviceMac: String,
-        handshakeId: String,
-        password: String,
+        disconnectionId: String,
     ) = communication.callFromApp {
-        wifiListController.testMonitorHandshake(
+        wifiListController.exportMonitorDisconnectionPcap(
             requestId = requestId,
             bssid = bssid,
             deviceMac = deviceMac,
-            handshakeId = handshakeId,
-            password = password,
+            disconnectionId = disconnectionId,
         )
     }
 
@@ -396,6 +418,11 @@ open class MainService(
         taskManager.stop(taskId)
     }
 
+    override fun updateTask(taskId: Long, update: TaskUpdateRequest): Boolean =
+        communication.callFromApp {
+            taskManager.update(taskId, update)
+        }
+
     override fun getCurrentTaskId(): Long = communication.callFromApp {
         taskManager.currentTaskId()
     }
@@ -505,8 +532,9 @@ open class MainService(
         wifiEventMonitor.stop()
         wifiListController.stop()
         containerTerminalController.close()
-        terminalManager.close()
         taskManager.close()
+        initializer.close()
+        terminalManager.close()
         wifiLogAnalyzer.close()
         serviceLogRecorder.setOnVisibleRangeChanged(null)
         systemWifiLogRecorder.setOnVisibleRangeChanged(null)

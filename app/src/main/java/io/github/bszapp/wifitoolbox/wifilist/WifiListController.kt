@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -302,7 +303,11 @@ class WifiListController(
                 withContext(Dispatchers.Main.immediate) {
                     if (!isCurrentConnection(generation, callback)) return@withContext
                     result
-                        .onSuccess { _informationSourceState.value = it }
+                        .onSuccess { incoming ->
+                            _informationSourceState.update { current ->
+                                mergeInformationSourceState(current, incoming)
+                            }
+                        }
                         .onFailure {
                             report(
                                 operation = "解码 Wi-Fi 信息源状态",
@@ -316,6 +321,26 @@ class WifiListController(
                     generation,
                     snapshotGeneration,
                 )
+            }
+        }
+
+        override fun onMonitorRecordedBytesChanged(recordedBytes: Long) {
+            if (recordedBytes < 0L || !isCurrentConnection(generation, this)) return
+            _informationSourceState.update { current ->
+                val statistics = current?.monitorStatistics
+                if (
+                    current?.source != WifiInformationSource.MONITOR ||
+                    current.initializing ||
+                    statistics == null
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        monitorStatistics = statistics.copy(
+                            recordedBytes = maxOf(statistics.recordedBytes, recordedBytes),
+                        ),
+                    )
+                }
             }
         }
 
@@ -333,20 +358,6 @@ class WifiListController(
                         requestId = requestId,
                         path = path,
                         fileName = fileName,
-                    ),
-                )
-            }
-        }
-
-        override fun onMonitorHandshakeTestResult(requestId: String, outcome: Int) {
-            if (!isCurrentConnection(generation, this)) return
-            val callback = this
-            scope.launch(Dispatchers.Main.immediate) {
-                if (!isCurrentConnection(generation, callback)) return@launch
-                _monitorHandshakeTestResults.emit(
-                    MonitorHandshakeTestResult(
-                        requestId = requestId,
-                        outcome = MonitorHandshakeTestOutcome.fromWireValue(outcome),
                     ),
                 )
             }
@@ -392,7 +403,7 @@ class WifiListController(
     override fun enterMonitorMode(
         command: String,
         targetChannel: Int,
-        targetFrequencyMhz: Int,
+        targetFrequencyMhz: Int,//TODO:这啥玩意有用吗
     ) {
         val appDataDirectory = requireNotNull(context.filesDir.parentFile)
         val rootfs = File(appDataDirectory, "rootfs")
@@ -474,6 +485,25 @@ class WifiListController(
         }
     }
 
+    override fun saveMonitorHc22000(content: String, destination: Uri) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val output = context.contentResolver.openOutputStream(destination, "wt")
+                    ?: throw IOException("无法打开 HC22000 文件写入流")
+                output.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    writer.write(content.trimEnd('\r', '\n'))
+                    writer.write("\n")
+                }
+            } catch (error: CancellationException) {
+                runCatching { context.contentResolver.delete(destination, null, null) }
+                throw error
+            } catch (error: Throwable) {
+                runCatching { context.contentResolver.delete(destination, null, null) }
+                report("保存 HC22000", error)
+            }
+        }
+    }
+
     override fun exportMonitorHandshakePcap(
         bssid: String,
         deviceMac: String,
@@ -491,6 +521,23 @@ class WifiListController(
         return requestId
     }
 
+    override fun exportMonitorDisconnectionPcap(
+        bssid: String,
+        deviceMac: String,
+        disconnectionId: String,
+    ): String {
+        val requestId = UUID.randomUUID().toString()
+        callService("导出断开事件 PCAP") { service ->
+            service.exportMonitorDisconnectionPcap(
+                requestId,
+                bssid,
+                deviceMac,
+                disconnectionId,
+            )
+        }
+        return requestId
+    }
+
     override fun testMonitorHandshake(
         bssid: String,
         deviceMac: String,
@@ -498,17 +545,50 @@ class WifiListController(
         password: String,
     ): String {
         val requestId = UUID.randomUUID().toString()
-        callService("校验 WPA/WPA2 握手包") { service ->
-            service.testMonitorHandshake(
-                requestId,
-                bssid,
-                deviceMac,
-                handshakeId,
-                password,
+        scope.launch(Dispatchers.Default) {
+            val outcome = runCatching {
+                val record = _informationSourceState.value
+                    ?.monitorStatistics
+                    ?.accessPoints
+                    ?.firstOrNull { it.bssid.equals(bssid, ignoreCase = true) }
+                    ?.devices
+                    ?.firstOrNull { it.mac.equals(deviceMac, ignoreCase = true) }
+                    ?.handshakes
+                    ?.firstOrNull { it.id == handshakeId }
+                    ?: error("找不到指定的握手记录")
+                val hc22000 = record.hc22000
+                    ?.takeIf(String::isNotBlank)
+                    ?: error("该握手记录缺少可校验的 HC22000 数据")
+                if (Hc22000Validator.validate(hc22000, password)) {
+                    MonitorHandshakeTestOutcome.MATCHED
+                } else {
+                    MonitorHandshakeTestOutcome.NOT_MATCHED
+                }
+            }.getOrElse { error ->
+                report("校验 WPA/WPA2 握手包", error)
+                MonitorHandshakeTestOutcome.FAILED
+            }
+            _monitorHandshakeTestResults.emit(
+                MonitorHandshakeTestResult(requestId = requestId, outcome = outcome),
             )
         }
         return requestId
     }
+
+    override suspend fun saveWifiNetwork(ssid: String, password: String): Int =
+        withContext(Dispatchers.IO) {
+            val lease = currentLease()
+                ?: throw IllegalStateException("service 未连接").also { error ->
+                    report("保存 Wi-Fi 网络", error)
+                }
+            try {
+                check(isCurrentLease(lease)) { "service 连接已经失效" }
+                lease.service.saveWifiNetwork(ssid, password)
+            } catch (error: Throwable) {
+                report("保存 Wi-Fi 网络：$ssid", error)
+                throw error
+            }
+        }
 
     /**
      * 同步等待 Service 的 WifiScanner.onSuccess/onFailure。
@@ -634,6 +714,33 @@ class WifiListController(
                     )
                 }
             }
+    }
+
+    private fun mergeInformationSourceState(
+        current: WifiInformationSourceState?,
+        incoming: WifiInformationSourceState,
+    ): WifiInformationSourceState {
+        val currentStatistics = current?.monitorStatistics
+        val incomingStatistics = incoming.monitorStatistics
+        return if (
+            current?.source == WifiInformationSource.MONITOR &&
+            incoming.source == WifiInformationSource.MONITOR &&
+            !current.initializing &&
+            !incoming.initializing &&
+            currentStatistics != null &&
+            incomingStatistics != null
+        ) {
+            incoming.copy(
+                monitorStatistics = incomingStatistics.copy(
+                    recordedBytes = maxOf(
+                        currentStatistics.recordedBytes,
+                        incomingStatistics.recordedBytes,
+                    ),
+                ),
+            )
+        } else {
+            incoming
+        }
     }
 
     private fun acknowledgeSavedWifiList(

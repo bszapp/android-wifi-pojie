@@ -8,6 +8,7 @@ import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.terminal.ITerminalController
 import io.github.bszapp.wifitoolbox.contract.task.ITaskController
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -21,4 +22,6 @@ interface IAppController {
     val containers: IContainerController
     val errors: SharedFlow<AppError>
     val isExiting: StateFlow<Boolean>//TODO:未免显得有些突兀的分类？
+    val monitorMapFilterState: StateFlow<MonitorMapFilterState>
+    fun updateMonitorMapFilterState(state: MonitorMapFilterState)
 }

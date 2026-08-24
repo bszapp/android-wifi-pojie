@@ -6,6 +6,7 @@ import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiResponse;
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo;
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest;
 import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot;
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest;
 import io.github.bszapp.wifitoolbox.service.IMainServiceCallback;
 import io.github.bszapp.wifitoolbox.service.IServiceLogCallback;
 import io.github.bszapp.wifitoolbox.service.IContainerTerminalCallback;
@@ -28,13 +29,14 @@ interface IMainService {
     void unregisterServiceLogCallback(IServiceLogCallback cb);
 
     void refreshSavedWifiNetworks();
+    int saveWifiNetwork(String ssid, String password);
     boolean startWifiScan();
     void setWifiInformationSource(int source, String rootfsPath, String runtimePath, String terminalPath);//TODO:为什么传这么多信息，服务不知道吗？下同
     void enterMonitorMode(String command, int targetChannel, int targetFrequencyMhz, String rootfsPath, String runtimePath, String terminalPath);
     void exportMonitorPcap(String requestId, String mode, String bssid, String deviceMac, in String[] subtypeIds);
     void exportMonitorHandshakePcap(String requestId, String bssid, String deviceMac, String handshakeId);
+    void exportMonitorDisconnectionPcap(String requestId, String bssid, String deviceMac, String disconnectionId);
     oneway void releaseMonitorPcapExport(String path);
-    void testMonitorHandshake(String requestId, String bssid, String deviceMac, String handshakeId, String password);
 
     void startContainerTerminal(String rootfsPath, String runtimePath, String terminalPath);
     void stopContainerTerminal();//TODO:不指定id就stop？
@@ -57,6 +59,7 @@ interface IMainService {
 
     long startTask(in TaskStartRequest request);
     boolean stopTask(long taskId);
+    boolean updateTask(long taskId, in TaskUpdateRequest update);
     long getCurrentTaskId();
     TaskSnapshot getTaskSnapshot(long taskId);
     long[] getTaskLogRange(long taskId);

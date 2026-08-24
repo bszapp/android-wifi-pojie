@@ -37,11 +37,29 @@ import kotlinx.parcelize.Parcelize
  *
  * ## ConnectWifiTask
  *
- * 连接任务的输入目前只有 Android 已保存网络的 networkId。Service 必须先订阅长期运行的
- * Wi-Fi 日志分析器，再调用 IWifiManager.enableNetwork(networkId, true)。进度和失败判断只
- * 使用订阅后收到的分析事件。出现其他 SSID 的任意分析事件时，本任务立即结束并在日志中
- * 记录失败。WPA 1/4 开始握手步骤计时；每次 2/4 将握手计数加一，计数大于配置的最大次数
- * 时立即结束；Key negotiation completed 表示连接成功。所有结论都写入任务日志。
+ * 连接任务通过 [ConnectWifiTaskType] 记录 UI 应显示“使用已保存的网络连接”还是“连接到
+ * 网络”，通过 [ConnectWifiTarget] 独立记录实际连接目标。已保存目标使用 Android networkId；
+ * 临时目标用于测试连通性。Service 必须删除同 SSID 的现有 WifiConfiguration（如有），再以
+ * 任务输入的 SSID 和密码新增测试配置并使用该配置连接。该删除操作不可恢复；UI 在确认存在
+ * 已保存配置时必须额外取得用户确认。任务无论以成功、失败、超时、停止或异常结束，都必须
+ * 断开测试连接并删除当前测试配置。Service 必须先订阅长期运行的 Wi-Fi 日志分析器，再提交
+ * 连接请求。进度和
+ * 失败判断只使用订阅后收到的分析事件。出现其他
+ * SSID 的任意分析事件时，本任务立即结束并在日志中记录失败。WPA 1/4 开始握手步骤计时；
+ * 每次 2/4 将握手计数加一，计数大于配置的最大次数时立即结束；Key negotiation completed
+ * 表示连接成功。所有结论都写入任务日志。
+ *
+ * ## WpsPbcTask
+ *
+ * WPS-PBC 任务只允许在混合扫描模式已经完成初始化时启动。任务通过 Service 管理的
+ * chroot 终端运行 `/wlantool` 工作目录中的 `python wps.py -i wlan0 --pbc`；指定目标时追加
+ * `-mac <BSSID>`。Service 必须把脚本 stdout 与 stderr 的每一条非空输出原样写入任务日志，
+ * 并从脚本输出的 Selected AP、WPA PSK 和 AP SSID 行组合出捕获结果。App 可以在任务运行
+ * 期间更新持续捕获与自动保存选项。持续捕获完全由 Service 控制：本轮脚本结束后，根据最新
+ * 配置重新运行同一脚本；脚本本身不接收持续捕获控制命令。自动保存只改变 Service 收到新
+ * 凭据后的保存行为。保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，
+ * 不触发连接。捕获结果中的 mac 表示目标接入点 BSSID。离开混合扫描模式或停止任务时，
+ * Service 必须结束当前任务终端。
  */
 
 enum class TaskExecutionState {
@@ -53,6 +71,12 @@ enum class TaskExecutionState {
 sealed class TaskProgress : Parcelable {
     data class ConnectWifi(
         val stage: ConnectWifiStage,
+    ) : TaskProgress()
+
+    data class WpsPbc(
+        val continuousCapture: Boolean,
+        val autoSaveToDevice: Boolean,
+        val networks: List<WpsCapturedNetwork>,
     ) : TaskProgress()
 }
 
@@ -66,9 +90,27 @@ enum class ConnectWifiStage {
     WPA_HANDSHAKE_4_OF_4,
 }
 
+enum class ConnectWifiTaskType {
+    USE_SAVED_NETWORK,
+    CONNECT_TO_NETWORK,
+}
+
+@Parcelize
+sealed class ConnectWifiTarget : Parcelable {
+    data class SavedNetwork(
+        val networkId: Int,
+    ) : ConnectWifiTarget()
+
+    data class TemporaryNetwork(
+        val ssid: String,
+        val password: String,
+    ) : ConnectWifiTarget()
+}
+
 @Parcelize
 data class ConnectWifiTaskInput(
-    val networkId: Int,
+    val type: ConnectWifiTaskType,
+    val target: ConnectWifiTarget,
 ) : Parcelable
 
 @Parcelize
@@ -101,11 +143,45 @@ data class ConnectWifiTaskRequest(
 ) : Parcelable
 
 @Parcelize
+data class WpsPbcTaskInput(
+    val continuousCapture: Boolean = false,
+    val autoSaveToDevice: Boolean = true,
+    val targetMac: String? = null,
+) : Parcelable
+
+@Parcelize
+data class WpsCapturedNetwork(
+    val ssid: String,
+    val mac: String,
+    val password: String,
+) : Parcelable
+
+@Parcelize
 sealed class TaskRequestPayload : Parcelable {
     data class ConnectWifi(
         val request: ConnectWifiTaskRequest,
     ) : TaskRequestPayload()
+
+    data class WpsPbc(
+        val input: WpsPbcTaskInput,
+    ) : TaskRequestPayload()
 }
+
+@Parcelize
+sealed class TaskUpdatePayload : Parcelable {
+    data class WpsPbcContinuousCapture(
+        val enabled: Boolean,
+    ) : TaskUpdatePayload()
+
+    data class WpsPbcAutoSaveToDevice(
+        val enabled: Boolean,
+    ) : TaskUpdatePayload()
+}
+
+@Parcelize
+data class TaskUpdateRequest(
+    val payload: TaskUpdatePayload,
+) : Parcelable
 
 @Parcelize
 data class TaskStartRequest(
@@ -119,6 +195,12 @@ data class TaskStartRequest(
             payload = TaskRequestPayload.ConnectWifi(
                 request = ConnectWifiTaskRequest(input, config),
             ),
+        )
+
+        fun wpsPbc(
+            input: WpsPbcTaskInput = WpsPbcTaskInput(),
+        ) = TaskStartRequest(
+            payload = TaskRequestPayload.WpsPbc(input),
         )
     }
 }

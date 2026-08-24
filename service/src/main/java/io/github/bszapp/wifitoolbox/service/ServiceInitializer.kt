@@ -1,11 +1,14 @@
 package io.github.bszapp.wifitoolbox.service
 
+import android.content.Context
 import android.os.Process
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 
 /** 管理服务初始化：校验启动信息、补齐服务自身信息、清理旧实例、创建 AndroidApi。 */
-class ServiceInitializer {
+class ServiceInitializer(
+    private val serviceContext: Context? = null,
+) {
     private val lock = Any()
 
     @Volatile
@@ -41,7 +44,10 @@ class ServiceInitializer {
             )
 
             killOlderInstances()
-            val api = AndroidApi(callerPackage = callerPackage())
+            val api = AndroidApi(
+                callerPackage = callerPackage(),
+                serviceContext = serviceContext,
+            )
             startupInfo = completed
             androidApi = api
 
@@ -58,6 +64,11 @@ class ServiceInitializer {
 
     fun requireStartupInfo(): StartupInfo =
         startupInfo ?: throw IllegalStateException("服务启动信息未初始化")
+
+    fun close() {
+        androidApi?.close()
+        androidApi = null
+    }
 
     private fun readCurrentUidText(): String = runCatching {
         Runtime.getRuntime()

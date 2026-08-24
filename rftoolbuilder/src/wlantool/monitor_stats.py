@@ -2,10 +2,9 @@
 """Incrementally analyze and export a growing monitor-mode pcap file."""
 
 import argparse
+import base64
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
-import hmac
 import json
 import os
 import struct
@@ -22,10 +21,14 @@ from scapy.layers.inet import UDP
 
 PUBLISH_INTERVAL_SECONDS = 0.05
 REALTIME_WINDOW_SECONDS = 1.0
+ANALYSIS_BATCH_MAX_BYTES = 1024 * 1024
+ANALYSIS_BATCH_MAX_PACKETS = 2048
 PCAP_GLOBAL_HEADER_SIZE = 24
 PCAP_PACKET_HEADER_SIZE = 16
 MAX_CAPTURED_PACKET_SIZE = 16 * 1024 * 1024
 EXPORT_BATCH_PACKETS = 2048
+HANDSHAKE_TIMEOUT_MILLIS = 15_000
+HANDSHAKE_EVENT_CHUNK_BYTES = 24 * 1024
 WPS_VENDOR_PREFIX = b"\x00\x50\xf2\x04"
 WPS_DEVICE_NAME = 0x1011
 WPS_MANUFACTURER = 0x1021
@@ -176,12 +179,15 @@ def normalized_unicast_mac(value):
         return None
     normalized = value.lower()
     try:
-        first_octet = int(normalized.split(":", 1)[0], 16)
-    except (ValueError, IndexError):
+        parts = normalized.split(":")
+        if len(parts) != 6 or any(len(part) != 2 for part in parts):
+            return None
+        octets = tuple(int(part, 16) for part in parts)
+    except ValueError:
         return None
-    if first_octet & 1:
+    if not any(octets) or octets[0] & 1:
         return None
-    return normalized
+    return ":".join(f"{octet:02x}" for octet in octets)
 
 
 def packet_bssid(packet):
@@ -235,7 +241,7 @@ def ssid_element(packet):
 
 def packet_ssid(packet):
     dot11 = packet.getlayer(Dot11)
-    if dot11 is None or int(dot11.type) != 0 or int(dot11.subtype) not in (0, 2, 5, 8):
+    if dot11 is None or int(dot11.type) != 0 or int(dot11.subtype) not in (0, 2, 4, 5, 8):
         return None
     return decode_text(ssid_element(packet))
 
@@ -490,6 +496,7 @@ def empty_access_point(bssid):
     return {
         "bssid": bssid,
         "ssid": None,
+        "ssidBytes": None,
         "ssidVisibility": "unknown",
         "securityProtocols": set(),
         "ssidContextPacket": None,
@@ -571,44 +578,21 @@ def frame_groups_snapshot(device):
     return groups
 
 
-def handshake_snapshot(record, now):
-    end_unix_millis = (
-        int(now * 1000)
-        if record["status"] == "inProgress"
-        else record["lastUnixMillis"]
-    )
-    return {
-        "id": record["id"],
-        "startUnixMillis": record["startUnixMillis"],
-        "durationMillis": max(
-            0,
-            end_unix_millis - record["startUnixMillis"],
-        ),
-        "status": record["status"],
-        "canValidate": record["validation"] is not None,
-        "validationDataComplete": record["validationDataComplete"],
-        "capturedSteps": sorted(
-            record["capturedSteps"],
-            key=HANDSHAKE_STEP_ORDER.index,
-        ),
-        "failedAtStep": record["failedAtStep"],
-        "failureReason": record["failureReason"],
-        "m2AttemptCount": record["m2AttemptCount"],
-        "exportPacketCount": len(record["packets"]),
-    }
-
-
 def device_snapshot(device, now):
+    captured_subtype_ids = {
+        subtype_id
+        for subtype_id, counter in device["frameCounters"].items()
+        if counter["packetCount"] > 0
+    }
     return {
         "mac": device["mac"],
         "name": device["name"],
         "frameGroups": frame_groups_snapshot(device),
-        "handshakes": [
-            handshake_snapshot(record, now) for record in device["handshakes"]
-        ],
+        "handshakes": [],
         "uploadBytesPerSecond": byte_rate(device["uploadSamples"], now),
         "downloadBytesPerSecond": byte_rate(device["downloadSamples"], now),
         "signal": signal_snapshot(device["signal"], now),
+        "probeOnly": captured_subtype_ids == {"management.5"},
     }
 
 
@@ -668,13 +652,13 @@ HANDSHAKE_STEP_ORDER = (
 )
 
 
-def append_handshake_packet(record, packet_record, handshake_lock):
+def append_handshake_packet(record, packet_record):
     packet_offset, packet_header, packet_payload = packet_record
-    with handshake_lock:
-        if packet_offset in record["packetOffsets"]:
-            return
-        record["packetOffsets"].add(packet_offset)
-        record["packets"].append((packet_offset, packet_header, packet_payload))
+    if packet_offset in record["packetOffsets"]:
+        return False
+    record["packetOffsets"].add(packet_offset)
+    record["packets"].append((packet_offset, packet_header, packet_payload))
+    return True
 
 
 def create_handshake_record(
@@ -683,8 +667,6 @@ def create_handshake_record(
     bssid,
     device_mac,
     timestamp_millis,
-    handshake_cache,
-    handshake_lock,
     next_handshake_id,
 ):
     handshake_id = str(next_handshake_id)
@@ -704,53 +686,65 @@ def create_handshake_record(
         "m3ReplayCounter": None,
         "m2AttemptCount": 0,
         "validation": None,
-        "validationDataComplete": False,
+        "ssidBytes": access_point["ssidBytes"],
+        "timedOut": False,
         "packetOffsets": set(),
         "packets": [],
-        "hasSsidContext": False,
-        "hasSecurityContext": False,
+        "transferredPacketCount": 0,
+        "transferSequence": 0,
+        "headerTransferred": False,
+        "transferredHc22000": None,
+        "latestSsidContextPacket": None,
+        "latestSecurityContextPacket": access_point["securityContextPacket"],
     }
     device["handshakes"].append(record)
     device["activeHandshake"] = record
-    with handshake_lock:
-        handshake_cache[handshake_id] = record
+    ssid_context_packets = [
+        packet
+        for packet in (
+            access_point["ssidContextPacket"],
+            device["ssidContextPacket"],
+        )
+        if packet is not None
+    ]
+    if ssid_context_packets:
+        record["latestSsidContextPacket"] = max(
+            ssid_context_packets,
+            key=lambda value: value[0],
+        )
     context_packets = {
         packet[0]: packet
         for packet in (
-            access_point["ssidContextPacket"],
+            record["latestSsidContextPacket"],
             access_point["securityContextPacket"],
-            device["ssidContextPacket"],
         )
         if packet is not None
     }
     for packet_record in sorted(context_packets.values(), key=lambda value: value[0]):
-        append_handshake_packet(record, packet_record, handshake_lock)
-    record["hasSsidContext"] = (
-        access_point["ssidContextPacket"] is not None
-        or device["ssidContextPacket"] is not None
-    )
-    record["hasSecurityContext"] = access_point["securityContextPacket"] is not None
+        append_handshake_packet(record, packet_record)
     return record, next_handshake_id + 1
 
 
 def add_context_to_handshake_records(
     access_point,
     packet_record,
-    has_ssid,
+    ssid_bytes,
     has_security,
-    handshake_lock,
+    device_macs=None,
 ):
-    for device in access_point["devices"].values():
+    devices = access_point["devices"]
+    selected_devices = (
+        devices.values()
+        if device_macs is None
+        else (devices[mac] for mac in device_macs if mac in devices)
+    )
+    for device in selected_devices:
         for record in device["handshakes"]:
-            needs_ssid = has_ssid and not record["hasSsidContext"]
-            needs_security = has_security and not record["hasSecurityContext"]
-            if not needs_ssid and not needs_security:
-                continue
-            append_handshake_packet(record, packet_record, handshake_lock)
-            if needs_ssid:
-                record["hasSsidContext"] = True
-            if needs_security:
-                record["hasSecurityContext"] = True
+            if ssid_bytes:
+                record["ssidBytes"] = ssid_bytes
+                record["latestSsidContextPacket"] = packet_record
+            if has_security:
+                record["latestSecurityContextPacket"] = packet_record
 
 
 def add_handshake_step(record, step):
@@ -762,7 +756,6 @@ def set_handshake_validation_data(
     record,
     authenticator_key,
     supplicant_key,
-    handshake_lock,
 ):
     if (
         authenticator_key["descriptorVersion"]
@@ -772,17 +765,16 @@ def set_handshake_validation_data(
         or not any(supplicant_key["mic"])
     ):
         return
-    record["validationDataComplete"] = True
-    if supplicant_key["descriptorVersion"] not in (1, 2):
+    if supplicant_key["descriptorVersion"] not in (1, 2, 3):
         return
-    with handshake_lock:
-        record["validation"] = {
-            "anonce": authenticator_key["nonce"],
-            "snonce": supplicant_key["nonce"],
-            "descriptorVersion": supplicant_key["descriptorVersion"],
-            "mic": supplicant_key["mic"],
-            "eapolFrame": supplicant_key["frame"],
-        }
+    record["validation"] = {
+        "anonce": authenticator_key["nonce"],
+        "snonce": supplicant_key["nonce"],
+        "descriptorVersion": supplicant_key["descriptorVersion"],
+        "mic": supplicant_key["mic"],
+        "eapolFrame": supplicant_key["frame"],
+        "messagePair": 0 if authenticator_key["message"] == 1 else 2,
+    }
 
 
 def finish_handshake(
@@ -791,14 +783,22 @@ def finish_handshake(
     timestamp_millis,
     failure_reason=None,
     failed_at_step=None,
+    timed_out=False,
 ):
     record = device["activeHandshake"]
     if record is None:
         return
+    for context_packet in (
+        record["latestSsidContextPacket"],
+        record["latestSecurityContextPacket"],
+    ):
+        if context_packet is not None:
+            append_handshake_packet(record, context_packet)
     record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
     record["status"] = status
     record["failureReason"] = failure_reason
     record["failedAtStep"] = failed_at_step
+    record["timedOut"] = timed_out
     device["activeHandshake"] = None
 
 
@@ -816,6 +816,17 @@ def management_status_code(packet):
 def authentication_sequence(packet):
     dot11 = packet.getlayer(Dot11)
     if dot11 is None:
+        return None
+
+
+def management_reason_code(packet):
+    dot11 = packet.getlayer(Dot11)
+    if dot11 is None:
+        return None
+    reason = getattr(dot11.payload, "reason", None)
+    try:
+        return int(reason) if reason is not None else None
+    except (TypeError, ValueError):
         return None
     sequence = getattr(dot11.payload, "seqnum", None)
     try:
@@ -844,12 +855,21 @@ def process_handshake_packet(
     transmitter,
     packet_record,
     packet_timestamp,
-    handshake_cache,
-    handshake_lock,
     next_handshake_id,
 ):
     timestamp_millis = int(packet_timestamp * 1000)
     record = device["activeHandshake"]
+    if (
+        record is not None
+        and timestamp_millis - record["startUnixMillis"] >= HANDSHAKE_TIMEOUT_MILLIS
+    ):
+        finish_handshake(
+            device,
+            "unknown",
+            record["startUnixMillis"] + HANDSHAKE_TIMEOUT_MILLIS,
+            timed_out=True,
+        )
+        record = None
     management_subtype = None
     dot11 = packet.getlayer(Dot11)
     if dot11 is not None and int(dot11.type) == 0:
@@ -861,8 +881,11 @@ def process_handshake_packet(
         and authentication_sequence(packet) in (None, 1)
     )
     starts_association = management_subtype in (0, 2) and transmitter == device_mac
-    if starts_association and packet_ssid(packet):
+    association_ssid_bytes = ssid_element(packet) if starts_association else None
+    if starts_association and association_ssid_bytes:
         device["ssidContextPacket"] = packet_record
+        access_point["ssidBytes"] = association_ssid_bytes
+        access_point["ssid"] = decode_text(association_ssid_bytes)
     if record is not None and (
         (starts_authentication and record["lastStep"] != "authentication")
         or (
@@ -887,15 +910,14 @@ def process_handshake_packet(
                 bssid,
                 device_mac,
                 timestamp_millis,
-                handshake_cache,
-                handshake_lock,
                 next_handshake_id,
             )
         if record is not None:
             previous_step = record["lastStep"]
-            append_handshake_packet(record, packet_record, handshake_lock)
-            if packet_ssid(packet):
-                record["hasSsidContext"] = True
+            append_handshake_packet(record, packet_record)
+            packet_ssid_bytes = ssid_element(packet)
+            if packet_ssid_bytes:
+                record["ssidBytes"] = packet_ssid_bytes
             record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
             if management_subtype == 11:
                 add_handshake_step(record, "authentication")
@@ -945,7 +967,7 @@ def process_handshake_packet(
             and record["m3ReplayCounter"] is not None
             and is_protected_data_from_device(packet, transmitter, device_mac)
         ):
-            append_handshake_packet(record, packet_record, handshake_lock)
+            append_handshake_packet(record, packet_record)
             finish_handshake(device, "success", timestamp_millis)
         return next_handshake_id
     record = device["activeHandshake"]
@@ -971,11 +993,9 @@ def process_handshake_packet(
             bssid,
             device_mac,
             timestamp_millis,
-            handshake_cache,
-            handshake_lock,
             next_handshake_id,
         )
-    append_handshake_packet(record, packet_record, handshake_lock)
+    append_handshake_packet(record, packet_record)
     record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
     add_handshake_step(record, f"eapol{key['message']}")
     if key["message"] == 1:
@@ -989,7 +1009,7 @@ def process_handshake_packet(
             m1 is not None
             and key["replayCounter"] == m1["replayCounter"]
         ):
-            set_handshake_validation_data(record, m1, key, handshake_lock)
+            set_handshake_validation_data(record, m1, key)
     elif key["message"] == 3:
         record["m3ReplayCounter"] = key["replayCounter"]
         m2 = record["lastM2"]
@@ -997,7 +1017,7 @@ def process_handshake_packet(
             m2 is not None
             and key["replayCounter"] == m2["replayCounter"] + 1
         ):
-            set_handshake_validation_data(record, key, m2, handshake_lock)
+            set_handshake_validation_data(record, key, m2)
     elif key["message"] == 4:
         if (
             record["m3ReplayCounter"] is None
@@ -1007,67 +1027,46 @@ def process_handshake_packet(
     return next_handshake_id
 
 
-def wpa_pairwise_key_expansion(pmk, bssid, device_mac, anonce, snonce):
-    ap_mac = bytes.fromhex(bssid.replace(":", ""))
-    station_mac = bytes.fromhex(device_mac.replace(":", ""))
-    data = (
-        min(ap_mac, station_mac)
-        + max(ap_mac, station_mac)
-        + min(anonce, snonce)
-        + max(anonce, snonce)
-    )
-    label = b"Pairwise key expansion"
-    output = b""
-    counter = 0
-    while len(output) < 64:
-        output += hmac.new(
-            pmk,
-            label + b"\x00" + data + bytes((counter,)),
-            hashlib.sha1,
-        ).digest()
-        counter += 1
-    return output[:64]
-
-
-def password_to_pmk(ssid, password):
-    if len(password) == 64:
-        try:
-            return bytes.fromhex(password)
-        except ValueError:
-            pass
-    if not 8 <= len(password) <= 63:
-        raise ValueError("WPA/WPA2 密码长度无效")
-    return hashlib.pbkdf2_hmac(
-        "sha1",
-        password.encode("utf-8"),
-        ssid.encode("utf-8"),
-        4096,
-        32,
-    )
-
-
-def validate_handshake_record(record, ssid, password):
+def build_hc22000(record, ssid_bytes):
     validation = record["validation"]
-    if validation is None:
-        raise ValueError("该握手记录缺少可校验的 EAPOL 1/4 与 2/4")
-    pmk = password_to_pmk(ssid, password)
-    ptk = wpa_pairwise_key_expansion(
-        pmk,
-        record["bssid"],
-        record["deviceMac"],
-        validation["anonce"],
-        validation["snonce"],
+    if validation is None or not ssid_bytes or len(ssid_bytes) > 32:
+        return None
+    return "*".join(
+        (
+            "WPA",
+            "02",
+            validation["mic"].hex(),
+            record["bssid"].replace(":", ""),
+            record["deviceMac"].replace(":", ""),
+            ssid_bytes.hex(),
+            validation["anonce"].hex(),
+            validation["eapolFrame"].hex(),
+            f"{validation['messagePair']:02x}",
+        )
     )
-    eapol_frame = bytearray(validation["eapolFrame"])
-    eapol_frame[81:97] = b"\x00" * 16
-    descriptor_version = validation["descriptorVersion"]
-    if descriptor_version == 1:
-        calculated_mic = hmac.new(ptk[:16], eapol_frame, hashlib.md5).digest()
-    elif descriptor_version == 2:
-        calculated_mic = hmac.new(ptk[:16], eapol_frame, hashlib.sha1).digest()[:16]
-    else:
-        raise ValueError(f"不支持的 EAPOL 密钥描述符版本: {descriptor_version}")
-    return hmac.compare_digest(calculated_mic, validation["mic"])
+
+
+def has_intermediate_handshake_gap(record):
+    steps = record["capturedSteps"]
+    if "eapol4" in steps:
+        return not {"eapol1", "eapol2", "eapol3"}.issubset(steps)
+    if "eapol3" in steps:
+        return not {"eapol1", "eapol2"}.issubset(steps)
+    if "eapol2" in steps:
+        return "eapol1" not in steps
+    return False
+
+
+def handshake_capture_quality(record, hc22000):
+    password_failure = record["failureReason"] in (
+        "m2RetryLimitExceeded",
+        "disconnectedAfterM2",
+    )
+    if (record["status"] == "success" or password_failure) and hc22000 is None:
+        return "dataIncomplete"
+    if record["timedOut"] or has_intermediate_handshake_gap(record):
+        return "partiallyMissing"
+    return "complete"
 
 
 class GrowingPcapReader:
@@ -1078,6 +1077,7 @@ class GrowingPcapReader:
         self.link_type = None
         self.offset = 0
         self.nanosecond_timestamps = False
+        self.global_header = None
 
     def close(self):
         if self.stream is not None:
@@ -1090,6 +1090,7 @@ class GrowingPcapReader:
         self.link_type = None
         self.offset = 0
         self.nanosecond_timestamps = False
+        self.global_header = None
 
     def _open_if_ready(self):
         if self.stream is not None:
@@ -1114,16 +1115,18 @@ class GrowingPcapReader:
             stream.close()
             raise ValueError("不支持的 pcap 文件格式")
         self.stream = stream
+        self.global_header = header
         self.endian = endian
         self.link_type = struct.unpack(endian + "I", header[20:24])[0]
         self.offset = PCAP_GLOBAL_HEADER_SIZE
         self.nanosecond_timestamps = magic in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d")
         return True
 
-    def read_available(self, limit_offset=None, max_packets=None):
+    def read_available(self, limit_offset=None, max_packets=None, max_bytes=None):
         if not self._open_if_ready():
             return []
         packets = []
+        batch_bytes = 0
         while max_packets is None or len(packets) < max_packets:
             packet_start = self.offset
             header = self.stream.read(PCAP_PACKET_HEADER_SIZE)
@@ -1139,11 +1142,16 @@ class GrowingPcapReader:
                 return packets
             if included_length > MAX_CAPTURED_PACKET_SIZE:
                 raise ValueError(f"pcap 数据包长度异常: {included_length}")
+            packet_bytes = PCAP_PACKET_HEADER_SIZE + included_length
+            if max_bytes is not None and packets and batch_bytes + packet_bytes > max_bytes:
+                self.stream.seek(packet_start)
+                return packets
             payload = self.stream.read(included_length)
             if len(payload) < included_length:
                 self.stream.seek(packet_start)
                 return packets
             self.offset = packet_end
+            batch_bytes += packet_bytes
             divisor = 1_000_000_000 if self.nanosecond_timestamps else 1_000_000
             timestamp = seconds + fraction / divisor
             packets.append(
@@ -1226,17 +1234,145 @@ def export_filtered(source_path, output, cutoff, bssid, device_mac, subtype_ids)
         reader.close()
 
 
-def export_handshake(source_path, output, packets):
-    if not packets:
-        raise ValueError("握手记录没有可导出的数据包")
-    with open(source_path, "rb") as source:
-        global_header = source.read(PCAP_GLOBAL_HEADER_SIZE)
-    if len(global_header) != PCAP_GLOBAL_HEADER_SIZE:
-        raise IOError("原始 pcap 文件头尚未写入完成")
-    output.write(global_header)
-    for _, packet_header, packet_payload in sorted(packets, key=lambda value: value[0]):
-        output.write(packet_header)
-        output.write(packet_payload)
+def finish_timed_out_handshakes(access_points, handshake_device_keys, now_millis):
+    for bssid, device_mac in tuple(handshake_device_keys):
+        access_point = access_points.get(bssid)
+        device = access_point["devices"].get(device_mac) if access_point else None
+        record = device["activeHandshake"] if device else None
+        if (
+            record is not None
+            and now_millis - record["startUnixMillis"] >= HANDSHAKE_TIMEOUT_MILLIS
+        ):
+            finish_handshake(
+                device,
+                "unknown",
+                record["startUnixMillis"] + HANDSHAKE_TIMEOUT_MILLIS,
+                timed_out=True,
+            )
+
+
+def handshake_event_metadata(record, hc22000=None):
+    return {
+        "id": record["id"],
+        "bssid": record["bssid"],
+        "deviceMac": record["deviceMac"],
+        "status": record["status"],
+        "captureQuality": handshake_capture_quality(record, hc22000),
+        "capturedSteps": sorted(
+            record["capturedSteps"],
+            key=HANDSHAKE_STEP_ORDER.index,
+        ),
+        "failedAtStep": record["failedAtStep"],
+        "failureReason": record["failureReason"],
+        "m2AttemptCount": record["m2AttemptCount"],
+        "exportPacketCount": len(record["packets"]),
+    }
+
+
+def handoff_handshake_updates(
+    access_points,
+    handshake_device_keys,
+    pcap_header,
+    event_writer,
+):
+    remaining_keys = set()
+    for bssid, device_mac in tuple(handshake_device_keys):
+        access_point = access_points.get(bssid)
+        device = access_point["devices"].get(device_mac) if access_point else None
+        if device is None:
+            continue
+        for record in list(device["handshakes"]):
+            hc22000 = build_hc22000(record, record["ssidBytes"])
+            pending_packets = record["packets"][record["transferredPacketCount"] :]
+            for _, packet_header, packet_payload in pending_packets:
+                if not record["headerTransferred"]:
+                    if pcap_header is None or len(pcap_header) != PCAP_GLOBAL_HEADER_SIZE:
+                        raise IOError("pcap 文件头尚未写入完成")
+                    header_base64 = base64.b64encode(pcap_header).decode("ascii")
+                else:
+                    header_base64 = None
+                part = packet_header + packet_payload
+                for offset in range(0, len(part), HANDSHAKE_EVENT_CHUNK_BYTES):
+                    chunk = part[offset : offset + HANDSHAKE_EVENT_CHUNK_BYTES]
+                    event = {
+                        "type": "handshakeData",
+                        "handshake": handshake_event_metadata(record, hc22000),
+                        "sequence": record["transferSequence"],
+                        "pcapPartBase64": base64.b64encode(chunk).decode("ascii"),
+                        "packetComplete": offset + len(chunk) >= len(part),
+                    }
+                    if header_base64 is not None:
+                        event["pcapHeaderBase64"] = header_base64
+                        header_base64 = None
+                        record["headerTransferred"] = True
+                    event_writer.write(event)
+                    record["transferSequence"] += 1
+                record["transferredPacketCount"] += 1
+
+            if hc22000 is not None and hc22000 != record["transferredHc22000"]:
+                event_writer.write(
+                    {
+                        "type": "handshakeValidation",
+                        "handshake": handshake_event_metadata(record, hc22000),
+                        "hc22000": hc22000,
+                    }
+                )
+                record["transferredHc22000"] = hc22000
+
+            if record["status"] != "inProgress":
+                event_writer.write(
+                    {
+                        "type": "handshakeFinished",
+                        "handshake": handshake_event_metadata(record, hc22000),
+                    }
+                )
+                device["handshakes"].remove(record)
+        if device["handshakes"]:
+            remaining_keys.add((bssid, device_mac))
+    return remaining_keys
+
+
+def handoff_disconnection(
+    pcap_header,
+    event_writer,
+    disconnection_id,
+    bssid,
+    device_mac,
+    packet,
+    packet_record,
+    timestamp_millis,
+):
+    if pcap_header is None or len(pcap_header) != PCAP_GLOBAL_HEADER_SIZE:
+        raise IOError("pcap 文件头尚未写入完成")
+    dot11 = packet.getlayer(Dot11)
+    subtype = int(dot11.subtype)
+    event_metadata = {
+        "id": str(disconnection_id),
+        "bssid": bssid,
+        "deviceMac": device_mac,
+        "timestampUnixMillis": timestamp_millis,
+        "disconnectionType": (
+            "disassociation" if subtype == 10 else "deauthentication"
+        ),
+        "reasonCode": management_reason_code(packet),
+        "exportPacketCount": 1,
+    }
+    _, packet_header, packet_payload = packet_record
+    payload = packet_header + packet_payload
+    sequence = 0
+    for offset in range(0, len(payload), HANDSHAKE_EVENT_CHUNK_BYTES):
+        chunk = payload[offset : offset + HANDSHAKE_EVENT_CHUNK_BYTES]
+        event = {
+            "type": "disconnectionData",
+            "disconnection": event_metadata,
+            "sequence": sequence,
+            "pcapPartBase64": base64.b64encode(chunk).decode("ascii"),
+            "packetComplete": offset + len(chunk) >= len(payload),
+        }
+        if sequence == 0:
+            event["pcapHeaderBase64"] = base64.b64encode(pcap_header).decode("ascii")
+        event_writer.write(event)
+        sequence += 1
 
 
 def run_export(
@@ -1244,8 +1380,6 @@ def run_export(
     source_path,
     cutoff,
     allowed_directory,
-    handshake_cache,
-    handshake_lock,
     event_writer,
 ):
     request_id = str(command.get("requestId", ""))
@@ -1279,20 +1413,6 @@ def run_export(
                     device_mac,
                     subtype_ids,
                 )
-            elif mode == "handshake":
-                bssid = normalized_unicast_mac(command.get("bssid"))
-                device_mac = normalized_unicast_mac(command.get("deviceMac"))
-                handshake_id = str(command.get("handshakeId", ""))
-                if not bssid or not device_mac or not handshake_id:
-                    raise ValueError("握手包导出缺少必要参数")
-                with handshake_lock:
-                    record = handshake_cache.get(handshake_id)
-                    if record is None:
-                        raise ValueError("找不到指定的握手记录")
-                    if record["bssid"] != bssid or record["deviceMac"] != device_mac:
-                        raise ValueError("握手记录与指定接入点或设备不一致")
-                    packets = list(record["packets"])
-                export_handshake(source_path, output, packets)
             else:
                 raise ValueError(f"未知导出模式: {mode}")
             output.flush()
@@ -1323,50 +1443,12 @@ def run_export(
         )
 
 
-def run_handshake_test(command, handshake_cache, handshake_lock, event_writer):
-    request_id = str(command.get("requestId", ""))
-    try:
-        handshake_id = str(command.get("handshakeId", ""))
-        bssid = normalized_unicast_mac(command.get("bssid"))
-        device_mac = normalized_unicast_mac(command.get("deviceMac"))
-        ssid = str(command.get("ssid", ""))
-        password = str(command.get("password", ""))
-        if not request_id or not handshake_id or not bssid or not device_mac:
-            raise ValueError("握手包校验请求缺少必要参数")
-        if not ssid:
-            raise ValueError("握手包校验请求缺少 SSID")
-        with handshake_lock:
-            record = handshake_cache.get(handshake_id)
-            if record is None:
-                raise ValueError("找不到指定的握手记录")
-            if record["bssid"] != bssid or record["deviceMac"] != device_mac:
-                raise ValueError("握手记录与指定接入点或设备不一致")
-            matched = validate_handshake_record(record, ssid, password)
-        event_writer.write(
-            {
-                "type": "handshakeTestCompleted",
-                "requestId": request_id,
-                "matched": matched,
-            }
-        )
-    except Exception as error:
-        event_writer.write(
-            {
-                "type": "handshakeTestFailed",
-                "requestId": request_id,
-                "message": str(error) or error.__class__.__name__,
-            }
-        )
-
-
 def command_loop(
     path,
     reader,
     reader_lock,
     source_path,
     allowed_directory,
-    handshake_cache,
-    handshake_lock,
     event_writer,
 ):
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="monitor-commands")
@@ -1387,16 +1469,6 @@ def command_loop(
                         source_path,
                         cutoff,
                         allowed_directory,
-                        handshake_cache,
-                        handshake_lock,
-                        event_writer,
-                    )
-                elif command_type == "test":
-                    executor.submit(
-                        run_handshake_test,
-                        command,
-                        handshake_cache,
-                        handshake_lock,
                         event_writer,
                     )
                 else:
@@ -1416,15 +1488,19 @@ def main():
     reader = GrowingPcapReader(args.pcap)
     reader_lock = threading.Lock()
     access_points = {}
+    ssid_access_points = {}
     device_identities = {}
-    handshake_cache = {}
-    handshake_lock = threading.Lock()
+    dirty_access_points = set()
+    dirty_devices = set()
+    realtime_access_points = set()
+    realtime_devices = set()
+    handshake_device_keys = set()
     next_handshake_id = 1
+    next_disconnection_id = 1
     next_publish = time.monotonic()
     allowed_export_directory = os.path.realpath(
         os.path.join(os.path.dirname(args.event_pipe), "exports")
     )
-
     try:
         with open(args.event_pipe, "w", encoding="utf-8", buffering=1) as event_pipe:
             event_writer = EventWriter(event_pipe)
@@ -1436,8 +1512,6 @@ def main():
                     reader_lock,
                     args.pcap,
                     allowed_export_directory,
-                    handshake_cache,
-                    handshake_lock,
                     event_writer,
                 ),
                 name="monitor-commands",
@@ -1446,7 +1520,10 @@ def main():
 
             while True:
                 with reader_lock:
-                    records = reader.read_available()
+                    records = reader.read_available(
+                        max_packets=ANALYSIS_BATCH_MAX_PACKETS,
+                        max_bytes=ANALYSIS_BATCH_MAX_BYTES,
+                    )
                 for (
                     payload,
                     recorded_bytes,
@@ -1460,12 +1537,45 @@ def main():
                         continue
                     packet_record = (packet_start, packet_header, payload)
 
+                    ssid = packet_ssid(packet)
+                    ssid_bytes = ssid_element(packet) if ssid else None
+                    if ssid_bytes:
+                        for known_bssid in tuple(ssid_access_points.get(ssid_bytes, ())):
+                            known_access_point = access_points.get(known_bssid)
+                            if known_access_point is None:
+                                continue
+                            known_access_point["ssidContextPacket"] = packet_record
+                            active_device_macs = (
+                                device_mac
+                                for active_bssid, device_mac in handshake_device_keys
+                                if active_bssid == known_bssid
+                            )
+                            add_context_to_handshake_records(
+                                known_access_point,
+                                packet_record,
+                                ssid_bytes=ssid_bytes,
+                                has_security=False,
+                                device_macs=active_device_macs,
+                            )
+
                     bssid = packet_bssid(packet)
                     if bssid is not None:
                         access_point = access_points.setdefault(bssid, empty_access_point(bssid))
-                        ssid = packet_ssid(packet)
+                        dirty_access_points.add(bssid)
                         if ssid:
+                            previous_ssid_bytes = access_point["ssidBytes"]
                             access_point["ssid"] = ssid
+                            access_point["ssidBytes"] = ssid_bytes
+                            access_point["ssidContextPacket"] = packet_record
+                            if previous_ssid_bytes != ssid_bytes:
+                                if previous_ssid_bytes:
+                                    previous_bssids = ssid_access_points.get(previous_ssid_bytes)
+                                    if previous_bssids is not None:
+                                        previous_bssids.discard(bssid)
+                                        if not previous_bssids:
+                                            ssid_access_points.pop(previous_ssid_bytes, None)
+                                if ssid_bytes:
+                                    ssid_access_points.setdefault(ssid_bytes, set()).add(bssid)
                         visibility = beacon_visibility(packet)
                         if visibility is not None:
                             access_point["ssidVisibility"] = visibility
@@ -1477,18 +1587,21 @@ def main():
                         )
                         protocols = packet_security_protocols(packet)
                         access_point["securityProtocols"].update(protocols)
-                        if management_subtype in (5, 8):
-                            if ssid:
-                                access_point["ssidContextPacket"] = packet_record
+                        if management_subtype in (0, 2, 5, 8):
                             if protocols:
                                 access_point["securityContextPacket"] = packet_record
                             if ssid or protocols:
+                                active_device_macs = (
+                                    device_mac
+                                    for active_bssid, device_mac in handshake_device_keys
+                                    if active_bssid == bssid
+                                )
                                 add_context_to_handshake_records(
                                     access_point,
                                     packet_record,
-                                    has_ssid=bool(ssid),
+                                    ssid_bytes=ssid_bytes,
                                     has_security=bool(protocols),
-                                    handshake_lock=handshake_lock,
+                                    device_macs=active_device_macs,
                                 )
                         transmitter = normalized_unicast_mac(dot11.addr2) if dot11 else None
                         signal_dbm = packet_signal_dbm(packet)
@@ -1496,6 +1609,8 @@ def main():
                             add_signal_sample(
                                 access_point["signal"], packet_timestamp, signal_dbm
                             )
+                            if signal_dbm is not None:
+                                realtime_access_points.add(bssid)
 
                     dot11 = packet.getlayer(Dot11)
                     transmitter = normalized_unicast_mac(dot11.addr2) if dot11 else None
@@ -1510,6 +1625,9 @@ def main():
                                     update_device_identity(
                                         known_device, wps_name, wps_priority
                                     )
+                                    dirty_devices.add(
+                                        (known_access_point["bssid"], transmitter)
+                                    )
 
                     relation = packet_device_relation(
                         packet,
@@ -1519,12 +1637,28 @@ def main():
                         continue
                     bssid, device_mac, direction = relation
                     access_point = access_points.setdefault(bssid, empty_access_point(bssid))
+                    dirty_access_points.add(bssid)
                     device = access_point["devices"].setdefault(
                         device_mac, empty_device(device_mac)
                     )
+                    device_key = (bssid, device_mac)
+                    dirty_devices.add(device_key)
                     frame_bytes = packet_frame_bytes(packet, recorded_bytes)
                     subtype_id = frame_subtype_id(packet)
                     add_frame_counter(device, subtype_id, frame_bytes)
+                    if subtype_id in ("management.10", "management.12"):
+                        handoff_disconnection(
+                            pcap_header=reader.global_header,
+                            event_writer=event_writer,
+                            disconnection_id=next_disconnection_id,
+                            bssid=bssid,
+                            device_mac=device_mac,
+                            packet=packet,
+                            packet_record=packet_record,
+                            timestamp_millis=int(packet_timestamp * 1000),
+                        )
+                        next_disconnection_id += 1
+                    previous_ssid_bytes = access_point["ssidBytes"]
                     next_handshake_id = process_handshake_packet(
                         access_point=access_point,
                         device=device,
@@ -1535,19 +1669,34 @@ def main():
                         transmitter=transmitter,
                         packet_record=packet_record,
                         packet_timestamp=packet_timestamp,
-                        handshake_cache=handshake_cache,
-                        handshake_lock=handshake_lock,
                         next_handshake_id=next_handshake_id,
                     )
+                    current_ssid_bytes = access_point["ssidBytes"]
+                    if previous_ssid_bytes != current_ssid_bytes:
+                        if previous_ssid_bytes:
+                            previous_bssids = ssid_access_points.get(previous_ssid_bytes)
+                            if previous_bssids is not None:
+                                previous_bssids.discard(bssid)
+                                if not previous_bssids:
+                                    ssid_access_points.pop(previous_ssid_bytes, None)
+                        if current_ssid_bytes:
+                            ssid_access_points.setdefault(current_ssid_bytes, set()).add(bssid)
+                    if device["handshakes"]:
+                        handshake_device_keys.add(device_key)
                     if direction == "upload" and subtype_id != "data.eapol":
                         device["uploadSamples"].append((packet_timestamp, frame_bytes))
+                        realtime_devices.add(device_key)
                     elif direction == "download" and subtype_id != "data.eapol":
                         device["downloadSamples"].append((packet_timestamp, frame_bytes))
+                        realtime_devices.add(device_key)
 
                     if transmitter == device_mac:
+                        signal_dbm = packet_signal_dbm(packet)
                         add_signal_sample(
-                            device["signal"], packet_timestamp, packet_signal_dbm(packet)
+                            device["signal"], packet_timestamp, signal_dbm
                         )
+                        if signal_dbm is not None:
+                            realtime_devices.add(device_key)
 
                     identity_candidates = [dhcp_device_identity(packet)]
                     cached_identity = device_identities.get(device_mac)
@@ -1558,64 +1707,109 @@ def main():
                     for name, priority in identity_candidates:
                         update_device_identity(device, name, priority)
 
-                now = time.time()
-                access_point_updates = []
-                for bssid, access_point in sorted(access_points.items()):
-                    signal = signal_snapshot(access_point["signal"], now)
-                    access_point_signature = stable_signature(
-                        {
-                            "ssid": access_point["ssid"],
-                            "ssidVisibility": access_point["ssidVisibility"],
-                            "securityProtocols": sorted(
-                                access_point["securityProtocols"]
-                            ),
-                            "signal": signal,
-                        }
+                monotonic_now = time.monotonic()
+                if monotonic_now >= next_publish:
+                    now = time.time()
+                    finish_timed_out_handshakes(
+                        access_points,
+                        handshake_device_keys,
+                        int(now * 1000),
                     )
-                    changed_device_snapshots = []
-                    for device_mac, device in sorted(access_point["devices"].items()):
-                        snapshot = device_snapshot(device, now)
-                        signature = stable_signature(snapshot)
-                        if signature != device["publishedSignature"]:
-                            changed_device_snapshots.append(snapshot)
-                            device["publishedSignature"] = signature
-                    if (
-                        access_point_signature != access_point["publishedSignature"]
-                        or changed_device_snapshots
-                    ):
-                        access_point_updates.append(
+                    handshake_device_keys = handoff_handshake_updates(
+                        access_points,
+                        handshake_device_keys,
+                        reader.global_header,
+                        event_writer,
+                    )
+
+                    candidate_devices = dirty_devices | realtime_devices
+                    devices_by_bssid = {}
+                    for candidate_bssid, candidate_device_mac in candidate_devices:
+                        devices_by_bssid.setdefault(candidate_bssid, set()).add(
+                            candidate_device_mac
+                        )
+                    candidate_bssids = (
+                        dirty_access_points
+                        | realtime_access_points
+                        | set(devices_by_bssid)
+                    )
+                    next_realtime_access_points = set()
+                    next_realtime_devices = set()
+                    access_point_updates = []
+                    for candidate_bssid in sorted(candidate_bssids):
+                        access_point = access_points.get(candidate_bssid)
+                        if access_point is None:
+                            continue
+                        signal = signal_snapshot(access_point["signal"], now)
+                        if access_point["signal"]["samples"]:
+                            next_realtime_access_points.add(candidate_bssid)
+                        access_point_signature = stable_signature(
                             {
-                                "bssid": bssid,
                                 "ssid": access_point["ssid"],
                                 "ssidVisibility": access_point["ssidVisibility"],
                                 "securityProtocols": sorted(
                                     access_point["securityProtocols"]
                                 ),
                                 "signal": signal,
-                                "devices": changed_device_snapshots,
                             }
                         )
-                        access_point["publishedSignature"] = access_point_signature
+                        changed_device_snapshots = []
+                        for device_mac in sorted(devices_by_bssid.get(candidate_bssid, ())):
+                            device = access_point["devices"].get(device_mac)
+                            if device is None:
+                                continue
+                            snapshot = device_snapshot(device, now)
+                            if (
+                                device["uploadSamples"]
+                                or device["downloadSamples"]
+                                or device["signal"]["samples"]
+                            ):
+                                next_realtime_devices.add((candidate_bssid, device_mac))
+                            signature = stable_signature(snapshot)
+                            if signature != device["publishedSignature"]:
+                                changed_device_snapshots.append(snapshot)
+                                device["publishedSignature"] = signature
+                        if (
+                            access_point_signature != access_point["publishedSignature"]
+                            or changed_device_snapshots
+                        ):
+                            access_point_updates.append(
+                                {
+                                    "bssid": candidate_bssid,
+                                    "ssid": access_point["ssid"],
+                                    "ssidVisibility": access_point["ssidVisibility"],
+                                    "securityProtocols": sorted(
+                                        access_point["securityProtocols"]
+                                    ),
+                                    "signal": signal,
+                                    "devices": changed_device_snapshots,
+                                }
+                            )
+                            access_point["publishedSignature"] = access_point_signature
+
+                    dirty_access_points.clear()
+                    dirty_devices.clear()
+                    realtime_access_points = next_realtime_access_points
+                    realtime_devices = next_realtime_devices
+                    if access_point_updates:
+                        event_writer.write(
+                            {
+                                "type": "statistics",
+                                "accessPointUpdates": access_point_updates,
+                            }
+                        )
+                    while next_publish <= monotonic_now:
+                        next_publish += PUBLISH_INTERVAL_SECONDS
 
                 try:
-                    recorded_file_bytes = os.path.getsize(args.pcap)
+                    has_backlog = reader.offset < os.path.getsize(args.pcap)
                 except FileNotFoundError:
-                    recorded_file_bytes = 0
-
-                event_writer.write(
-                    {
-                        "type": "statistics",
-                        "recordedBytes": recorded_file_bytes,
-                        "accessPointUpdates": access_point_updates,
-                    }
-                )
-
-                next_publish += PUBLISH_INTERVAL_SECONDS
+                    has_backlog = False
+                if has_backlog:
+                    continue
                 remaining = next_publish - time.monotonic()
                 if remaining > 0:
                     time.sleep(remaining)
-                else:
-                    next_publish = time.monotonic()
     finally:
         reader.close()
 

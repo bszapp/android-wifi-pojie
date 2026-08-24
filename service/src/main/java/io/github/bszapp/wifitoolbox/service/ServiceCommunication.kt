@@ -46,6 +46,10 @@ class ServiceCommunication(
     private val terminalLogRangeLock = Any()
     private val pendingTerminalLogRanges = mutableMapOf<Long, TerminalLogRangeSnapshot>()
     private val terminalLogDeliveryScheduled = AtomicBoolean(false)
+    private val monitorRecordedBytesLock = Any()
+    private var pendingMonitorRecordedBytes: Long? = null
+    private val monitorRecordedBytesDeliveryScheduled = AtomicBoolean(false)
+    private val callbackBroadcastLock = Any()
     private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
     }
@@ -332,6 +336,38 @@ class ServiceCommunication(
         forEachCallback { callback -> pushWifiInformationSourceState(callback, value) }
     }
 
+    fun broadcastMonitorRecordedBytes(recordedBytes: Long) {
+        synchronized(monitorRecordedBytesLock) {
+            pendingMonitorRecordedBytes = recordedBytes
+        }
+        scheduleMonitorRecordedBytesDelivery()
+    }
+
+    private fun scheduleMonitorRecordedBytesDelivery() {
+        if (!monitorRecordedBytesDeliveryScheduled.compareAndSet(false, true)) return
+        deliveryExecutor.execute {
+            try {
+                while (true) {
+                    val recordedBytes = synchronized(monitorRecordedBytesLock) {
+                        pendingMonitorRecordedBytes.also { pendingMonitorRecordedBytes = null }
+                    } ?: break
+                    forEachCallback { callback ->
+                        runCatching { callback.onMonitorRecordedBytesChanged(recordedBytes) }
+                            .onFailure {
+                                Log.w(TAG, "推送监听模式录制大小失败：${it.message}", it)
+                            }
+                    }
+                }
+            } finally {
+                monitorRecordedBytesDeliveryScheduled.set(false)
+                val hasPending = synchronized(monitorRecordedBytesLock) {
+                    pendingMonitorRecordedBytes != null
+                }
+                if (hasPending) scheduleMonitorRecordedBytesDelivery()
+            }
+        }
+    }
+
     fun broadcastMonitorPcapExported(
         requestId: String,
         path: String,
@@ -342,16 +378,6 @@ class ServiceCommunication(
                 callback.onMonitorPcapExported(requestId, path, fileName)
             }.onFailure {
                 Log.w(TAG, "推送监听模式 PCAP 导出结果失败：${it.message}", it)
-            }
-        }
-    }
-
-    fun broadcastMonitorHandshakeTestResult(requestId: String, outcome: Int) {
-        forEachCallback { callback ->
-            runCatching {
-                callback.onMonitorHandshakeTestResult(requestId, outcome)
-            }.onFailure {
-                Log.w(TAG, "推送监听模式握手包校验结果失败：${it.message}", it)
             }
         }
     }
@@ -598,11 +624,13 @@ class ServiceCommunication(
     }
 
     private inline fun forEachCallback(block: (IMainServiceCallback) -> Unit) {
-        val count = callbacks.beginBroadcast()
-        try {
-            for (index in 0 until count) block(callbacks.getBroadcastItem(index))
-        } finally {
-            callbacks.finishBroadcast()
+        synchronized(callbackBroadcastLock) {
+            val count = callbacks.beginBroadcast()
+            try {
+                for (index in 0 until count) block(callbacks.getBroadcastItem(index))
+            } finally {
+                callbacks.finishBroadcast()
+            }
         }
     }
 

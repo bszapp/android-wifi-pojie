@@ -31,6 +31,13 @@ data class MonitorModeStatistics(
     val channel: Int = 0,
     val frequencyMhz: Int = 0,
     val accessPoints: List<MonitorAccessPoint> = emptyList(),
+    val disconnections: List<MonitorDisconnectionRecord> = emptyList(),
+) : Parcelable
+
+@Parcelize
+data class MonitorMapFilterState(
+    val showProbeOnlyDevices: Boolean = true,
+    val showUnknownNetworks: Boolean = false,
 ) : Parcelable
 
 @Parcelize
@@ -61,6 +68,7 @@ data class MonitorDevice(
     val frameGroups: List<MonitorFrameGroupStatistics> = emptyList(),
     val handshakes: List<MonitorHandshakeRecord> = emptyList(),
     val realtime: MonitorDeviceRealtime = MonitorDeviceRealtime(),
+    val probeOnly: Boolean = false,
 ) : Parcelable
 
 @Parcelize
@@ -70,18 +78,26 @@ data class MonitorHandshakeRecord(
     val durationMillis: Long,
     val status: MonitorHandshakeStatus,
     val canValidate: Boolean,
-    val validationDataComplete: Boolean = false,
+    val captureQuality: MonitorHandshakeCaptureQuality = MonitorHandshakeCaptureQuality.COMPLETE,
     val capturedSteps: List<MonitorHandshakeStep> = emptyList(),
     val failedAtStep: MonitorHandshakeStep? = null,
     val failureReason: MonitorHandshakeFailureReason? = null,
     val m2AttemptCount: Int = 0,
     val exportPacketCount: Int = 0,
+    val hc22000: String? = null,
 ) : Parcelable
+
+enum class MonitorHandshakeCaptureQuality {
+    COMPLETE,
+    DATA_INCOMPLETE,
+    PARTIALLY_MISSING,
+}
 
 enum class MonitorHandshakeStatus {
     IN_PROGRESS,
     SUCCESS,
     FAILED,
+    UNKNOWN,
 }
 
 enum class MonitorHandshakeStep {
@@ -100,6 +116,22 @@ enum class MonitorHandshakeFailureReason {
     DISCONNECTED_AFTER_M2,
     DISCONNECTED_DURING_HANDSHAKE,
     REPLACED_BY_NEW_ATTEMPT,
+}
+
+@Parcelize
+data class MonitorDisconnectionRecord(
+    val id: String,
+    val timestampUnixMillis: Long,
+    val bssid: String,
+    val deviceMac: String,
+    val type: MonitorDisconnectionType,
+    val reasonCode: Int? = null,
+    val exportPacketCount: Int = 1,
+) : Parcelable
+
+enum class MonitorDisconnectionType {
+    DISASSOCIATION,
+    DEAUTHENTICATION,
 }
 
 @Parcelize

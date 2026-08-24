@@ -12,6 +12,7 @@ import io.github.bszapp.wifitoolbox.contract.error.AppError
 import io.github.bszapp.wifitoolbox.contract.startup.IStartupController
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
 import io.github.bszapp.wifitoolbox.logs.ServiceLogController
 import io.github.bszapp.wifitoolbox.terminal.TerminalController
@@ -50,6 +51,15 @@ class ToolboxApp : Application(), IAppController {
     private lateinit var predictiveBackController: PredictiveBackController
     private val _isExiting = kotlinx.coroutines.flow.MutableStateFlow(false)
     override val isExiting: StateFlow<Boolean> = _isExiting.asStateFlow()
+    private val _monitorMapFilterState = kotlinx.coroutines.flow.MutableStateFlow(
+        MonitorMapFilterState(),
+    )
+    override val monitorMapFilterState: StateFlow<MonitorMapFilterState> =
+        _monitorMapFilterState.asStateFlow()
+
+    override fun updateMonitorMapFilterState(state: MonitorMapFilterState) {
+        _monitorMapFilterState.value = state
+    }
 
     private val _errors = MutableSharedFlow<AppError>(
         replay = 0,

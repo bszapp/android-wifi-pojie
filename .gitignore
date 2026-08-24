@@ -16,3 +16,4 @@ local.properties
 /.kotlin
 /rftoolbuilder/build/
 /rftoolbuilder/distfiles/
+/app/release

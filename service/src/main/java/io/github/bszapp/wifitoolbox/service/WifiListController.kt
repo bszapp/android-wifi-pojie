@@ -11,7 +11,6 @@ import android.os.SystemClock
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSourceState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
@@ -38,11 +37,8 @@ internal class WifiListController(
     private val onWifiStateChanged: (WifiState) -> Unit,
     private val onSavedWifiListChanged: (SavedWifiList) -> Unit,
     private val onInformationSourceStateChanged: (WifiInformationSourceState) -> Unit,
+    private val onMonitorRecordedBytesChanged: (Long) -> Unit,
     private val onMonitorPcapExported: (requestId: String, path: String, fileName: String) -> Unit,
-    private val onMonitorHandshakeTestResult: (
-        requestId: String,
-        outcome: MonitorHandshakeTestOutcome,
-    ) -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
     private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -71,17 +67,22 @@ internal class WifiListController(
     private var scanSession: ScanSession? = null
     private var primaryNetworkStatus: Int? = null
     private var informationSourceTransitionTerminalId: Long? = null
+    private var systemWifiEnabledPollingFuture: ScheduledFuture<*>? = null
+    private var lastSystemWifiEnabled: Boolean? = null
+
+    @Volatile
+    private var hybridTaskEnvironment: HybridTaskEnvironment? = null
 
     private val monitorModeController = MonitorModeController(
         terminalManager = terminalManager,
         onStatisticsChanged = { statistics ->
             execute { publishMonitorStatistics(statistics) }
         },
+        onRecordedBytesChanged = { recordedBytes ->
+            execute { publishMonitorRecordedBytes(recordedBytes) }
+        },
         onExportCompleted = { requestId, path, fileName ->
             execute { onMonitorPcapExported(requestId, path, fileName) }
-        },
-        onHandshakeTestResult = { requestId, outcome ->
-            execute { onMonitorHandshakeTestResult(requestId, outcome) }
         },
         onError = { operation, error ->
             execute {
@@ -104,12 +105,20 @@ internal class WifiListController(
 
     fun getInformationSourceState(): WifiInformationSourceState = informationSourceState
 
+    fun getHybridTaskEnvironment(): HybridTaskEnvironment? {
+        val source = informationSourceState
+        return hybridTaskEnvironment?.takeIf {
+            source.source == WifiInformationSource.HYBRID && !source.initializing
+        }
+    }
+
     fun initialize() {
         execute {
             if (initialized) return@execute
             initialized = true
             Log.d(TAG, "初始化 Wi-Fi 数据")
             refreshWifiDataInternal()
+            startSystemWifiEnabledPolling()
         }
     }
 
@@ -223,6 +232,8 @@ internal class WifiListController(
             if (current.source == source) return@execute
 
             val generation = ++informationSourceGeneration
+            hybridTaskEnvironment = null
+            stopSystemWifiEnabledPolling()
             cancelScanInternal(publishChange = false)
             stopInformationSourceTransition()
             publishInformationSourceState(
@@ -261,6 +272,8 @@ internal class WifiListController(
         require(targetFrequencyMhz > 0) { "监听模式目标频率必须大于 0" }
         execute {
             val generation = ++informationSourceGeneration
+            hybridTaskEnvironment = null
+            stopSystemWifiEnabledPolling()
             cancelScanInternal(publishChange = false)
             stopInformationSourceTransition()
             monitorModeController.stop()
@@ -386,37 +399,31 @@ internal class WifiListController(
         }
     }
 
-    fun testMonitorHandshake(
+    fun exportMonitorDisconnectionPcap(
         requestId: String,
         bssid: String,
         deviceMac: String,
-        handshakeId: String,
-        password: String,
+        disconnectionId: String,
     ) {
-        require(requestId.isNotBlank()) { "握手包校验请求 ID 不能为空" }
+        require(requestId.isNotBlank()) { "断开事件导出请求 ID 不能为空" }
         require(bssid.isNotBlank() && deviceMac.isNotBlank()) {
-            "握手包校验必须指定接入点和设备 MAC"
+            "断开事件导出必须指定接入点和设备 MAC"
         }
-        require(handshakeId.isNotBlank()) { "握手记录 ID 不能为空" }
+        require(disconnectionId.isNotBlank()) { "断开事件记录 ID 不能为空" }
         execute {
             try {
                 check(
                     informationSourceState.source == WifiInformationSource.MONITOR &&
                         !informationSourceState.initializing,
                 ) { "监听模式尚未运行" }
-                monitorModeController.testHandshake(
+                monitorModeController.exportDisconnectionPcap(
                     requestId = requestId,
                     bssid = bssid,
                     deviceMac = deviceMac,
-                    handshakeId = handshakeId,
-                    password = password,
+                    disconnectionId = disconnectionId,
                 )
             } catch (error: Throwable) {
-                onMonitorHandshakeTestResult(
-                    requestId,
-                    MonitorHandshakeTestOutcome.FAILED,
-                )
-                reportError("校验 WPA/WPA2 握手包", error)
+                reportError("导出断开事件 PCAP", error)
             }
         }
     }
@@ -533,7 +540,31 @@ internal class WifiListController(
     private fun publishMonitorStatistics(statistics: MonitorModeStatistics) {
         val current = informationSourceState
         if (current.source != WifiInformationSource.MONITOR || current.initializing) return
-        publishInformationSourceState(current.copy(monitorStatistics = statistics))
+        val currentRecordedBytes = current.monitorStatistics?.recordedBytes ?: 0L
+        publishInformationSourceState(
+            current.copy(
+                monitorStatistics = statistics.copy(
+                    recordedBytes = maxOf(currentRecordedBytes, statistics.recordedBytes),
+                ),
+            ),
+        )
+    }
+
+    private fun publishMonitorRecordedBytes(recordedBytes: Long) {
+        val current = informationSourceState
+        val statistics = current.monitorStatistics
+        if (
+            current.source != WifiInformationSource.MONITOR ||
+            current.initializing ||
+            statistics == null ||
+            statistics.recordedBytes == recordedBytes
+        ) {
+            return
+        }
+        informationSourceState = current.copy(
+            monitorStatistics = statistics.copy(recordedBytes = recordedBytes),
+        )
+        if (!stopped) onMonitorRecordedBytesChanged(recordedBytes)
     }
 
     private fun switchToSystemSource(generation: Long) {
@@ -547,6 +578,7 @@ internal class WifiListController(
                     initializing = false,
                 ),
             )
+            startSystemWifiEnabledPolling()
             Log.i(TAG, "Wi-Fi 信息源已切换为系统模式")
         } catch (error: Throwable) {
             finishInformationSourceFailure(
@@ -590,6 +622,12 @@ internal class WifiListController(
                     return@execute
                 }
 
+                hybridTaskEnvironment = HybridTaskEnvironment(
+                    rootfsPath = rootfsPath,
+                    runtimePath = runtimePath,
+                    terminalPath = terminalPath,
+                )
+
                 publishInformationSourceState(
                     WifiInformationSourceState(
                         source = WifiInformationSource.HYBRID,
@@ -631,9 +669,11 @@ internal class WifiListController(
         error: Throwable,
     ) {
         if (!isCurrentInformationSource(generation, source)) return
+        if (source == WifiInformationSource.HYBRID) hybridTaskEnvironment = null
         publishInformationSourceState(
             WifiInformationSourceState(source = source, initializing = false),
         )
+        if (source == WifiInformationSource.SYSTEM) startSystemWifiEnabledPolling()
         publishWifiStateError(error)
         refreshSavedNetworksInternal()
         reportError(operation, error)
@@ -662,10 +702,12 @@ internal class WifiListController(
         executor.execute {
             if (stopped) return@execute
             stopped = true
+            hybridTaskEnvironment = null
             Log.d(TAG, "停止 Wi-Fi 控制器")
             cancelScanInternal(publishChange = false)
             stopInformationSourceTransition()
             monitorModeController.close()
+            stopSystemWifiEnabledPolling()
             executor.shutdown()
         }
     }
@@ -679,7 +721,7 @@ internal class WifiListController(
     private fun refreshWifiDataInternal() {
         try {
             val api = requireAndroidApi()
-            if (!api.isWifiEnabledDirect()) {
+            if (!api.isWifiEnabled()) {
                 cancelScanInternal(publishChange = false)
                 publishWifiState(WifiState.Data.Disabled)
                 Log.d(TAG, "已更新 WifiState：Disabled")
@@ -697,6 +739,56 @@ internal class WifiListController(
 
         // Disabled/Error 路径仍属于完整刷新，同步维护独立的 SavedWifiList。
         refreshSavedNetworksInternal()
+    }
+
+    private fun startSystemWifiEnabledPolling() {
+        stopSystemWifiEnabledPolling()
+        if (informationSourceState.source != WifiInformationSource.SYSTEM || stopped) return
+        lastSystemWifiEnabled = when (wifiState) {
+            is WifiState.Data.Enabled -> true
+            is WifiState.Data.Disabled -> false
+            else -> null
+        }
+        systemWifiEnabledPollingFuture = executor.scheduleAtFixedRate(
+            ::refreshSystemWifiEnabledState,
+            SYSTEM_WIFI_ENABLED_REFRESH_INTERVAL_MS,
+            SYSTEM_WIFI_ENABLED_REFRESH_INTERVAL_MS,
+            TimeUnit.MILLISECONDS,
+        )
+    }
+
+    private fun stopSystemWifiEnabledPolling() {
+        systemWifiEnabledPollingFuture?.cancel(false)
+        systemWifiEnabledPollingFuture = null
+        lastSystemWifiEnabled = null
+    }
+
+    private fun refreshSystemWifiEnabledState() {
+        if (
+            stopped ||
+            informationSourceState.source != WifiInformationSource.SYSTEM ||
+            informationSourceState.initializing
+        ) return
+        try {
+            val enabled = requireAndroidApi().isWifiEnabled()
+            val previousEnabled = lastSystemWifiEnabled
+            lastSystemWifiEnabled = enabled
+            if (previousEnabled == null || previousEnabled == enabled) return
+            if (enabled) {
+                publishWifiState(
+                    WifiState.Data.Enabled(
+                        scanResults = emptyList(),
+                        isScanning = false,
+                        connection = null,
+                    ),
+                )
+            } else {
+                cancelScanInternal(publishChange = false)
+                publishWifiState(WifiState.Data.Disabled)
+            }
+        } catch (error: Throwable) {
+            reportError("刷新系统模式 Wi-Fi 开关状态", error)
+        }
     }
 
     /**
@@ -732,7 +824,7 @@ internal class WifiListController(
     private fun refreshSavedNetworksInternal() {
         try {
             val value = SavedWifiList(
-                networks = requireAndroidApi().getSavedWifiListDirect(),
+                networks = requireAndroidApi().getSavedWifiList(),
             )
             publishSavedWifiList(value)
             Log.d(TAG, "已更新 SavedWifiList：count=${value.networks.size}")
@@ -1075,7 +1167,7 @@ internal class WifiListController(
     /** 扫描期间每 250ms 更新 WifiState 的扫描列表，并刷新 SavedWifiList。 */
     private fun updateDataDuringScan(): Boolean {
         val api = requireAndroidApi()
-        if (!api.isWifiEnabledDirect()) {
+        if (!api.isWifiEnabled()) {
             refreshWifiDataInternal()
             return false
         }
@@ -1140,7 +1232,7 @@ internal class WifiListController(
     }
 
     private fun readScanResults(api: AndroidApi): List<ScanResult> =
-        api.getScanResultsDirect().filterIndexed { index, result ->
+        api.getScanResults().filterIndexed { index, result ->
             val keep = !result.BSSID.isNullOrBlank()
             if (!keep) Log.w(TAG, "丢弃第 $index 项扫描结果：BSSID 为空")
             keep
@@ -1155,7 +1247,7 @@ internal class WifiListController(
         if (status != null && status != WIFI_NETWORK_STATUS_CONNECTED) return null
 
         return try {
-            api.getConnectionInfoDirect().takeIf(::isUsableConnectedWifiInfo)
+            api.getConnectionInfo().takeIf(::isUsableConnectedWifiInfo)
         } catch (error: Throwable) {
             reportError(operation, error)
             previous
@@ -1189,6 +1281,13 @@ internal class WifiListController(
 
     private fun publishWifiState(next: WifiState) {
         wifiState = next
+        if (informationSourceState.source == WifiInformationSource.SYSTEM) {
+            when (next) {
+                is WifiState.Data.Enabled -> lastSystemWifiEnabled = true
+                is WifiState.Data.Disabled -> lastSystemWifiEnabled = false
+                is WifiState.Error -> Unit
+            }
+        }
         if (!stopped) onWifiStateChanged(next)
     }
 
@@ -1231,6 +1330,7 @@ internal class WifiListController(
         const val TAG = "ServiceWifiListController"
         const val MIN_SCAN_DURATION_MS = 3_000L
         const val SCAN_REFRESH_INTERVAL_MS = 250L
+        const val SYSTEM_WIFI_ENABLED_REFRESH_INTERVAL_MS = 1_000L
         const val SCAN_START_CONFIRM_TIMEOUT_MS = 10_000L
         const val WIFI_ROLE_CLIENT_PRIMARY = 1
         const val WIFI_NETWORK_STATUS_CONNECTED = 6
@@ -1245,3 +1345,9 @@ start vendor.wifi_hal_legacy
 svc wifi enable"""
     }
 }
+
+internal data class HybridTaskEnvironment(
+    val rootfsPath: String,
+    val runtimePath: String,
+    val terminalPath: String,
+)

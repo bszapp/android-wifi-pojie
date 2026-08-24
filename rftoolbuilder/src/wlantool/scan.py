@@ -3,13 +3,20 @@
 """Scan nearby Wi-Fi networks through Linux nl80211 and emit JSON Lines."""
 
 import argparse
+import codecs
 import errno
 import fcntl
 import json
 import os
+import queue
+import re
+import shutil
 import socket
 import struct
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -96,6 +103,301 @@ class ScanTooFrequent(ScanError):
 
 class InterfaceDisabled(ScanError):
     pass
+
+
+MAC_ADDRESS_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+WPS_PIN_RE = re.compile(r"^\d{8}$")
+
+
+class SinglePinWpsConnector:
+    """Run one registrar-side WPS transaction with a caller-provided PIN."""
+
+    def __init__(self, interface: str, bssid: str, pin: str, timeout: float):
+        self.interface = interface
+        self.bssid = bssid.upper()
+        self.pin = pin
+        self.timeout = timeout
+        self.tempdir = None
+        self.tempconf = None
+        self.reply_socket_path = None
+        self.reply_socket = None
+        self.wpas = None
+        self.output_queue = queue.Queue()
+        self.last_power = "0"
+        self.essid = ""
+        self.password = ""
+        self.status = ""
+        self.failure_message = ""
+
+    def log(self, content: str) -> None:
+        emit_json({"type": "log", "content": content})
+
+    def indicator_log(self, level: str, content: str) -> None:
+        self.log("[{}] [{}] {}".format(level, self.last_power, content))
+
+    def start_supplicant(self) -> None:
+        self.tempdir = tempfile.mkdtemp(prefix="wlantool-wps-")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".conf",
+            delete=False,
+        ) as config:
+            config.write(
+                "ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n".format(
+                    self.tempdir
+                )
+            )
+            self.tempconf = config.name
+
+        self.reply_socket_path = os.path.join(self.tempdir, "client.sock")
+        self.reply_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.reply_socket.bind(self.reply_socket_path)
+        self.reply_socket.settimeout(5.0)
+
+        self.log("[*] Running wpa_supplicant…")
+        self.wpas = subprocess.Popen(
+            [
+                "wpa_supplicant",
+                "-K",
+                "-d",
+                "-Dnl80211,wext,hostapd,wired",
+                "-i{}".format(self.interface),
+                "-c{}".format(self.tempconf),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
+        )
+        threading.Thread(target=self._read_output, daemon=True).start()
+
+        control_path = os.path.join(self.tempdir, self.interface)
+        deadline = time.monotonic() + 15.0
+        while not os.path.exists(control_path):
+            if self.wpas.poll() is not None:
+                raise RuntimeError("wpa_supplicant returned an error")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("等待 wpa_supplicant 控制接口超时")
+            time.sleep(0.1)
+        self.control_path = control_path
+
+    def _read_output(self) -> None:
+        try:
+            for raw in self.wpas.stdout:
+                self.output_queue.put(raw.rstrip("\n"))
+        finally:
+            self.output_queue.put(None)
+
+    def send_and_receive(self, command: str) -> str:
+        self.reply_socket.sendto(command.encode("utf-8"), self.control_path)
+        response, _address = self.reply_socket.recvfrom(4096)
+        return response.decode("utf-8", errors="replace").strip()
+
+    def send_only(self, command: str) -> None:
+        self.reply_socket.sendto(command.encode("utf-8"), self.control_path)
+
+    @staticmethod
+    def extract_hex(line: str) -> str:
+        parts = line.split(":", 3)
+        if len(parts) < 3:
+            return ""
+        return parts[2].replace(" ", "").upper()
+
+    @staticmethod
+    def decode_debug_ssid(line: str) -> str:
+        if "SSID" not in line:
+            return ""
+        escaped = "'".join(line.split("'")[1:-1])
+        if not escaped:
+            return ""
+        return codecs.decode(escaped, "unicode-escape").encode("latin1").decode(
+            "utf-8",
+            errors="replace",
+        )
+
+    def handle_output(self, line: str) -> None:
+        self.log(line)
+        if line.startswith("WPS: "):
+            if "Building Message M" in line:
+                raw_number = line.split("Building Message M", 1)[1].replace("D", "")
+                number = int(raw_number.split()[0])
+                self.indicator_log("*", "Sending WPS Message M{}…".format(number))
+            elif "Received M" in line:
+                number = int(line.split("Received M", 1)[1].split()[0])
+                self.indicator_log("*", "Received WPS Message M{}".format(number))
+                if number == 5:
+                    self.log("[+] The first half of the PIN is valid")
+            elif "Received WSC_NACK" in line:
+                self.status = "failed"
+                self.failure_message = "wrong PIN code"
+                self.indicator_log("*", "Received WSC NACK")
+                self.log("[-] Error: wrong PIN code")
+            elif "Enrollee Nonce" in line and "hexdump" in line:
+                self.log("[P] E-Nonce: {}".format(self.extract_hex(line)))
+            elif "DH own Public Key" in line and "hexdump" in line:
+                self.log("[P] PKR: {}".format(self.extract_hex(line)))
+            elif "DH peer Public Key" in line and "hexdump" in line:
+                self.log("[P] PKE: {}".format(self.extract_hex(line)))
+            elif "AuthKey" in line and "hexdump" in line:
+                self.log("[P] AuthKey: {}".format(self.extract_hex(line)))
+            elif "E-Hash1" in line and "hexdump" in line:
+                self.log("[P] E-Hash1: {}".format(self.extract_hex(line)))
+            elif "E-Hash2" in line and "hexdump" in line:
+                self.log("[P] E-Hash2: {}".format(self.extract_hex(line)))
+            elif "Network Key" in line and "hexdump" in line:
+                encoded = self.extract_hex(line)
+                try:
+                    self.password = bytes.fromhex(encoded).decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+                except ValueError:
+                    self.password = ""
+                if self.password:
+                    self.status = "success"
+        elif ": State: " in line and "-> SCANNING" in line:
+            self.status = "scanning"
+            self.indicator_log("*", "Scanning…")
+        elif "WPS-FAIL" in line:
+            self.status = "failed"
+            self.failure_message = "wpa_supplicant returned WPS-FAIL"
+            self.log("[-] wpa_supplicant returned WPS-FAIL")
+        elif "Trying to authenticate with" in line:
+            self.status = "authenticating"
+            decoded = self.decode_debug_ssid(line)
+            if decoded:
+                self.essid = decoded
+            self.indicator_log("*", "Authenticating…")
+        elif "Authentication response" in line:
+            self.indicator_log("*", "Authenticated")
+        elif "Trying to associate with" in line:
+            self.status = "associating"
+            decoded = self.decode_debug_ssid(line)
+            if decoded:
+                self.essid = decoded
+            self.indicator_log("*", "Associating with AP…")
+        elif "Associated with" in line and self.interface in line:
+            associated_bssid = line.split()[-1].upper()
+            if self.essid:
+                self.indicator_log(
+                    "+",
+                    "Associated with {} (ESSID: {})".format(
+                        associated_bssid,
+                        self.essid,
+                    ),
+                )
+            else:
+                self.indicator_log("+", "Associated with {}".format(associated_bssid))
+        elif "EAPOL: txStart" in line:
+            self.status = "eapol_start"
+            self.indicator_log("*", "Sending EAPOL Start…")
+        elif "EAP entering state IDENTITY" in line:
+            self.indicator_log("*", "Received Identity Request")
+        elif "using real identity" in line:
+            self.indicator_log("*", "Sending Identity Response…")
+        elif self.bssid.lower() in line.lower() and "level=" in line:
+            self.last_power = line.split("level=", 1)[1].split()[0]
+            if "noise=" in line:
+                noise = line.split("noise=", 1)[1].split()[0]
+                self.log(
+                    "[i] Current signal: {}, noise: {}".format(
+                        self.last_power,
+                        noise,
+                    )
+                )
+            else:
+                self.log("[i] Current signal: {}".format(self.last_power))
+
+    def run(self) -> bool:
+        try:
+            self.start_supplicant()
+            self.log("[*] Trying PIN '{}'…".format(self.pin))
+            command = "WPS_REG {} {}".format(self.bssid, self.pin)
+            response = self.send_and_receive(command)
+            if "OK" not in response:
+                message = (
+                    "wpa_supplicant 未启用 WPS 协议支持"
+                    if response == "UNKNOWN COMMAND"
+                    else "WPS_REG 返回 {}".format(response or "空响应")
+                )
+                emit_json({"type": "failure", "message": message})
+                return False
+
+            deadline = time.monotonic() + self.timeout
+            while time.monotonic() < deadline:
+                remaining = max(0.05, deadline - time.monotonic())
+                try:
+                    line = self.output_queue.get(timeout=min(0.5, remaining))
+                except queue.Empty:
+                    if self.wpas.poll() is not None:
+                        emit_json(
+                            {
+                                "type": "failure",
+                                "message": "wpa_supplicant 进程已退出",
+                            }
+                        )
+                        return False
+                    continue
+                if line is None:
+                    emit_json(
+                        {
+                            "type": "failure",
+                            "message": "wpa_supplicant 输出已结束",
+                        }
+                    )
+                    return False
+                self.handle_output(line)
+                if self.status == "success":
+                    self.log("[+] WPS PIN: '{}'".format(self.pin))
+                    self.log("[+] WPA PSK: '{}'".format(self.password))
+                    self.log("[+] AP SSID: '{}'".format(self.essid))
+                    emit_json(
+                        {
+                            "type": "success",
+                            "ssid": self.essid,
+                            "password": self.password,
+                            "mac": self.bssid,
+                        }
+                    )
+                    return True
+                if self.status == "failed":
+                    emit_json(
+                        {
+                            "type": "failure",
+                            "message": self.failure_message or "WPS transaction failed",
+                        }
+                    )
+                    return False
+
+            emit_json({"type": "failure", "message": "WPS 单 PIN 连接超时"})
+            return False
+        except Exception as error:
+            emit_json({"type": "failure", "message": str(error)})
+            return False
+        finally:
+            self.cleanup()
+
+    def cleanup(self) -> None:
+        if self.reply_socket is not None:
+            if hasattr(self, "control_path"):
+                try:
+                    self.send_only("WPS_CANCEL")
+                except (OSError, AttributeError):
+                    pass
+            self.reply_socket.close()
+        if self.wpas is not None and self.wpas.poll() is None:
+            self.wpas.terminate()
+            try:
+                self.wpas.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self.wpas.kill()
+        if self.tempdir is not None:
+            shutil.rmtree(self.tempdir, ignore_errors=True)
+        if self.tempconf is not None:
+            try:
+                os.remove(self.tempconf)
+            except FileNotFoundError:
+                pass
 
 
 def emit_json(payload: dict) -> None:
@@ -779,7 +1081,43 @@ def main() -> int:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--wps-pin",
+        action="store_true",
+        help="Use one caller-provided WPS PIN with the target BSSID",
+    )
+    parser.add_argument("--bssid", help="Target access point BSSID")
+    parser.add_argument("--pin", help="Eight-digit WPS PIN")
+    parser.add_argument(
+        "--wps-timeout",
+        type=float,
+        default=120.0,
+        help="Single WPS transaction timeout in seconds (default: 120)",
+    )
     args = parser.parse_args()
+
+    if args.wps_pin:
+        validation_message = None
+        if args.scan:
+            validation_message = "--wps-pin 不能与 -scan 同时使用"
+        elif not args.bssid or not MAC_ADDRESS_RE.match(args.bssid):
+            validation_message = "必须提供格式正确的 --bssid"
+        elif not args.pin or not WPS_PIN_RE.match(args.pin):
+            validation_message = "必须提供 8 位数字 --pin"
+        elif args.wps_timeout <= 0:
+            validation_message = "--wps-timeout 必须大于 0"
+        elif os.getuid() != 0:
+            validation_message = "WPS 单 PIN 连接要求 root 身份"
+        if validation_message is not None:
+            emit_json({"type": "failure", "message": validation_message})
+            return 1
+        connector = SinglePinWpsConnector(
+            interface=args.interface,
+            bssid=args.bssid,
+            pin=args.pin,
+            timeout=args.wps_timeout,
+        )
+        return 0 if connector.run() else 1
 
     if sys.hexversion < 0x03060F0:
         emit_json(

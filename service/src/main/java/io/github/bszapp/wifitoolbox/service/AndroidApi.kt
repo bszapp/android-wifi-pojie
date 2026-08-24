@@ -4,6 +4,7 @@ package io.github.bszapp.wifitoolbox.service
 
 import android.annotation.SuppressLint
 import android.content.AttributionSource
+import android.content.Context
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
@@ -30,42 +31,45 @@ import java.lang.reflect.InvocationTargetException
 @Suppress("DEPRECATION")
 class AndroidApi(
     internal val callerPackage: String = defaultCallerPackage(),
+    private val serviceContext: Context? = null,
 ) {
     private val sdk = Build.VERSION.SDK_INT
+    private val temporaryWifiNetworkLock = Any()
+    private var activeTemporaryWifiNetworkRequest: TemporaryWifiNetworkRequest? = null
 
     fun execute(request: AndroidApiRequest): AndroidApiResponse =
         runCatching {
             when (request.action) {
-                AndroidApiAction.WIFI_IS_ENABLED -> booleanResponse(isWifiEnabledDirect())
+                AndroidApiAction.WIFI_IS_ENABLED -> booleanResponse(isWifiEnabled())
                 AndroidApiAction.WIFI_SET_ENABLED -> {
-                    setWifiEnabledDirect(request.arguments.getBoolean(AndroidApiKeys.ENABLED))
+                    setWifiEnabled(request.arguments.getBoolean(AndroidApiKeys.ENABLED))
                     AndroidApiResponse.success()
                 }
                 AndroidApiAction.WIFI_GET_SCAN_RESULTS -> {
-                    val results = ArrayList(getScanResultsDirect())
+                    val results = ArrayList(getScanResults())
                     AndroidApiResponse.success(Bundle().apply {
                         putParcelableArrayList(AndroidApiKeys.SCAN_RESULTS, results)
                     })
                 }
                 AndroidApiAction.WIFI_GET_SAVED_LIST -> AndroidApiResponse.success(Bundle().apply {
-                    putByteArray(AndroidApiKeys.SAVED_WIFI_LIST_BYTES, getSavedWifiListBytesDirect())
+                    putByteArray(AndroidApiKeys.SAVED_WIFI_LIST_BYTES, getSavedWifiListBytes())
                 })
                 AndroidApiAction.WIFI_UPDATE_CONFIG -> {
                     val networkId = request.arguments.getInt(AndroidApiKeys.NETWORK_ID)
                     val patchBytes = request.arguments.getByteArray(AndroidApiKeys.PATCH_BYTES)
                         ?: throw IllegalArgumentException("缺少 WifiConfigPatch 数据")
-                    booleanResponse(updateWifiConfigDirect(networkId, patchBytes))
+                    booleanResponse(updateWifiConfig(networkId, patchBytes))
                 }
                 AndroidApiAction.WIFI_DISCONNECT_CURRENT -> {
                     val networkId = request.arguments.getInt(AndroidApiKeys.NETWORK_ID)
-                    booleanResponse(disconnectCurrentNetworkDirect(networkId))
+                    booleanResponse(disconnectCurrentNetwork(networkId))
                 }
                 else -> throw IllegalArgumentException("未知 AndroidApi action：${request.action}")
             }
         }.getOrElse(AndroidApiResponse::failure)
 
 
-    fun getScanResultsDirect(): List<ScanResult> = androidBusinessCall(
+    fun getScanResults(): List<ScanResult> = androidBusinessCall(
         operation = "获取扫描的 Wi-Fi 列表",
         successMessage = { results ->
             "获取扫描的 Wi-Fi 列表成功：count=${results.size}"
@@ -74,7 +78,7 @@ class AndroidApi(
         getScanResultsInternal()
     }
 
-    fun getConnectionInfoDirect(): WifiInfo = androidBusinessCall(
+    fun getConnectionInfo(): WifiInfo = androidBusinessCall(
         operation = "获取当前 Wi-Fi 连接信息",
         successMessage = { info ->
             "获取当前 Wi-Fi 连接信息成功：networkId=${info.networkId} bssid=${info.bssid}"
@@ -136,8 +140,8 @@ class AndroidApi(
         return parseScanResultList(raw, "getScanResults")
     }
 
-    fun getSavedWifiListBytesDirect(): ByteArray {
-        val list = getSavedWifiListDirect()
+    fun getSavedWifiListBytes(): ByteArray {
+        val list = getSavedWifiList()
         val parcel = Parcel.obtain()
         return try {
             parcel.writeTypedList(list)
@@ -147,7 +151,7 @@ class AndroidApi(
         }
     }
 
-    fun getSavedWifiListDirect(): List<WifiConfiguration> = androidBusinessCall(
+    fun getSavedWifiList(): List<WifiConfiguration> = androidBusinessCall(
         operation = "获取已保存的 Wi-Fi 列表",
         successMessage = { networks ->
             "获取已保存的 Wi-Fi 列表成功：count=${networks.size}"
@@ -252,7 +256,7 @@ class AndroidApi(
         return list.distinctBy { it.networkId }
     }
 
-    fun updateWifiConfigDirect(networkId: Int, patchBytes: ByteArray): Boolean =
+    fun updateWifiConfig(networkId: Int, patchBytes: ByteArray): Boolean =
         androidBusinessCall(
             operation = "更新 Wi-Fi 配置",
             details = "networkId=$networkId",
@@ -270,49 +274,12 @@ class AndroidApi(
             setNetworkEnabledInternal(networkId, enabled, disableOthers = false)
         }
 
-        patch.autoJoin?.let { autoJoin ->
-            val wifiService = getWifiService()
-            val clazz = wifiService::class.java
-            if (sdk >= 30) {
-                systemApi(
-                    apiName = "allowAutojoin",
-                ) {
-                    clazz.getMethod(
-                        "allowAutojoin",
-                        Int::class.java,
-                        Boolean::class.java
-                    ).invoke(wifiService, networkId, autoJoin)
-                }
-            } else {
-                val config = getSavedWifiListInternal()
-                    .firstOrNull { it.networkId == networkId }
-                    ?: throw IllegalArgumentException("找不到 networkId=$networkId 的 Wi-Fi 配置")
-
-                systemApi(
-                    apiName = "WifiConfiguration.allowAutojoin.setBoolean",
-                ) {
-                    WifiConfiguration::class.java
-                        .getField("allowAutojoin")
-                        .setBoolean(config, autoJoin)
-                }
-
-                val result = systemApi(
-                    apiName = "updateNetwork",
-                ) {
-                    clazz.getMethod(
-                        "updateNetwork",
-                        WifiConfiguration::class.java
-                    ).invoke(wifiService, config)
-                }
-
-                requireNonNegativeInt("updateNetwork", result)
-            }
-        }
+        patch.autoJoin?.let { autoJoin -> setWifiNetworkAutoJoinInternal(networkId, autoJoin) }
 
         return true
     }
 
-    fun disconnectCurrentNetworkDirect(networkId: Int): Boolean = androidBusinessCall(
+    fun disconnectCurrentNetwork(networkId: Int): Boolean = androidBusinessCall(
         operation = "断开当前 Wi-Fi 并禁用配置",
         details = "networkId=$networkId",
         successMessage = {
@@ -339,7 +306,7 @@ class AndroidApi(
         return true
     }
 
-    fun connectWifiByNetworkIdDirect(networkId: Int): Boolean = androidBusinessCall(
+    fun connectWifiByNetworkId(networkId: Int): Boolean = androidBusinessCall(
         operation = "发送 enableNetwork 指令",
         details = "networkId=$networkId",
         successMessage = {
@@ -393,7 +360,7 @@ class AndroidApi(
         requireBooleanSuccess(apiName, result)
     }
 
-    fun isWifiEnabledDirect(): Boolean = androidBusinessCall(
+    fun isWifiEnabled(): Boolean = androidBusinessCall(
         operation = "查询 Wi-Fi 开关状态",
         successMessage = { enabled ->
             "查询 Wi-Fi 开关状态成功：enabled=$enabled"
@@ -415,7 +382,7 @@ class AndroidApi(
         return state == WifiManager.WIFI_STATE_ENABLED || state == WifiManager.WIFI_STATE_ENABLING
     }
 
-    fun setWifiEnabledDirect(enabled: Boolean) = androidBusinessCall(
+    fun setWifiEnabled(enabled: Boolean) = androidBusinessCall(
         operation = "设置 Wi-Fi 开关",
         details = "enabled=$enabled",
         successMessage = {
@@ -448,6 +415,271 @@ class AndroidApi(
 
         requireBooleanSuccess("setWifiEnabled", result)
     }
+
+    fun saveWifiNetwork(ssid: String, password: String): Int = androidBusinessCall(
+        operation = "保存 WPA 网络配置并关闭自动加入",
+        details = "ssid=$ssid",
+        successMessage = { networkId ->
+            "保存 WPA 网络配置并关闭自动加入成功：ssid=$ssid networkId=$networkId"
+        },
+    ) {
+        require(ssid.isNotBlank()) { "SSID 不能为空" }
+        val quotedSsid = quoteWifiValue(ssid)
+        val existing = getSavedWifiListInternal().firstOrNull { it.SSID == quotedSsid }
+        val config = existing ?: WifiConfiguration().apply {
+            SSID = quotedSsid
+            allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK)
+        }
+        config.preSharedKey = if (password.length == 64 && password.all { it.isHexDigit() }) {
+            password
+        } else {
+            quoteWifiValue(password)
+        }
+        addOrUpdateWifiNetworkInternal(config).also { networkId ->
+            setWifiNetworkAutoJoinInternal(networkId, false)
+        }
+    }
+
+    internal fun requestTemporaryWifiNetwork(
+        ssid: String,
+        password: String,
+    ): TemporaryWifiNetworkRequest = androidBusinessCall(
+        operation = "准备测试连通性 Wi-Fi 配置",
+        details = "ssid=$ssid",
+        successMessage = { request ->
+            "准备测试连通性 Wi-Fi 配置成功：ssid=$ssid " +
+                "networkId=${request.networkId} " +
+                "removedExistingConfiguration=${request.removedExistingConfiguration}"
+        },
+    ) {
+        require(ssid.isNotBlank()) { "SSID 不能为空" }
+        synchronized(temporaryWifiNetworkLock) {
+            check(activeTemporaryWifiNetworkRequest == null) {
+                "已有测试连通性 Wi-Fi 配置正在使用"
+            }
+
+            val quotedSsid = quoteWifiValue(ssid)
+            val existingConfiguration = getSavedWifiListInternal()
+                .firstOrNull { it.SSID == quotedSsid }
+            existingConfiguration?.let { existing ->
+                check(removeWifiNetworkInternal(existing.networkId)) {
+                    "删除原 Wi-Fi 配置失败：networkId=${existing.networkId}"
+                }
+            }
+            val testConfiguration = WifiConfiguration().apply { SSID = quotedSsid }
+            applyTestCredentials(testConfiguration, password)
+
+            var testNetworkId: Int? = null
+            try {
+                val configuredNetworkId = addOrUpdateWifiNetworkInternal(testConfiguration)
+                testNetworkId = configuredNetworkId
+                setNetworkEnabledInternal(
+                    networkId = configuredNetworkId,
+                    enabled = true,
+                    disableOthers = true,
+                )
+
+                lateinit var request: TemporaryWifiNetworkRequest
+                request = TemporaryWifiNetworkRequest(
+                    networkId = configuredNetworkId,
+                    removedExistingConfiguration = existingConfiguration != null,
+                ) {
+                    try {
+                        removeTemporaryWifiNetwork(configuredNetworkId)
+                    } finally {
+                        synchronized(temporaryWifiNetworkLock) {
+                            if (activeTemporaryWifiNetworkRequest === request) {
+                                activeTemporaryWifiNetworkRequest = null
+                            }
+                        }
+                    }
+                }
+                activeTemporaryWifiNetworkRequest = request
+                request
+            } catch (error: Throwable) {
+                testNetworkId?.let { networkId ->
+                    runCatching {
+                        removeTemporaryWifiNetwork(networkId)
+                    }.exceptionOrNull()?.let(error::addSuppressed)
+                }
+                throw error
+            }
+        }
+    }
+
+    fun close() {
+        val request = synchronized(temporaryWifiNetworkLock) {
+            activeTemporaryWifiNetworkRequest
+        }
+        request?.close()
+    }
+
+    fun disconnectWifi(): Boolean = androidBusinessCall(
+        operation = "断开当前 Wi-Fi",
+        successMessage = { "断开当前 Wi-Fi 成功" },
+    ) {
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        val result = systemApi(apiName = "disconnect") {
+            if (sdk >= 28) {
+                clazz.getMethod("disconnect", String::class.java)
+                    .invoke(wifiService, callerPackage)
+            } else {
+                clazz.getMethod("disconnect").invoke(wifiService)
+            }
+        }
+        requireBooleanSuccess("disconnect", result)
+        true
+    }
+
+    fun removeWifiNetwork(networkId: Int): Boolean = androidBusinessCall(
+        operation = "移除 Wi-Fi 配置",
+        details = "networkId=$networkId",
+        successMessage = { "移除 Wi-Fi 配置成功：networkId=$networkId" },
+    ) {
+        require(networkId >= 0) { "networkId 必须大于等于 0" }
+        check(removeWifiNetworkInternal(networkId)) {
+            "removeNetwork 返回 false：networkId=$networkId"
+        }
+        true
+    }
+
+    private fun removeWifiNetworkInternal(networkId: Int): Boolean {
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        val result = systemApi(apiName = "removeNetwork") {
+            if (sdk >= 28) {
+                clazz.getMethod(
+                    "removeNetwork",
+                    Int::class.java,
+                    String::class.java,
+                ).invoke(wifiService, networkId, callerPackage)
+            } else {
+                clazz.getMethod(
+                    "removeNetwork",
+                    Int::class.java,
+                ).invoke(wifiService, networkId)
+            }
+        }
+        return result !is Boolean || result
+    }
+
+    fun setWifiNetworkAutoJoin(networkId: Int, enabled: Boolean): Boolean = androidBusinessCall(
+        operation = "设置 Wi-Fi 自动加入",
+        details = "networkId=$networkId enabled=$enabled",
+        successMessage = {
+            "设置 Wi-Fi 自动加入成功：networkId=$networkId enabled=$enabled"
+        },
+    ) {
+        setWifiNetworkAutoJoinInternal(networkId, enabled)
+        true
+    }
+
+    private fun addOrUpdateWifiNetworkInternal(config: WifiConfiguration): Int {
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        val result = systemApi(apiName = "addOrUpdateNetwork") {
+            when {
+                sdk >= 33 -> clazz.getMethod(
+                    "addOrUpdateNetwork",
+                    WifiConfiguration::class.java,
+                    String::class.java,
+                    Bundle::class.java,
+                ).invoke(wifiService, config, callerPackage, Bundle())
+
+                sdk >= 28 -> clazz.getMethod(
+                    "addOrUpdateNetwork",
+                    WifiConfiguration::class.java,
+                    String::class.java,
+                ).invoke(wifiService, config, callerPackage)
+
+                else -> clazz.getMethod(
+                    "addOrUpdateNetwork",
+                    WifiConfiguration::class.java,
+                ).invoke(wifiService, config)
+            }
+        }
+        return (result as? Int)
+            ?.also { require(it >= 0) { "addOrUpdateNetwork 返回 $it" } }
+            ?: throw IllegalStateException("addOrUpdateNetwork 返回类型不是 Int：${result?.javaClass?.name}")
+    }
+
+    private fun setWifiNetworkAutoJoinInternal(networkId: Int, enabled: Boolean) {
+        require(networkId >= 0) { "networkId 必须大于等于 0" }
+        val wifiService = getWifiService()
+        val clazz = wifiService::class.java
+        if (sdk >= 30) {
+            systemApi(apiName = "allowAutojoin") {
+                clazz.getMethod(
+                    "allowAutojoin",
+                    Int::class.java,
+                    Boolean::class.java,
+                ).invoke(wifiService, networkId, enabled)
+            }
+            return
+        }
+        val config = getSavedWifiListInternal()
+            .firstOrNull { it.networkId == networkId }
+            ?: throw IllegalArgumentException("找不到 networkId=$networkId 的 Wi-Fi 配置")
+        systemApi(apiName = "WifiConfiguration.allowAutojoin.setBoolean") {
+            WifiConfiguration::class.java.getField("allowAutojoin").setBoolean(config, enabled)
+        }
+        val result = systemApi(apiName = "updateNetwork") {
+            clazz.getMethod("updateNetwork", WifiConfiguration::class.java)
+                .invoke(wifiService, config)
+        }
+        requireNonNegativeInt("updateNetwork", result)
+    }
+
+    private fun removeTemporaryWifiNetwork(
+        testNetworkId: Int,
+    ) = androidBusinessCall(
+        operation = "清理测试连通性 Wi-Fi 配置",
+        details = "networkId=$testNetworkId",
+        successMessage = { "清理测试连通性 Wi-Fi 配置成功：已删除测试配置" },
+    ) {
+        val failures = mutableListOf<Throwable>()
+
+        runCatching { disconnectWifi() }
+            .exceptionOrNull()
+            ?.let(failures::add)
+
+        runCatching {
+            val testConfigurationStillExists = getSavedWifiListInternal()
+                .any { it.networkId == testNetworkId }
+            if (testConfigurationStillExists) {
+                check(removeWifiNetworkInternal(testNetworkId)) {
+                    "removeNetwork 返回 false：networkId=$testNetworkId"
+                }
+            }
+        }.exceptionOrNull()?.let(failures::add)
+
+        failures.firstOrNull()?.let { first ->
+            failures.drop(1).forEach(first::addSuppressed)
+            throw first
+        }
+    }
+
+    private fun applyTestCredentials(config: WifiConfiguration, password: String) {
+        config.allowedKeyManagement.clear()
+        if (password.isEmpty()) {
+            config.preSharedKey = null
+            config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+        } else {
+            config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK)
+            config.preSharedKey = if (password.length == 64 && password.all { it.isHexDigit() }) {
+                password
+            } else {
+                quoteWifiValue(password)
+            }
+        }
+    }
+
+    private fun quoteWifiValue(value: String): String =
+        "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+    private fun Char.isHexDigit(): Boolean =
+        this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
     private fun readWifiConfigPatch(patchBytes: ByteArray): WifiConfigPatch {
         val parcel = Parcel.obtain()

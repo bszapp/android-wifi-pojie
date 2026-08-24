@@ -2,9 +2,12 @@ package io.github.bszapp.wifitoolbox.service.task
 
 import android.os.SystemClock
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiStage
+import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTarget
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskRequest
+import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.service.AndroidApi
+import io.github.bszapp.wifitoolbox.service.TemporaryWifiNetworkRequest
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogEvent
 import java.util.concurrent.LinkedBlockingQueue
@@ -18,20 +21,47 @@ internal class ConnectWifiTask(
     private val wifiLogAnalyzer: WifiLogAnalyzer,
 ) : ServiceTask {
     override fun run(context: TaskContext) {
-        val networkId = request.input.networkId
         val config = request.config
         val handshakeAttempts = config.failureFlags.handshakeAttemptsExceeded
         val handshakeTimeout = config.failureFlags.handshakeTimeout
-        val events = LinkedBlockingQueue<WifiLogEvent>()
+        val signals = LinkedBlockingQueue<ConnectSignal>()
         val overallDeadline = SystemClock.elapsedRealtime() + config.timeoutMillis
-        context.log("开始使用 Android networkId=$networkId 连接 Wi-Fi：$expectedSsid")
+        context.log("任务类型：${request.input.type.displayName}")
         context.log("进入阶段：与路由器建立通信")
         context.updateProgress(TaskProgress.ConnectWifi(ConnectWifiStage.ROUTER_COMMUNICATION))
         context.ensureRunning()
 
-        val subscription = wifiLogAnalyzer.subscribe(events::offer)
+        val subscription = wifiLogAnalyzer.subscribe { event ->
+            signals.offer(ConnectSignal(event))
+        }
+        var temporaryRequest: TemporaryWifiNetworkRequest? = null
         try {
-            androidApi.connectWifiByNetworkIdDirect(networkId)
+            when (val target = request.input.target) {
+                is ConnectWifiTarget.SavedNetwork -> {
+                    context.log(
+                        "开始使用 Android networkId=${target.networkId} " +
+                            "连接 Wi-Fi：$expectedSsid",
+                    )
+                    androidApi.connectWifiByNetworkId(target.networkId)
+                }
+
+                is ConnectWifiTarget.TemporaryNetwork -> {
+                    temporaryRequest = androidApi.requestTemporaryWifiNetwork(
+                        ssid = target.ssid,
+                        password = target.password,
+                    ).also { temporary ->
+                        context.log(
+                            if (temporary.removedExistingConfiguration) {
+                                "已删除原 Wi-Fi 配置并新建测试配置，" +
+                                    "networkId=${temporary.networkId}"
+                            } else {
+                                "未找到原 Wi-Fi 配置，已新建测试配置，" +
+                                    "networkId=${temporary.networkId}"
+                            },
+                        )
+                    }
+                }
+            }
 
             var handshakeDeadline: Long? = null
             var handshakeCount = 0
@@ -64,10 +94,11 @@ internal class ConnectWifiTask(
                 } else {
                     overallDeadline
                 }
-                val event = events.poll(
+                val signal = signals.poll(
                     (nextDeadline - now).coerceAtLeast(1L),
                     TimeUnit.MILLISECONDS,
                 ) ?: continue
+                val event = signal.event
 
                 context.log("WPA 原文：${event.rawLine}")
                 if (event.ssid != expectedSsid) {
@@ -129,6 +160,9 @@ internal class ConnectWifiTask(
                             "连接成功：密钥协商完成，" +
                                 "MAC=${event.bssid}，SSID=$expectedSsid",
                         )
+                        if (temporaryRequest != null) {
+                            context.log("测试连通性成功，立即断开临时网络")
+                        }
                         return
                     }
 
@@ -164,6 +198,25 @@ internal class ConnectWifiTask(
             }
         } finally {
             subscription.close()
+            temporaryRequest?.let { requestHandle ->
+                runCatching { requestHandle.close() }
+                    .onSuccess {
+                        context.log("已断开测试连接并删除测试配置")
+                    }
+                    .onFailure { error ->
+                        context.log(
+                            "清理测试连接配置失败：${error.message ?: error.javaClass.name}",
+                        )
+                    }
+            }
         }
     }
+
+    private val ConnectWifiTaskType.displayName: String
+        get() = when (this) {
+            ConnectWifiTaskType.USE_SAVED_NETWORK -> "使用已保存的网络连接"
+            ConnectWifiTaskType.CONNECT_TO_NETWORK -> "连接到网络"
+        }
+
+    private data class ConnectSignal(val event: WifiLogEvent)
 }

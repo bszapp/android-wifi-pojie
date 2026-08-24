@@ -9,6 +9,8 @@ interface ITaskController {
 
     fun stopTask(taskId: Long)
 
+    fun updateTask(taskId: Long, update: TaskUpdateRequest)
+
     fun trackTask(taskId: Long)
 
     fun clearLogs()

@@ -29,6 +29,7 @@ internal class TerminalManager(
 
     fun createTerminal(
         command: List<String>,
+        onOutputLines: (terminalId: Long, lines: List<String>) -> Unit = { _, _ -> },
         onExit: (terminalId: Long, exitCode: Int) -> Unit = { _, _ -> },
     ): Long = synchronized(creationLock) {
         require(command.isNotEmpty()) { "终端启动命令不能为空" }
@@ -54,6 +55,7 @@ internal class TerminalManager(
                         input = process.outputStream.bufferedWriter(Charsets.UTF_8),
                         displayCommand = displayCommand,
                         ownerThread = Thread.currentThread(),
+                        onOutputLines = onOutputLines,
                         onExit = onExit,
                     )
                     val aliveSnapshot = synchronized(lock) {
@@ -116,6 +118,7 @@ internal class TerminalManager(
         rootfsPath: String,
         runtimePath: String,
         terminalPath: String,
+        onOutputLines: (terminalId: Long, lines: List<String>) -> Unit = { _, _ -> },
         onExit: (terminalId: Long, exitCode: Int) -> Unit = { _, _ -> },
     ): Long {
         require(android.os.Process.myUid() == 0) { "Chroot 终端要求 Root 工作模式" }
@@ -141,6 +144,7 @@ internal class TerminalManager(
                 "--host-path",
                 HOST_TOOL_PATH,
             ),
+            onOutputLines = onOutputLines,
             onExit = onExit,
         )
     }
@@ -221,7 +225,8 @@ internal class TerminalManager(
     }
 
     fun terminalSnapshots(): List<TerminalLogRangeSnapshot> =
-        synchronized(lock) { terminals.values.toList() }.map(ManagedTerminal::rangeSnapshot)
+        synchronized(lock) { terminals.values.toList() }
+            .map(ManagedTerminal::rangeSnapshot)
 
     fun getLogCount(terminalId: Long): Int = requireTerminal(terminalId).rangeSnapshot().lineCount
 
@@ -271,6 +276,12 @@ internal class TerminalManager(
                     val update = terminal.outputAccumulator.consume(
                         String(buffer, 0, count),
                     )
+                    if (update.completedLines.isNotEmpty()) {
+                        runCatching { terminal.onOutputLines(terminal.id, update.completedLines) }
+                            .onFailure { error ->
+                                Log.w(TAG, "终端 ${terminal.id} 输出回调失败：${error.message}", error)
+                            }
+                    }
                     terminal.applyOutput(update)?.let { range ->
                         update.completedLines
                             .filter(String::isNotEmpty)
@@ -328,6 +339,7 @@ internal class TerminalManager(
         val input: BufferedWriter,
         val displayCommand: String,
         val ownerThread: Thread,
+        val onOutputLines: (terminalId: Long, lines: List<String>) -> Unit,
         val onExit: (terminalId: Long, exitCode: Int) -> Unit,
     ) {
         val lock = Any()

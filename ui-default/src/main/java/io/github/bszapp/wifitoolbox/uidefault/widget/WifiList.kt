@@ -58,8 +58,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskInput
+import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTarget
+import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
+import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
@@ -67,12 +72,14 @@ import io.github.bszapp.wifitoolbox.uidefault.component.WifiIcon
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetSubmission
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeAccessPoint
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheetTarget
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WpsPbcTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.frequencyToChannel
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -85,6 +92,7 @@ fun WifiList(
     vm: DefaultViewModel = viewModel(),
     listState: LazyListState = rememberLazyListState(),
     contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+    wpsPbcStartSignal: Int = 0,
 ) {
     val wifiState by vm.wifiList.state.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
@@ -92,9 +100,12 @@ fun WifiList(
     val trackedTask by vm.taskTracker.trackedTask.collectAsStateWithLifecycle()
     var selectedSsid by rememberSaveable { mutableStateOf<String?>(null) }
     var connectSheetContent by remember { mutableStateOf<ConnectWifiSheetContent?>(null) }
+    var dismissConnectSheet by remember { mutableStateOf(false) }
     var monitorModeTarget by remember { mutableStateOf<MonitorModeSheetTarget?>(null) }
     var showMonitorModeSheet by remember { mutableStateOf(false) }
     var isSubmittingTask by remember { mutableStateOf(false) }
+    var showWpsPbcSheet by remember { mutableStateOf(false) }
+    var isStartingWpsPbc by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // WifiState 与 SavedWifiList 是两种同级数据：
@@ -122,6 +133,18 @@ fun WifiList(
         if (selectedSsid != null && selectedGroup == null) selectedSsid = null
     }
 
+    LaunchedEffect(wpsPbcStartSignal) {
+        if (wpsPbcStartSignal <= 0) return@LaunchedEffect
+        showWpsPbcSheet = true
+        isStartingWpsPbc = true
+        runCatching {
+            vm.taskTracker.startTask(TaskStartRequest.wpsPbc())
+        }.onFailure {
+            showWpsPbcSheet = false
+        }
+        isStartingWpsPbc = false
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         when (val state = wifiState) {
             null -> Box(modifier = Modifier.fillMaxSize())
@@ -144,13 +167,22 @@ fun WifiList(
                     item(key = "running-task-${task.taskId}") {
                         RunningTaskCard(
                             taskId = task.taskId,
-                            stage = (task.progress as? TaskProgress.ConnectWifi)
-                                ?.stage
-                                ?.name
-                                .orEmpty(),
+                            stage = when (val progress = task.progress) {
+                                is TaskProgress.ConnectWifi -> progress.stage.name.toTaskStageText()
+                                is TaskProgress.WpsPbc ->
+                                    "WPS-PBC · 已获取 ${progress.networks.size} 个网络"
+                                null -> "加载中"
+                            },
                             onClick = {
                                 vm.taskTracker.track(task.taskId)
-                                connectSheetContent = ConnectWifiSheetContent.Task(task.taskId)
+                                when (task.request.payload) {
+                                    is TaskRequestPayload.ConnectWifi -> {
+                                        connectSheetContent = ConnectWifiSheetContent.Task(task.taskId)
+                                    }
+                                    is TaskRequestPayload.WpsPbc -> {
+                                        showWpsPbcSheet = true
+                                    }
+                                }
                             },
                         )
                     }
@@ -189,7 +221,15 @@ fun WifiList(
                                 group = group,
                                 modifier = Modifier.animateItem(),
                                 onClick = { selectedSsid = group.ssid },
+                                onConnect = {
+                                    dismissConnectSheet = false
+                                    connectSheetContent = ConnectWifiSheetContent.Network(
+                                        ssid = group.ssid,
+                                        hasSavedConfiguration = group.savedWifiList.isNotEmpty(),
+                                    )
+                                },
                                 onConnectWithConfig = { config ->
+                                    dismissConnectSheet = false
                                     connectSheetContent = ConnectWifiSheetContent.Configuration(
                                         networkId = config.networkId,
                                         ssid = group.displaySsid,
@@ -276,21 +316,85 @@ fun WifiList(
             content = content,
             trackedTask = trackedTask,
             isSubmitting = isSubmittingTask,
-            onStart = { config ->
-                val configuration = content as? ConnectWifiSheetContent.Configuration
-                    ?: return@ConnectWifiTaskSheet
+            dismissRequested = dismissConnectSheet,
+            onSubmit = { submission ->
                 if (!isSubmittingTask) {
                     isSubmittingTask = true
                     scope.launch {
-                        runCatching {
-                            vm.taskTracker.startTask(
-                                TaskStartRequest.connectWifi(
-                                    input = ConnectWifiTaskInput(configuration.networkId),
-                                    config = config,
-                                ),
-                            )
-                        }.onSuccess { taskId ->
-                            connectSheetContent = ConnectWifiSheetContent.Task(taskId)
+                        when (submission) {
+                            is ConnectWifiSheetSubmission.UseSavedNetwork -> {
+                                val configuration = content as? ConnectWifiSheetContent.Configuration
+                                if (configuration != null) {
+                                    runCatching {
+                                        vm.taskTracker.startTask(
+                                            TaskStartRequest.connectWifi(
+                                                input = ConnectWifiTaskInput(
+                                                    type = ConnectWifiTaskType.USE_SAVED_NETWORK,
+                                                    target = ConnectWifiTarget.SavedNetwork(
+                                                        configuration.networkId,
+                                                    ),
+                                                ),
+                                                config = submission.config,
+                                            ),
+                                        )
+                                    }.onSuccess { taskId ->
+                                        connectSheetContent = ConnectWifiSheetContent.Task(taskId)
+                                    }
+                                }
+                            }
+                            is ConnectWifiSheetSubmission.TestConnectivity -> {
+                                val network = content as? ConnectWifiSheetContent.Network
+                                if (network != null) {
+                                    runCatching {
+                                        vm.taskTracker.startTask(
+                                            TaskStartRequest.connectWifi(
+                                                input = ConnectWifiTaskInput(
+                                                    type = ConnectWifiTaskType.CONNECT_TO_NETWORK,
+                                                    target = ConnectWifiTarget.TemporaryNetwork(
+                                                        ssid = network.ssid,
+                                                        password = submission.password,
+                                                    ),
+                                                ),
+                                                config = submission.config,
+                                            ),
+                                        )
+                                    }.onSuccess { taskId ->
+                                        connectSheetContent = ConnectWifiSheetContent.Task(taskId)
+                                    }
+                                }
+                            }
+                            is ConnectWifiSheetSubmission.SaveOnly -> {
+                                val network = content as? ConnectWifiSheetContent.Network
+                                if (network != null) {
+                                    runCatching {
+                                        vm.wifiList.saveWifiNetwork(network.ssid, submission.password)
+                                    }.onSuccess {
+                                        dismissConnectSheet = true
+                                    }
+                                }
+                            }
+                            is ConnectWifiSheetSubmission.SaveAndConnect -> {
+                                val network = content as? ConnectWifiSheetContent.Network
+                                if (network != null) {
+                                    runCatching {
+                                        val networkId = vm.wifiList.saveWifiNetwork(
+                                            network.ssid,
+                                            submission.password,
+                                        )
+                                        vm.taskTracker.startTask(
+                                            TaskStartRequest.connectWifi(
+                                                input = ConnectWifiTaskInput(
+                                                    type = ConnectWifiTaskType.CONNECT_TO_NETWORK,
+                                                    target = ConnectWifiTarget.SavedNetwork(networkId),
+                                                ),
+                                                config = submission.config,
+                                            ),
+                                        )
+                                    }.onSuccess { taskId ->
+                                        connectSheetContent = ConnectWifiSheetContent.Task(taskId)
+                                    }
+                                }
+                            }
                         }
                         isSubmittingTask = false
                     }
@@ -302,7 +406,31 @@ fun WifiList(
                     vm.taskTracker.clearTracking()
                 }
                 connectSheetContent = null
+                dismissConnectSheet = false
                 isSubmittingTask = false
+            },
+        )
+    }
+
+    if (showWpsPbcSheet) {
+        WpsPbcTaskSheet(
+            trackedTask = trackedTask,
+            isStarting = isStartingWpsPbc,
+            onContinuousCaptureChange = { enabled ->
+                vm.taskTracker.updateTrackedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcContinuousCapture(enabled)),
+                )
+            },
+            onAutoSaveToDeviceChange = { enabled ->
+                vm.taskTracker.updateTrackedTask(
+                    TaskUpdateRequest(TaskUpdatePayload.WpsPbcAutoSaveToDevice(enabled)),
+                )
+            },
+            onStop = vm.taskTracker::stopTrackedTask,
+            onDismiss = {
+                vm.taskTracker.clearTracking()
+                showWpsPbcSheet = false
+                isStartingWpsPbc = false
             },
         )
     }
@@ -337,7 +465,7 @@ private fun RunningTaskCard(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Text(
-                    text = stage.toTaskStageText(),
+                    text = stage,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                 )
@@ -450,6 +578,7 @@ private fun WifiGroupCard(
     group: MergedWifiGroup,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onConnect: () -> Unit,
     onConnectWithConfig: (WifiConfiguration) -> Unit,
     onEnterMonitorMode: () -> Unit,
 ) {
@@ -561,7 +690,7 @@ private fun WifiGroupCard(
                 isConnected = isConnected,
                 buttonContainerColor = MaterialTheme.colorScheme.primary.takeIf { isConnected },
                 buttonContentColor = MaterialTheme.colorScheme.onPrimary.takeIf { isConnected },
-                onConnect = { /* TODO */ },
+                onConnect = onConnect,
                 onDisconnect = {
                     group.connection?.networkId?.let(vm.wifiList::disconnectCurrentNetwork)
                 },

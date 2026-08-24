@@ -1,221 +1,390 @@
 #!/usr/bin/env python3
-# wps_connect.py
-import argparse
-import os
-import re
-import subprocess
+# -*- coding: utf-8 -*-
 import sys
-import threading
+import subprocess
+import os
+import tempfile
+import shutil
+import codecs
+import socket
+import pathlib
 import time
-
-MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
-PIN_RE = re.compile(r"^\d{8}$")
-
-HEXDUMP_INLINE_RE = re.compile(r'hexdump(?:_key)?\(len=(\d+)\):\s*(.+)$')
-HEXDUMP_ASCII_HEADER_RE = re.compile(r'hexdump_ascii(?:_key)?\(len=(\d+)\):\s*$')
-HEXLINE_RE = re.compile(r'^\s*[0-9A-Fa-f]+:\s+((?:[0-9A-Fa-f]{2}\s+){1,16})')
+from datetime import datetime
+import csv
+import argparse
 
 
-class CredentialReader(threading.Thread):
-    def __init__(self, proc):
-        super().__init__(daemon=True)
-        self.proc = proc
-        self.psk = None
-        self._collecting = False
-        self._need_len = 0
-        self._hexparts = []
+def get_hex(line):
+    a = line.split(':', 3)
+    return a[2].replace(' ', '').upper()
 
-    def run(self):
-        for raw in self.proc.stdout:
-            line = raw.rstrip('\n')
-            if self.psk:
-                continue
-            if 'Network Key' in line and 'hexdump' in line:
-                m = HEXDUMP_INLINE_RE.search(line)
-                if m:
-                    self._finish(re.sub(r'\s+', '', m.group(2)), int(m.group(1)))
-                    continue
-                m2 = HEXDUMP_ASCII_HEADER_RE.search(line)
-                if m2:
-                    self._collecting = True
-                    self._need_len = int(m2.group(1))
-                    self._hexparts = []
-                continue
-            if self._collecting:
-                m3 = HEXLINE_RE.match(line)
-                if m3:
-                    self._hexparts.append(re.sub(r'\s+', '', m3.group(1)))
-                    if sum(len(p) for p in self._hexparts) // 2 >= self._need_len:
-                        self._finish(''.join(self._hexparts), self._need_len)
+
+class ConnectionStatus:
+    def __init__(self):
+        self.status = ''   # Must be WSC_NACK, WPS_FAIL or GOT_PSK
+        self.last_m_message = 0
+        self.essid = ''
+        self.wpa_psk = ''
+        self.bssid = ''
+
+    def isFirstHalfValid(self):
+        return self.last_m_message > 5
+
+    def clear(self):
+        self.__init__()
+
+
+class Companion:
+    """Main application part"""
+    def __init__(self, interface, save_result=False, print_debug=False, bssid=None, exclude_macs=None):
+        self.interface = interface
+        self.save_result = save_result
+        self.print_debug = print_debug
+        self.exclude_macs = exclude_macs or []
+
+        self.tempdir = tempfile.mkdtemp()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
+            temp.write('ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n'.format(self.tempdir))
+            self.tempconf = temp.name
+        self.wpas_ctrl_path = f"{self.tempdir}/{interface}"
+        self.__init_wpa_supplicant()
+
+        self.res_socket_file = f"{tempfile.gettempdir()}/{next(tempfile._get_candidate_names())}"
+        self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.retsock.bind(self.res_socket_file)
+
+        self.connection_status = ConnectionStatus()
+
+        self.reports_dir = os.path.dirname(os.path.realpath(__file__)) + '/reports/'
+
+        self.bssid = bssid or ""
+        self.lastPwr = 0
+
+    def __init_wpa_supplicant(self):
+        print('[*] Running wpa_supplicant…')
+        cmd = 'wpa_supplicant -K -d -Dnl80211,wext,hostapd,wired -i{} -c{}'.format(self.interface, self.tempconf)
+        self.wpas = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+        # Waiting for wpa_supplicant control interface initialization
+        while True:
+            ret = self.wpas.poll()
+            if ret is not None and ret != 0:
+                raise ValueError('wpa_supplicant returned an error: ' + self.wpas.communicate()[0])
+            if os.path.exists(self.wpas_ctrl_path):
+                break
+            time.sleep(.1)
+
+    def sendOnly(self, command):
+        """Sends command to wpa_supplicant"""
+        self.retsock.sendto(command.encode(), self.wpas_ctrl_path)
+
+    def sendAndReceive(self, command):
+        """Sends command to wpa_supplicant and returns the reply"""
+        self.retsock.sendto(command.encode(), self.wpas_ctrl_path)
+        (b, address) = self.retsock.recvfrom(4096)
+        inmsg = b.decode('utf-8', errors='replace')
+        return inmsg
+
+    @staticmethod
+    def _explain_wpas_not_ok_status(command: str, respond: str):
+        if command.startswith(('WPS_REG', 'WPS_PBC')):
+            if respond == 'UNKNOWN COMMAND':
+                return ('[!] It looks like your wpa_supplicant is compiled without WPS protocol support. '
+                        'Please build wpa_supplicant with WPS support ("CONFIG_WPS=y")')
+        return '[!] Something went wrong — check out debug log'
+
+    def __handle_wpas(self, pbc_mode=False, verbose=None, bssid=""):
+        if not verbose:
+            verbose = self.print_debug
+        line = self.wpas.stdout.readline()
+        if not line:
+            self.wpas.wait()
+            return False
+        line = line.rstrip('\n')
+
+        if verbose:
+            sys.stderr.write(line + '\n')
+
+        if line.startswith('WPS: '):
+            if 'Building Message M' in line:
+                n = int(line.split('Building Message M')[1].replace('D', ''))
+                self.connection_status.last_m_message = n
+                self.__print_with_indicators('*', 'Sending WPS Message M{}…'.format(n))
+            elif 'Received M' in line:
+                n = int(line.split('Received M')[1])
+                self.connection_status.last_m_message = n
+                self.__print_with_indicators('*', 'Received WPS Message M{}'.format(n))
+                if n == 5:
+                    print('[+] The first half of the PIN is valid')
+            elif 'Received WSC_NACK' in line:
+                self.connection_status.status = 'WSC_NACK'
+                self.__print_with_indicators('*', 'Received WSC NACK')
+                print('[-] Error: wrong PIN code')
+            elif 'Enrollee Nonce' in line and 'hexdump' in line:
+                print('[P] E-Nonce: {}'.format(get_hex(line)))
+            elif 'DH own Public Key' in line and 'hexdump' in line:
+                print('[P] PKR: {}'.format(get_hex(line)))
+            elif 'DH peer Public Key' in line and 'hexdump' in line:
+                print('[P] PKE: {}'.format(get_hex(line)))
+            elif 'AuthKey' in line and 'hexdump' in line:
+                print('[P] AuthKey: {}'.format(get_hex(line)))
+            elif 'E-Hash1' in line and 'hexdump' in line:
+                print('[P] E-Hash1: {}'.format(get_hex(line)))
+            elif 'E-Hash2' in line and 'hexdump' in line:
+                print('[P] E-Hash2: {}'.format(get_hex(line)))
+            elif 'Network Key' in line and 'hexdump' in line:
+                self.connection_status.status = 'GOT_PSK'
+                self.connection_status.wpa_psk = bytes.fromhex(get_hex(line)).decode('utf-8', errors='replace')
+        elif ': State: ' in line:
+            if '-> SCANNING' in line:
+                self.connection_status.status = 'scanning'
+                self.__print_with_indicators('*', 'Scanning…')
+        elif ('WPS-FAIL' in line) and (self.connection_status.status != ''):
+            self.connection_status.status = 'WPS_FAIL'
+            print('[-] wpa_supplicant returned WPS-FAIL')
+        elif pbc_mode and ('selected BSS ' in line):
+            found_bssid = line.split('selected BSS ')[-1].split()[0].upper()
+            if found_bssid in self.exclude_macs:
+                print(f'[*] Ignored excluded AP: {found_bssid}. Cancelling and retrying PBC...')
+                self.sendOnly('WPS_CANCEL')
+                self.sendOnly(f'BLACKLIST {found_bssid}')
+                self.sendOnly(f'BSSID_IGNORE {found_bssid}')
+                time.sleep(0.5)
+                self.sendOnly('WPS_PBC')
+                self.connection_status.clear()
+                return True
+
+            self.connection_status.bssid = found_bssid
+            print('[*] Selected AP: {}'.format(found_bssid))
+        elif 'Trying to authenticate with' in line:
+            target_bssid = line.split('Trying to authenticate with ')[-1].split()[0].upper()
+            if target_bssid in self.exclude_macs:
+                print(f'[*] Excluded AP {target_bssid} is authenticating. Cancelling and retrying...')
+                self.sendOnly('WPS_CANCEL')
+                self.sendOnly('DISCONNECT')
+                time.sleep(0.5)
+                self.sendOnly('WPS_PBC')
+                self.connection_status.clear()
+                return True
+
+            self.connection_status.status = 'authenticating'
+            if 'SSID' in line:
+                self.connection_status.essid = codecs.decode("'".join(line.split("'")[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
+            self.__print_with_indicators('*', 'Authenticating…')
+        elif 'Authentication response' in line:
+            self.__print_with_indicators('*', 'Authenticated')
+        elif 'Trying to associate with' in line:
+            self.connection_status.status = 'associating'
+            if 'SSID' in line:
+                self.connection_status.essid = codecs.decode("'".join(line.split("'")[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
+            self.__print_with_indicators('*', 'Associating with AP…')
+        elif ('Associated with' in line) and (self.interface in line):
+            associated_bssid = line.split()[-1].upper()
+            if self.connection_status.essid:
+                self.__print_with_indicators('+', 'Associated with {} (ESSID: {})'.format(associated_bssid, self.connection_status.essid))
+            else:
+                self.__print_with_indicators('+', 'Associated with {}'.format(associated_bssid))
+        elif 'EAPOL: txStart' in line:
+            self.connection_status.status = 'eapol_start'
+            self.__print_with_indicators('*', 'Sending EAPOL Start…')
+        elif 'EAP entering state IDENTITY' in line:
+            self.__print_with_indicators('*', 'Received Identity Request')
+        elif 'using real identity' in line:
+            self.__print_with_indicators('*', 'Sending Identity Response…')
+        elif self.bssid in line and 'level=' in line:
+            self.lastPwr = line.split("level=")[1].split(" ")[0]
+        elif bssid in line and 'level=' in line:
+            signal = line.split("level=")[1].split(" ")[0]
+            if 'noise=' in line:
+                noise = line.split("noise=")[1].split(" ")[0]
+                print ("[i] Current signal: {}, noise: {}".format(signal, noise))
+            else:
+                print ("[i] Current signal: {}".format(signal))
+
+        return True
+
+    def __credentialPrint(self, wps_pin=None, wpa_psk=None, essid=None):
+        print(f"[+] WPS PIN: '{wps_pin}'")
+        print(f"[+] WPA PSK: '{wpa_psk}'")
+        print(f"[+] AP SSID: '{essid}'")
+
+    def __saveResult(self, bssid, essid, wps_pin, wpa_psk):
+        if not os.path.exists(self.reports_dir):
+            os.makedirs(self.reports_dir)
+        filename = self.reports_dir + 'stored'
+        dateStr = datetime.now().strftime("%d.%m.%Y %H:%M")
+        with open(filename + '.txt', 'a', encoding='utf-8') as file:
+            file.write('{}\nBSSID: {}\nESSID: {}\nWPS PIN: {}\nWPA PSK: {}\n\n'.format(
+                        dateStr, bssid, essid, wps_pin, wpa_psk
+                    )
+            )
+        writeTableHeader = not os.path.isfile(filename + '.csv')
+        with open(filename + '.csv', 'a', newline='', encoding='utf-8') as file:
+            csvWriter = csv.writer(file, delimiter=';', quoting=csv.QUOTE_ALL)
+            if writeTableHeader:
+                csvWriter.writerow(['Date', 'BSSID', 'ESSID', 'WPS PIN', 'WPA PSK'])
+            csvWriter.writerow([dateStr, bssid, essid, wps_pin, wpa_psk])
+        print(f'[i] Credentials saved to {filename}.txt, {filename}.csv')
+
+    def single_connection(self, bssid=None, pin=None, pbc_mode=False, verbose=None):
+        self.connection_status.clear()
+        self.wpas.stdout.read(300)   # Clean the pipe
+
+        if pbc_mode:
+            # Send BLACKLIST command for any excluded MACs
+            for mac in self.exclude_macs:
+                self.sendOnly(f'BLACKLIST {mac}')
+                self.sendOnly(f'BSSID_IGNORE {mac}')
+
+            if bssid:
+                print(f"[*] Starting WPS push button connection to {bssid}…")
+                cmd = f'WPS_PBC {bssid}'
+            else:
+                if self.exclude_macs:
+                    print(f"[*] Starting WPS push button connection (excluding {len(self.exclude_macs)} MACs)…")
                 else:
-                    self._collecting = False
+                    print("[*] Starting WPS push button connection…")
+                cmd = 'WPS_PBC'
+        else:
+            print(f"[*] Trying PIN '{pin}'…")
+            cmd = f'WPS_REG {bssid} {pin}'
 
-    def _finish(self, hexstr, need_len):
-        hexstr = hexstr[:need_len * 2]
+        r = self.sendAndReceive(cmd)
+        if 'OK' not in r:
+            self.connection_status.status = 'WPS_FAIL'
+            print(self._explain_wpas_not_ok_status(cmd, r))
+            return False
+
+        while True:
+            target_bssid = bssid.lower() if bssid else ""
+            res = self.__handle_wpas(pbc_mode=pbc_mode, verbose=verbose, bssid=target_bssid)
+            if not res:
+                break
+            if self.connection_status.status == 'WSC_NACK':
+                break
+            elif self.connection_status.status == 'GOT_PSK':
+                break
+            elif self.connection_status.status == 'WPS_FAIL':
+                break
+
+        self.sendOnly('WPS_CANCEL')
+
+        if self.connection_status.status == 'GOT_PSK':
+            final_bssid = bssid
+            if pbc_mode and self.connection_status.bssid:
+                final_bssid = self.connection_status.bssid
+
+            display_pin = pin if not pbc_mode else '<PBC mode>'
+
+            self.__credentialPrint(display_pin, self.connection_status.wpa_psk, self.connection_status.essid)
+            if self.save_result:
+                self.__saveResult(final_bssid, self.connection_status.essid, display_pin, self.connection_status.wpa_psk)
+            return True
+        return False
+
+    def __print_with_indicators(self, level, msg):
+        print('[{}] [{}] {}'.format(level, self.lastPwr, msg))
+
+    def cleanup(self):
+        self.retsock.close()
+        self.wpas.terminate()
+        os.remove(self.res_socket_file)
+        shutil.rmtree(self.tempdir, ignore_errors=True)
+        os.remove(self.tempconf)
+
+    def __del__(self):
         try:
-            self.psk = bytes.fromhex(hexstr).decode('utf-8', errors='replace')
-        except ValueError:
-            self.psk = None
-        self._collecting = False
+            self.cleanup()
+        except (ImportError, AttributeError, TypeError):
+            pass
 
 
-def run_cli(cmd, check=True):
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if check and result.returncode != 0:
-        print(f"[!] 命令失败: {' '.join(cmd)}\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return result.stdout.strip()
+def ifaceUp(iface, down=False):
+    if down:
+        action = 'down'
+    else:
+        action = 'up'
+    cmd = 'ip link set {} {}'.format(iface, action)
+    res = subprocess.run(cmd, shell=True, stdout=sys.stdout, stderr=sys.stdout)
+    if res.returncode == 0:
+        return True
+    else:
+        return False
 
 
-def parse_status(text):
-    info = {}
-    for line in text.splitlines():
-        if "=" in line:
-            k, v = line.split("=", 1)
-            info[k] = v
-    return info
+def die(msg):
+    sys.stderr.write(msg + '\n')
+    sys.exit(1)
 
 
-def kill_old_supplicant(iface, timeout=5):
-    """确保上一次遗留的 wpa_supplicant 进程真正退出，而不是发完信号就当作完事"""
-    pattern = f"wpa_supplicant.*-i {iface}"
-    subprocess.run(["pkill", "-f", pattern], capture_output=True)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='WPS PIN & PBC Single Connection Tool')
 
-    waited = 0.0
-    while waited < timeout:
-        result = subprocess.run(["pgrep", "-f", pattern], capture_output=True)
-        if result.returncode != 0:   # pgrep 找不到匹配进程时返回非0，说明已经死透
-            return
-        time.sleep(0.3)
-        waited += 0.3
+    parser.add_argument(
+        '-i', '--interface',
+        type=str,
+        required=True,
+        help='Name of the interface to use (e.g. wlan0)'
+    )
+    parser.add_argument(
+        '-mac',
+        dest='bssid',
+        type=str,
+        help='BSSID of the target AP (e.g. xx:xx:xx:xx:xx:xx)'
+    )
+    parser.add_argument(
+        '-pin',
+        type=str,
+        help='The known WPS PIN to connect with (e.g. xxxxxxxx)'
+    )
+    parser.add_argument(
+        '--pbc',
+        action='store_true',
+        help='Run WPS push button connection (PBC) mode'
+    )
+    parser.add_argument(
+        '-exclude',
+        type=str,
+        help='Comma-separated list of MAC addresses to exclude in PBC any mode (e.g. xx:xx:xx:xx:xx:xx,yy:yy:yy:yy:yy:yy)'
+    )
+    parser.add_argument(
+        '-w', '--write',
+        action='store_true',
+        help='Write credentials to the file on success'
+    )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Verbose output'
+    )
 
-    # 超时还没死，强制 kill -9 兜底
-    print("[*] 旧进程未及时退出，发送 SIGKILL 强制结束...")
-    subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
-    time.sleep(0.5)
-
-
-def clear_stale_socket(ctrl_dir, iface):
-    """无论旧进程是否清理干净，主动清掉可能残留的 socket 文件，避免假活"""
-    sock_path = os.path.join(ctrl_dir, iface)
-    if os.path.exists(sock_path):
-        try:
-            os.remove(sock_path)
-            print(f"[*] 已清除残留的控制接口文件: {sock_path}")
-        except Exception as e:
-            print(f"[!] 清除残留文件失败: {e}", file=sys.stderr)
-
-
-def wait_ctrl_ready(iface, proc, timeout=15):
-    """
-    不再只检查 socket 文件是否存在，而是真实发起一次 wpa_cli ping 往返，
-    并同时检测 wpa_supplicant 进程是否已提前退出（如驱动初始化失败）
-    """
-    waited = 0.0
-    interval = 0.3
-    while waited < timeout:
-        if proc.poll() is not None:
-            return False, "wpa_supplicant 进程已提前退出（可能是网卡被占用或驱动初始化失败，检查 dmesg / logcat）"
-        result = subprocess.run(["wpa_cli", "-i", iface, "ping"], capture_output=True, text=True)
-        if result.returncode == 0 and "PONG" in result.stdout:
-            return True, ""
-        time.sleep(interval)
-        waited += interval
-    return False, "等待控制接口就绪超时"
-
-
-def main():
-    parser = argparse.ArgumentParser(description="WPS PBC/PIN 连接工具(仅限自有/授权设备)")
-    parser.add_argument("-k", "--iface", required=True)
-    parser.add_argument("-mac", help="目标 MAC，--pbc 模式可省略(=any)，-pin 模式必填")
-
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--pbc", action="store_true")
-    mode.add_argument("-pin", help="已知8位WPS PIN，免按钮")
-
-    parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
 
-    iface = args.iface
-    ctrl_dir = "/run/wpa_supplicant"
+    # 验证参数合理性
+    if not args.pin and not args.pbc:
+        die("Error: You must specify either -pin or --pbc")
 
-    if args.mac and not MAC_RE.match(args.mac):
-        print("[!] -mac 格式错误"); sys.exit(1)
-    if args.pin:
-        if not PIN_RE.match(args.pin):
-            print("[!] -pin 必须是8位数字"); sys.exit(1)
-        if not args.mac:
-            print("[!] -pin 模式必须指定 -mac"); sys.exit(1)
+    if args.pin and args.pbc:
+        die("Error: -pin and --pbc cannot be used simultaneously")
 
-    print(f"[*] 接口: {iface}")
+    if args.pin and not args.bssid:
+        die("Error: -mac is required when using -pin")
 
-    # 1) 确保旧进程真正退出
-    kill_old_supplicant(iface)
-    # 2) 主动清理可能残留的控制socket
-    os.makedirs(ctrl_dir, exist_ok=True)
-    clear_stale_socket(ctrl_dir, iface)
+    # 处理排除名单格式
+    exclude_macs = []
+    if args.exclude:
+        exclude_macs = [mac.strip().upper() for mac in args.exclude.split(',')]
 
-    run_cli(["ip", "link", "set", iface, "up"])
+    if sys.hexversion < 0x03060F0:
+        die("The program requires Python 3.6 and above")
+    if os.getuid() != 0:
+        die("Run it as root")
 
-    cmd = ["wpa_supplicant", "-K", "-dd", "-Dnl80211", "-i", iface, "-C", ctrl_dir]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, bufsize=1)
+    if not ifaceUp(args.interface):
+        die('Unable to up interface "{}"'.format(args.interface))
 
-    # 3) 真实ping测试，而不是只看文件存不存在
-    ready, err = wait_ctrl_ready(iface, proc)
-    if not ready:
-        print(f"[!] {err}")
-        proc.terminate()
-        sys.exit(1)
-
-    reader = CredentialReader(proc)
-    reader.start()
-
-    if args.pin:
-        print(f"[*] 使用已知 PIN 与目标 {args.mac} 进行 WPS 握手...")
-        run_cli(["wpa_cli", "-i", iface, "wps_pin", args.mac, args.pin])
-    else:
-        if args.mac:
-            print(f"[*] 已启动 WPS PBC，目标 BSSID={args.mac}，请按下该路由器的 WPS 按钮...")
-            run_cli(["wpa_cli", "-i", iface, "wps_pbc", args.mac])
-        else:
-            print("[*] 已启动 WPS PBC(any)，请在限定时间内按下路由器的 WPS 按钮...")
-            run_cli(["wpa_cli", "-i", iface, "wps_pbc"])
-
-    state, elapsed, interval = "", 0, 2
-    while elapsed < args.timeout:
-        status_text = run_cli(["wpa_cli", "-i", iface, "status"], check=False)
-        info = parse_status(status_text)
-        state = info.get("wpa_state", "")
-        if state == "COMPLETED":
-            break
-        time.sleep(interval)
-        elapsed += interval
-
-    if state != "COMPLETED":
-        print("[!] 连接超时或失败")
-        proc.terminate()
-        sys.exit(1)
-
-    for _ in range(10):
-        if reader.psk:
-            break
-        time.sleep(0.3)
-
-    status_text = run_cli(["wpa_cli", "-i", iface, "status"])
-    info = parse_status(status_text)
-    bssid = info.get("bssid", "")
-    essid = info.get("ssid", "")
-
-    print("\n[*] 连接成功：")
-    print(f"BSSID: {bssid}")
-    print(f"ESSID: {essid}")
-    print(f"WPA密码(PSK): {reader.psk if reader.psk else '(未捕获到)'}")
-    print("[*] wpa_supplicant 仍在后台保持连接，如需断开请手动 pkill wpa_supplicant")
-
-
-if __name__ == "__main__":
-    if os.geteuid() != 0:
-        print("[!] 请使用 root 权限运行")
-        sys.exit(1)
-    main()
+    try:
+        companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=args.bssid, exclude_macs=exclude_macs)
+        companion.single_connection(bssid=args.bssid, pin=args.pin, pbc_mode=args.pbc)
+    except KeyboardInterrupt:
+        print("\nAborting…")

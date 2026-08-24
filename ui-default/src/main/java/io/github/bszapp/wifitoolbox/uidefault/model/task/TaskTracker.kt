@@ -3,6 +3,7 @@ package io.github.bszapp.wifitoolbox.uidefault.model.task
 import io.github.bszapp.wifitoolbox.contract.task.ITaskController
 import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +45,10 @@ class TaskTracker(
 
     fun stopTrackedTask() {
         trackedTaskId.value?.let(controller::stopTask)
+    }
+
+    fun updateTrackedTask(update: TaskUpdateRequest) {
+        trackedTaskId.value?.let { controller.updateTask(it, update) }
     }
 
     fun clearTracking() {

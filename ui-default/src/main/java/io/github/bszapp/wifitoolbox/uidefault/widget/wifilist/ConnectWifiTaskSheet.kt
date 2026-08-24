@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiFailureFlags
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiStage
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskConfig
+import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.HandshakeAttemptsExceededFlag
 import io.github.bszapp.wifitoolbox.contract.task.HandshakeTimeoutFlag
 import io.github.bszapp.wifitoolbox.contract.task.TaskExecutionState
@@ -57,11 +58,13 @@ import java.util.Locale
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.RadioButton
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -72,9 +75,40 @@ internal sealed interface ConnectWifiSheetContent {
         val ssid: String,
     ) : ConnectWifiSheetContent
 
+    data class Network(
+        val ssid: String,
+        val hasSavedConfiguration: Boolean,
+    ) : ConnectWifiSheetContent
+
     data class Task(
         val taskId: Long,
     ) : ConnectWifiSheetContent
+}
+
+internal enum class ConnectWifiOperation {
+    TEST_CONNECTIVITY,
+    SAVE_ONLY,
+    SAVE_AND_CONNECT,
+}
+
+internal sealed interface ConnectWifiSheetSubmission {
+    data class UseSavedNetwork(
+        val config: ConnectWifiTaskConfig,
+    ) : ConnectWifiSheetSubmission
+
+    data class TestConnectivity(
+        val password: String,
+        val config: ConnectWifiTaskConfig,
+    ) : ConnectWifiSheetSubmission
+
+    data class SaveOnly(
+        val password: String,
+    ) : ConnectWifiSheetSubmission
+
+    data class SaveAndConnect(
+        val password: String,
+        val config: ConnectWifiTaskConfig,
+    ) : ConnectWifiSheetSubmission
 }
 
 private enum class ConnectWifiSheetStep {
@@ -93,7 +127,8 @@ internal fun ConnectWifiTaskSheet(
     content: ConnectWifiSheetContent,
     trackedTask: TrackedTaskState?,
     isSubmitting: Boolean,
-    onStart: (ConnectWifiTaskConfig) -> Unit,
+    dismissRequested: Boolean,
+    onSubmit: (ConnectWifiSheetSubmission) -> Unit,
     onStop: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -106,25 +141,35 @@ internal fun ConnectWifiTaskSheet(
         mutableStateOf(true)
     }
 
+    LaunchedEffect(dismissRequested) {
+        if (dismissRequested) showSheet = false
+    }
+
     /*
      * 配置切换为任务时仍保留配置页及其输入状态，
      * 供 AnimatedContent 完成旧页面退场动画。
      */
-    val initialConfiguration = remember {
-        content as? ConnectWifiSheetContent.Configuration
+    val initialInput = remember {
+        content.takeUnless { it is ConnectWifiSheetContent.Task }
     }
 
-    val configuration =
-        (content as? ConnectWifiSheetContent.Configuration)
-            ?: initialConfiguration
+    val inputContent = content.takeUnless { it is ConnectWifiSheetContent.Task }
+        ?: initialInput
 
-    val formState = remember(configuration?.networkId) {
+    val formState = remember(inputContent) {
         ConnectWifiConfigurationFormState()
     }
 
     val taskContent = content as? ConnectWifiSheetContent.Task
     val snapshot = trackedTask?.snapshot
     val progress = snapshot?.progress as? TaskProgress.ConnectWifi
+    val taskType = (
+        snapshot?.request?.payload as? io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload.ConnectWifi
+        )?.request?.input?.type ?: when (inputContent) {
+        is ConnectWifiSheetContent.Configuration -> ConnectWifiTaskType.USE_SAVED_NETWORK
+        is ConnectWifiSheetContent.Network -> ConnectWifiTaskType.CONNECT_TO_NETWORK
+        else -> null
+    }
 
     /*
      * Task 页面刚打开但快照还未加载时，也视为运行中。
@@ -135,7 +180,7 @@ internal fun ConnectWifiTaskSheet(
             )
 
     val step = when {
-        content is ConnectWifiSheetContent.Configuration -> {
+        content !is ConnectWifiSheetContent.Task -> {
             ConnectWifiSheetStep.CONFIGURATION
         }
 
@@ -172,10 +217,31 @@ internal fun ConnectWifiTaskSheet(
     val requestDismiss = {
         showSheet = false
     }
+    var pendingDestructiveSubmission by remember(content) {
+        mutableStateOf<ConnectWifiSheetSubmission.TestConnectivity?>(null)
+    }
+    val submitWithConfirmation: (ConnectWifiSheetSubmission) -> Unit = { submission ->
+        val requiresConfirmation =
+            submission is ConnectWifiSheetSubmission.TestConnectivity &&
+                (inputContent as? ConnectWifiSheetContent.Network)
+                    ?.hasSavedConfiguration == true
+        if (requiresConfirmation) {
+            pendingDestructiveSubmission =
+                submission as ConnectWifiSheetSubmission.TestConnectivity
+        } else {
+            onSubmit(submission)
+        }
+    }
 
     OverlayBottomSheet(
         show = showSheet,
-        title = "连接 WiFi",
+        title = when {
+            content is ConnectWifiSheetContent.Configuration ->
+                ConnectWifiTaskType.USE_SAVED_NETWORK.displayName()
+            content is ConnectWifiSheetContent.Network -> "连接网络"
+            taskType != null -> taskType.displayName()
+            else -> "连接网络"
+        },
         allowDismiss = true,
         enableNestedScroll = true,
         renderInRootScaffold = true,
@@ -249,7 +315,7 @@ internal fun ConnectWifiTaskSheet(
             ) { page ->
                 when (page) {
                     ConnectWifiAnimatedPage.CONFIGURATION -> {
-                        configuration?.let {
+                        inputContent?.let {
                             ConnectWifiConfigurationContent(
                                 content = it,
                                 formState = formState,
@@ -260,6 +326,7 @@ internal fun ConnectWifiTaskSheet(
                     ConnectWifiAnimatedPage.TASK -> {
                         ConnectWifiTaskLogContent(
                             taskId = taskContent?.taskId,
+                            taskType = taskType,
                             running = running,
                             entries = trackedTask
                                 ?.logs
@@ -278,16 +345,53 @@ internal fun ConnectWifiTaskSheet(
                 progress = progress,
                 isSubmitting = isSubmitting,
                 formState = formState,
-                onStart = onStart,
+                inputContent = inputContent,
+                onSubmit = submitWithConfirmation,
                 onStop = onStop,
                 onDismiss = requestDismiss,
             )
         }
     }
+
+    OverlayDialog(
+        show = pendingDestructiveSubmission != null,
+        title = "确认开始测试",
+        summary = "该网络存在已保存配置。开始后会永久删除原配置，测试结束时只删除测试配置，不会恢复原配置。确定继续？",
+        onDismissRequest = {
+            pendingDestructiveSubmission = null
+        },
+        content = {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    text = "取消",
+                    onClick = {
+                        pendingDestructiveSubmission = null
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(20.dp))
+                TextButton(
+                    text = "开始",
+                    onClick = {
+                        val submission = pendingDestructiveSubmission
+                            ?: return@TextButton
+                        pendingDestructiveSubmission = null
+                        onSubmit(submission)
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        },
+    )
 }
 
 @Stable
 private class ConnectWifiConfigurationFormState {
+    var password by mutableStateOf("")
+
+    var operation by mutableStateOf(ConnectWifiOperation.TEST_CONNECTIVITY)
+
     var timeout by mutableStateOf("8000")
 
     /*
@@ -302,6 +406,27 @@ private class ConnectWifiConfigurationFormState {
     var handshakeTimeout by mutableStateOf("1000")
 
     var validationMessage by mutableStateOf<String?>(null)
+
+    fun createSubmission(
+        content: ConnectWifiSheetContent,
+    ): ConnectWifiSheetSubmission? = when (content) {
+        is ConnectWifiSheetContent.Configuration -> createConfig()?.let {
+            ConnectWifiSheetSubmission.UseSavedNetwork(it)
+        }
+        is ConnectWifiSheetContent.Network -> when (operation) {
+            ConnectWifiOperation.TEST_CONNECTIVITY -> createConfig()?.let {
+                ConnectWifiSheetSubmission.TestConnectivity(password, it)
+            }
+            ConnectWifiOperation.SAVE_ONLY -> {
+                validationMessage = null
+                ConnectWifiSheetSubmission.SaveOnly(password)
+            }
+            ConnectWifiOperation.SAVE_AND_CONNECT -> createConfig()?.let {
+                ConnectWifiSheetSubmission.SaveAndConnect(password, it)
+            }
+        }
+        is ConnectWifiSheetContent.Task -> null
+    }
 
     fun createConfig(): ConnectWifiTaskConfig? {
         val totalMillis = timeout.toLongOrNull()
@@ -362,7 +487,7 @@ private class ConnectWifiConfigurationFormState {
 
 @Composable
 private fun ConnectWifiConfigurationContent(
-    content: ConnectWifiSheetContent.Configuration,
+    content: ConnectWifiSheetContent,
     formState: ConnectWifiConfigurationFormState,
 ) {
     /*
@@ -385,13 +510,22 @@ private fun ConnectWifiConfigurationContent(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    text = "使用此配置连接",
+                    text = when (content) {
+                        is ConnectWifiSheetContent.Configuration -> "使用已保存的网络连接"
+                        is ConnectWifiSheetContent.Network -> "连接到网络"
+                        is ConnectWifiSheetContent.Task -> "连接到网络"
+                    },
                     color = MiuixTheme.colorScheme.onSurface,
                     style = MiuixTheme.textStyles.title3,
                 )
 
                 Text(
-                    text = "${content.ssid} · 配置 #${content.networkId}",
+                    text = when (content) {
+                        is ConnectWifiSheetContent.Configuration ->
+                            "${content.ssid} · 配置 #${content.networkId}"
+                        is ConnectWifiSheetContent.Network -> content.ssid
+                        is ConnectWifiSheetContent.Task -> "正在载入任务"
+                    },
                     color =
                         MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     style = MiuixTheme.textStyles.body2,
@@ -399,39 +533,96 @@ private fun ConnectWifiConfigurationContent(
             }
         }
 
-        item(
-            key = "total-timeout",
-        ) {
-            NumberField(
-                value = formState.timeout,
-                onValueChange = {
-                    formState.timeout = it
-                    formState.validationMessage = null
-                },
-                label = "总超时（毫秒）",
-            )
+        if (content is ConnectWifiSheetContent.Network) {
+            item(key = "network-password") {
+                TextField(
+                    value = formState.password,
+                    onValueChange = { formState.password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = "密码",
+                    singleLine = true,
+                )
+            }
+
+            item(key = "operation-type-title") {
+                Text(
+                    text = "操作类型",
+                    modifier = Modifier.padding(start = 4.dp),
+                    color = MiuixTheme.colorScheme.onSurface,
+                    style = MiuixTheme.textStyles.subtitle,
+                )
+            }
+
+            item(key = "operation-types") {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    OperationTypeRow(
+                        title = "测试连通性",
+                        summary = "临时连接并在确认 WPA 握手成功后立即断开",
+                        selected = formState.operation == ConnectWifiOperation.TEST_CONNECTIVITY,
+                        onClick = {
+                            formState.operation = ConnectWifiOperation.TEST_CONNECTIVITY
+                            formState.validationMessage = null
+                        },
+                    )
+                    OperationTypeRow(
+                        title = "仅保存",
+                        summary = "保存网络配置并关闭自动加入",
+                        selected = formState.operation == ConnectWifiOperation.SAVE_ONLY,
+                        onClick = {
+                            formState.operation = ConnectWifiOperation.SAVE_ONLY
+                            formState.validationMessage = null
+                        },
+                    )
+                    OperationTypeRow(
+                        title = "保存并连接",
+                        summary = "保存网络配置后运行连接任务",
+                        selected = formState.operation == ConnectWifiOperation.SAVE_AND_CONNECT,
+                        onClick = {
+                            formState.operation = ConnectWifiOperation.SAVE_AND_CONNECT
+                            formState.validationMessage = null
+                        },
+                    )
+                }
+            }
         }
 
-        item(
-            key = "failure-flags-title",
+        if (
+            content !is ConnectWifiSheetContent.Network ||
+            formState.operation != ConnectWifiOperation.SAVE_ONLY
         ) {
-            Text(
-                text = "失败标志",
-                modifier = Modifier.padding(start = 4.dp),
-                color = MiuixTheme.colorScheme.onSurface,
-                style = MiuixTheme.textStyles.subtitle,
-            )
-        }
+            item(
+                key = "total-timeout",
+            ) {
+                NumberField(
+                    value = formState.timeout,
+                    onValueChange = {
+                        formState.timeout = it
+                        formState.validationMessage = null
+                    },
+                    label = "总超时（毫秒）",
+                )
+            }
 
-        item(
-            key = "failure-flags",
-        ) {
+            item(
+                key = "failure-flags-title",
+            ) {
+                Text(
+                    text = "失败标志",
+                    modifier = Modifier.padding(start = 4.dp),
+                    color = MiuixTheme.colorScheme.onSurface,
+                    style = MiuixTheme.textStyles.subtitle,
+                )
+            }
+
+            item(
+                key = "failure-flags",
+            ) {
             /*
              * 三个失败选项合并为同一个 Miuix Card。
              */
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                 FailureFlagRow(
                     title = "密码错误",
                     checked = formState.passwordError,
@@ -544,6 +735,7 @@ private fun ConnectWifiConfigurationContent(
                         ),
                     )
                 }
+                }
             }
         }
 
@@ -567,6 +759,7 @@ private fun ConnectWifiConfigurationContent(
 @Composable
 private fun ConnectWifiTaskLogContent(
     taskId: Long?,
+    taskType: ConnectWifiTaskType?,
     running: Boolean,
     entries: List<TaskLogEntry>,
 ) {
@@ -588,18 +781,14 @@ private fun ConnectWifiTaskLogContent(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(
-            text = if (running) {
-                "任务运行中"
-            } else {
-                "任务已结束"
-            },
+            text = taskType?.displayName() ?: "连接到网络",
             color = MiuixTheme.colorScheme.onSurface,
             style = MiuixTheme.textStyles.title3,
         )
 
         Text(
             text = taskId?.let {
-                "任务 #$it"
+                if (running) "任务运行中 · #$it" else "任务已结束 · #$it"
             } ?: "正在载入任务",
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             style = MiuixTheme.textStyles.body2,
@@ -665,7 +854,8 @@ private fun ConnectWifiSheetActions(
     progress: TaskProgress.ConnectWifi?,
     isSubmitting: Boolean,
     formState: ConnectWifiConfigurationFormState,
-    onStart: (ConnectWifiTaskConfig) -> Unit,
+    inputContent: ConnectWifiSheetContent?,
+    onSubmit: (ConnectWifiSheetSubmission) -> Unit,
     onStop: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -687,6 +877,11 @@ private fun ConnectWifiSheetActions(
                 TextButton(
                     text = if (isSubmitting) {
                         "提交中"
+                    } else if (
+                        inputContent is ConnectWifiSheetContent.Network &&
+                        formState.operation == ConnectWifiOperation.SAVE_ONLY
+                    ) {
+                        "保存"
                     } else {
                         "开始"
                     },
@@ -695,7 +890,9 @@ private fun ConnectWifiSheetActions(
                             return@TextButton
                         }
 
-                        formState.createConfig()?.let(onStart)
+                        inputContent
+                            ?.let(formState::createSubmission)
+                            ?.let(onSubmit)
                     },
                     enabled = !isSubmitting,
                     modifier = Modifier.weight(1f),
@@ -752,6 +949,27 @@ private fun ConnectWifiSheetActions(
             )
         }
     }
+}
+
+@Composable
+private fun OperationTypeRow(
+    title: String,
+    summary: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    BasicComponent(
+        title = title,
+        summary = summary,
+        role = Role.RadioButton,
+        onClick = onClick,
+        endActions = {
+            RadioButton(
+                selected = selected,
+                onClick = null,
+            )
+        },
+    )
 }
 
 @Composable
@@ -826,6 +1044,11 @@ private fun ConnectWifiStage?.displayName(): String = when (this) {
     null -> {
         "加载中"
     }
+}
+
+private fun ConnectWifiTaskType.displayName(): String = when (this) {
+    ConnectWifiTaskType.USE_SAVED_NETWORK -> "使用已保存的网络连接"
+    ConnectWifiTaskType.CONNECT_TO_NETWORK -> "连接到网络"
 }
 
 private fun TaskLogEntry.displayText(): String {

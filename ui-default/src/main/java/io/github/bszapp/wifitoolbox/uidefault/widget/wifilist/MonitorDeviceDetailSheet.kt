@@ -3,6 +3,7 @@
 package io.github.bszapp.wifitoolbox.uidefault.widget.wifilist
 
 import android.net.wifi.WifiConfiguration
+import android.widget.Toast
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -26,6 +27,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,8 +40,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
@@ -46,12 +53,14 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorFrameGroupStatistic
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorFrameSubtypeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeFailureReason
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStep
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSignalStatistics
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -78,8 +87,18 @@ private enum class DeviceSheetPage {
     EXPORT,
 }
 
+private enum class Hc22000Action {
+    SAVE,
+    COPY,
+}
+
+internal enum class MonitorHandshakeAction {
+    TEST,
+    EXPORT,
+}
+
 @Composable
-fun MonitorDeviceDetailSheet(
+internal fun MonitorDeviceDetailSheet(
     accessPoint: MonitorAccessPoint,
     device: MonitorDevice,
     savedNetworks: List<WifiConfiguration>,
@@ -88,7 +107,14 @@ fun MonitorDeviceDetailSheet(
     onExport: (Set<String>) -> Unit,
     onTestHandshake: (handshakeId: String, password: String) -> String,
     onExportHandshake: (handshakeId: String) -> String,
+    onSaveHc22000: (content: String, fileName: String) -> Unit,
+    showDeviceDetails: Boolean = true,
+    initialHandshakeId: String? = null,
+    initialHandshakeAction: MonitorHandshakeAction? = null,
+    onInitialActionFinished: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val expandedGroups = remember(accessPoint.bssid, device.mac) {
         mutableStateMapOf<String, Boolean>()
@@ -101,11 +127,6 @@ fun MonitorDeviceDetailSheet(
     val totalByteCount = device.frameGroups.sumOf(MonitorFrameGroupStatistics::byteCount)
     val savedConfiguration = remember(savedNetworks, accessPoint.ssid, accessPoint.securityProtocols) {
         findSavedWpaPskConfiguration(accessPoint, savedNetworks)
-    }
-    val canTestHandshake = remember(accessPoint.ssid, accessPoint.securityProtocols) {
-        !accessPoint.ssid.isNullOrBlank() &&
-            (MonitorSecurityProtocol.WPA in accessPoint.securityProtocols ||
-                MonitorSecurityProtocol.WPA2 in accessPoint.securityProtocols)
     }
     var handshakeTestTarget by remember(accessPoint.bssid, device.mac) {
         mutableStateOf<MonitorHandshakeRecord?>(null)
@@ -125,20 +146,49 @@ fun MonitorDeviceDetailSheet(
     var handshakeExportConsent by remember(accessPoint.bssid, device.mac) {
         mutableStateOf(false)
     }
+    var hc22000Action by remember(accessPoint.bssid, device.mac) {
+        mutableStateOf<Hc22000Action?>(null)
+    }
+    var hc22000ActionConsent by remember(accessPoint.bssid, device.mac) {
+        mutableStateOf(false)
+    }
+
+    LaunchedEffect(initialHandshakeId, initialHandshakeAction) {
+        val handshakeId = initialHandshakeId ?: return@LaunchedEffect
+        val action = initialHandshakeAction ?: return@LaunchedEffect
+        val record = device.handshakes.firstOrNull { it.id == handshakeId }
+            ?: return@LaunchedEffect
+        when (action) {
+            MonitorHandshakeAction.TEST -> {
+                handshakeTestPassword = savedConfiguration
+                    ?.preSharedKey
+                    ?.removeSurrounding("\"")
+                    ?.takeUnless { it == "*" }
+                    .orEmpty()
+                handshakeTestTarget = record
+            }
+            MonitorHandshakeAction.EXPORT -> {
+                handshakeExportConsent = false
+                handshakeExportTarget = record
+            }
+        }
+    }
 
     LaunchedEffect(handshakeTestResults) {
         handshakeTestResults.collect { result ->
             if (result.requestId == pendingHandshakeTestRequestId) {
                 pendingHandshakeTestRequestId = null
-                handshakeTestOutcome = result.outcome.takeUnless {
-                    it == MonitorHandshakeTestOutcome.FAILED
+                if (result.outcome == MonitorHandshakeTestOutcome.FAILED) {
+                    onInitialActionFinished()
+                } else {
+                    handshakeTestOutcome = result.outcome
                 }
             }
         }
     }
 
     OverlayBottomSheet(
-        show = true,
+        show = showDeviceDetails,
         title = if (page == DeviceSheetPage.DETAILS) "设备详情" else "导出 PCAP",
         allowDismiss = true,
         enableNestedScroll = true,
@@ -169,7 +219,7 @@ fun MonitorDeviceDetailSheet(
                         Card {
                             BasicComponent(
                                 title = "网络名称",
-                                summary = accessPoint.ssid ?: "<未知网络>",
+                                summary = accessPoint.ssid ?: monitorNetworkPlaceholder(accessPoint),
                             )
                             BasicComponent(title = "接入点 MAC", summary = accessPoint.bssid)
                         }
@@ -221,7 +271,6 @@ fun MonitorDeviceDetailSheet(
                         SmallTitle(text = "握手包")
                         HandshakeRecordsCard(
                             records = device.handshakes,
-                            canTestHandshake = canTestHandshake,
                             testing = pendingHandshakeTestRequestId != null,
                             onTest = { record ->
                                 handshakeTestPassword = savedConfiguration
@@ -310,21 +359,70 @@ fun MonitorDeviceDetailSheet(
         }
     }
 
+    val activeHandshakeTestTarget = handshakeTestTarget?.let { selected ->
+        device.handshakes.firstOrNull { it.id == selected.id } ?: selected
+    }
     OverlayDialog(
-        show = handshakeTestTarget != null,
+        show = activeHandshakeTestTarget != null,
         title = "校验握手包",
         summary = "输入用于校验这次 WPA/WPA2 握手的密码。",
         onDismissRequest = {
             handshakeTestTarget = null
             handshakeTestPassword = ""
+            hc22000Action = null
+            hc22000ActionConsent = false
+            if (initialHandshakeAction != null) onInitialActionFinished()
         },
         content = {
-            val target = handshakeTestTarget
+            val target = activeHandshakeTestTarget
             if (target != null) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
+                    Card {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = target.hc22000.orEmpty(),
+                                modifier = Modifier.weight(1f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MiuixTheme.colorScheme.onSurface,
+                                style = MiuixTheme.textStyles.body2,
+                            )
+                            IconButton(
+                                onClick = {
+                                    hc22000ActionConsent = false
+                                    hc22000Action = Hc22000Action.SAVE
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Save,
+                                    contentDescription = "保存 HC22000",
+                                    modifier = Modifier.size(22.dp),
+                                    tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    hc22000ActionConsent = false
+                                    hc22000Action = Hc22000Action.COPY
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.ContentCopy,
+                                    contentDescription = "复制 HC22000",
+                                    modifier = Modifier.size(22.dp),
+                                    tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
+                                )
+                            }
+                        }
+                    }
                     TextField(
                         value = handshakeTestPassword,
                         onValueChange = { handshakeTestPassword = it },
@@ -338,6 +436,9 @@ fun MonitorDeviceDetailSheet(
                             onClick = {
                                 handshakeTestTarget = null
                                 handshakeTestPassword = ""
+                                hc22000Action = null
+                                hc22000ActionConsent = false
+                                if (initialHandshakeAction != null) onInitialActionFinished()
                             },
                             modifier = Modifier.weight(1f),
                         )
@@ -361,18 +462,107 @@ fun MonitorDeviceDetailSheet(
         },
     )
 
+    val hc22000ActionTarget = activeHandshakeTestTarget?.takeIf {
+        hc22000Action != null && !it.hc22000.isNullOrBlank()
+    }
+    OverlayDialog(
+        show = hc22000ActionTarget != null,
+        title = if (hc22000Action == Hc22000Action.SAVE) "确认保存" else "确认复制",
+        summary = "将要${if (hc22000Action == Hc22000Action.SAVE) "保存" else "复制"}" +
+            "此握手包的校验hc22000格式文本，此文本可用于校验密码hash是否正确。",
+        onDismissRequest = {
+            hc22000Action = null
+            hc22000ActionConsent = false
+        },
+        content = {
+            if (hc22000ActionTarget != null) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { hc22000ActionConsent = !hc22000ActionConsent }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            state = if (hc22000ActionConsent) {
+                                ToggleableState.On
+                            } else {
+                                ToggleableState.Off
+                            },
+                            onClick = {
+                                hc22000ActionConsent = !hc22000ActionConsent
+                            },
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "我已拥有目标接入点或设备的所有权或测试权，并知晓暴力破解不属于自己的设备属于违法行为",
+                            modifier = Modifier.weight(1f),
+                            color = MiuixTheme.colorScheme.onSurface,
+                            style = MiuixTheme.textStyles.body2,
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            text = "取消",
+                            onClick = {
+                                hc22000Action = null
+                                hc22000ActionConsent = false
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(20.dp))
+                        TextButton(
+                            text = if (hc22000Action == Hc22000Action.SAVE) "保存" else "复制",
+                            enabled = hc22000ActionConsent,
+                            onClick = {
+                                val hc22000 = hc22000ActionTarget.hc22000.orEmpty()
+                                if (hc22000Action == Hc22000Action.SAVE) {
+                                    onSaveHc22000(
+                                        hc22000,
+                                        "${hc22000ActionTarget.startUnixMillis}.hc22000",
+                                    )
+                                } else {
+                                    clipboardManager.setText(AnnotatedString(hc22000))
+                                    Toast.makeText(
+                                        context,
+                                        "已复制到剪贴板",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                                hc22000Action = null
+                                hc22000ActionConsent = false
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                        )
+                    }
+                }
+            }
+        },
+    )
+
     OverlayDialog(
         show = handshakeTestOutcome != null,
         title = when (handshakeTestOutcome) {
             MonitorHandshakeTestOutcome.MATCHED -> "校验通过"
-            MonitorHandshakeTestOutcome.NOT_MATCHED -> "密码不匹配"
+            MonitorHandshakeTestOutcome.NOT_MATCHED -> "校验失败"
             else -> "握手包校验"
         },
-        onDismissRequest = { handshakeTestOutcome = null },
+        onDismissRequest = {
+            handshakeTestOutcome = null
+            if (initialHandshakeAction != null) onInitialActionFinished()
+        },
         content = {
             TextButton(
                 text = "确定",
-                onClick = { handshakeTestOutcome = null },
+                onClick = {
+                    handshakeTestOutcome = null
+                    if (initialHandshakeAction != null) onInitialActionFinished()
+                },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.textButtonColorsPrimary(),
             )
@@ -393,6 +583,7 @@ fun MonitorDeviceDetailSheet(
         onDismissRequest = {
             handshakeExportTarget = null
             handshakeExportConsent = false
+            if (initialHandshakeAction != null) onInitialActionFinished()
         },
         content = {
             if (exportTarget != null) {
@@ -411,7 +602,7 @@ fun MonitorDeviceDetailSheet(
                         Card {
                             BasicComponent(
                                 title = "网络名称",
-                                summary = accessPoint.ssid ?: "<未知网络>",
+                                summary = accessPoint.ssid ?: monitorNetworkPlaceholder(accessPoint),
                             )
                             BasicComponent(title = "接入点 MAC", summary = accessPoint.bssid)
                             BasicComponent(title = "目标设备 MAC", summary = device.mac)
@@ -480,6 +671,7 @@ fun MonitorDeviceDetailSheet(
                             onClick = {
                                 handshakeExportTarget = null
                                 handshakeExportConsent = false
+                                if (initialHandshakeAction != null) onInitialActionFinished()
                             },
                             modifier = Modifier.weight(1f),
                         )
@@ -491,6 +683,7 @@ fun MonitorDeviceDetailSheet(
                                 onExportHandshake(exportTarget.id)
                                 handshakeExportTarget = null
                                 handshakeExportConsent = false
+                                if (initialHandshakeAction != null) onInitialActionFinished()
                             },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.textButtonColorsPrimary(),
@@ -505,7 +698,6 @@ fun MonitorDeviceDetailSheet(
 @Composable
 private fun HandshakeRecordsCard(
     records: List<MonitorHandshakeRecord>,
-    canTestHandshake: Boolean,
     testing: Boolean,
     onTest: (MonitorHandshakeRecord) -> Unit,
     onExport: (MonitorHandshakeRecord) -> Unit,
@@ -531,7 +723,7 @@ private fun HandshakeRecordsCard(
                     },
                     endActions = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (canTestHandshake && record.canValidate) {
+                            if (record.canValidate) {
                                 TextButton(
                                     text = if (testing) "校验中" else "校验",
                                     enabled = !testing,
@@ -546,19 +738,22 @@ private fun HandshakeRecordsCard(
                             )
                         }
                     },
-                    bottomAction = if (
-                        record.status == MonitorHandshakeStatus.SUCCESS &&
-                        !record.validationDataComplete
-                    ) {
-                        {
+                    bottomAction = when (record.captureQuality) {
+                        MonitorHandshakeCaptureQuality.DATA_INCOMPLETE -> ({
                             Text(
-                                text = "缺失数据",
+                                text = "数据不完整",
                                 color = MaterialTheme.colorScheme.error,
                                 style = MiuixTheme.textStyles.body2,
                             )
-                        }
-                    } else {
-                        null
+                        })
+                        MonitorHandshakeCaptureQuality.PARTIALLY_MISSING -> ({
+                            Text(
+                                text = "部分缺失",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MiuixTheme.textStyles.body2,
+                            )
+                        })
+                        MonitorHandshakeCaptureQuality.COMPLETE -> null
                     },
                 )
             }
@@ -587,15 +782,16 @@ private fun findSavedWpaPskConfiguration(
     }
 }
 
-private fun formatHandshakeStartTime(value: Long): String =
+internal fun formatHandshakeStartTime(value: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(value))
 
-private fun formatHandshakeDuration(value: Long): String =
+internal fun formatHandshakeDuration(value: Long): String =
     if (value < 1000L) "$value ms" else "%.3f 秒".format(value / 1000.0)
 
-private fun handshakeStatusText(record: MonitorHandshakeRecord): String = when (record.status) {
+internal fun handshakeStatusText(record: MonitorHandshakeRecord): String = when (record.status) {
     MonitorHandshakeStatus.IN_PROGRESS -> "握手过程中"
     MonitorHandshakeStatus.SUCCESS -> "握手成功"
+    MonitorHandshakeStatus.UNKNOWN -> "握手状态未知（等待握手超时）"
     MonitorHandshakeStatus.FAILED -> when (record.failureReason) {
         MonitorHandshakeFailureReason.ROUTER_REJECTED_CONNECTION ->
             "握手失败（路由器拒绝接入）"
@@ -611,7 +807,7 @@ private fun handshakeStatusText(record: MonitorHandshakeRecord): String = when (
     }
 }
 
-private fun handshakeStepText(step: MonitorHandshakeStep): String = when (step) {
+internal fun handshakeStepText(step: MonitorHandshakeStep): String = when (step) {
     MonitorHandshakeStep.AUTHENTICATION -> "Authentication"
     MonitorHandshakeStep.ASSOCIATION -> "Association/Reassociation"
     MonitorHandshakeStep.EAPOL_MESSAGE_1 -> "EAPOL M1"
@@ -810,3 +1006,10 @@ private fun SignalComponents(title: String, signal: MonitorSignalStatistics?) {
 private fun formatDbm(value: Float): String = "%.1f dBm".format(value)
 
 private fun formatBytesPerSecond(value: Long): String = "${formatMonitorByteCount(value)}/s"
+
+private fun monitorNetworkPlaceholder(accessPoint: MonitorAccessPoint): String =
+    if (accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN) {
+        "<隐藏的网络>"
+    } else {
+        "<未知网络>"
+    }

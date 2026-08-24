@@ -40,10 +40,18 @@ interface IWifiListController {
 
     fun saveMonitorPcapExport(path: String, destination: Uri)
 
+    fun saveMonitorHc22000(content: String, destination: Uri)
+
     fun exportMonitorHandshakePcap(
         bssid: String,
         deviceMac: String,
         handshakeId: String,
+    ): String
+
+    fun exportMonitorDisconnectionPcap(
+        bssid: String,
+        deviceMac: String,
+        disconnectionId: String,
     ): String
 
     fun testMonitorHandshake(
@@ -53,6 +61,7 @@ interface IWifiListController {
         password: String,
     ): String
 
+    suspend fun saveWifiNetwork(ssid: String, password: String): Int
     fun setWifiEnabled(enabled: Boolean)
     fun updateWifiConfig(networkId: Int, patch: WifiConfigPatch)
     fun disconnectCurrentNetwork(networkId: Int)

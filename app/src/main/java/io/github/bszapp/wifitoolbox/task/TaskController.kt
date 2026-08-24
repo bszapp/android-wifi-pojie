@@ -9,6 +9,7 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskLogEntry
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogState
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogTransport
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
 import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.ITaskManagerCallback
@@ -141,6 +142,20 @@ class TaskController(
             }.onFailure { error ->
                 if (isCurrent(binding)) {
                     reportError("App.TaskController", "停止服务任务", error, null)
+                }
+            }
+        }
+    }
+
+    override fun updateTask(taskId: Long, update: TaskUpdateRequest) {
+        val binding = synchronized(connectionLock) { activeBinding } ?: return
+        scope.launch(Dispatchers.IO) {
+            if (!isCurrent(binding) || !binding.service.asBinder().isBinderAlive) return@launch
+            runCatching {
+                check(binding.service.updateTask(taskId, update)) { "任务 $taskId 已经结束" }
+            }.onFailure { error ->
+                if (isCurrent(binding)) {
+                    reportError("App.TaskController", "更新服务任务", error, null)
                 }
             }
         }

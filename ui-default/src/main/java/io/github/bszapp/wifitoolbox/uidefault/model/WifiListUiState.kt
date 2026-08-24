@@ -4,6 +4,7 @@ import android.net.Uri
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -33,6 +34,11 @@ class WifiListUiState(
     val monitorPcapExports = controller.wifiList.monitorPcapExports
 
     val monitorHandshakeTestResults = controller.wifiList.monitorHandshakeTestResults
+
+    val monitorMapFilterState = controller.monitorMapFilterState
+
+    fun updateMonitorMapFilterState(state: MonitorMapFilterState) =
+        controller.updateMonitorMapFilterState(state)
 
     private val scanRequestGuard = AtomicBoolean(false)
     private val _isSendingScanRequest = MutableStateFlow(false)
@@ -82,6 +88,9 @@ class WifiListUiState(
     fun saveMonitorPcapExport(path: String, destination: Uri) =
         controller.wifiList.saveMonitorPcapExport(path, destination)
 
+    fun saveMonitorHc22000(content: String, destination: Uri) =
+        controller.wifiList.saveMonitorHc22000(content, destination)
+
     fun exportMonitorHandshakePcap(
         bssid: String,
         deviceMac: String,
@@ -90,6 +99,16 @@ class WifiListUiState(
         bssid = bssid,
         deviceMac = deviceMac,
         handshakeId = handshakeId,
+    )
+
+    fun exportMonitorDisconnectionPcap(
+        bssid: String,
+        deviceMac: String,
+        disconnectionId: String,
+    ) = controller.wifiList.exportMonitorDisconnectionPcap(
+        bssid = bssid,
+        deviceMac = deviceMac,
+        disconnectionId = disconnectionId,
     )
 
     fun testMonitorHandshake(
@@ -103,6 +122,9 @@ class WifiListUiState(
         handshakeId = handshakeId,
         password = password,
     )
+
+    suspend fun saveWifiNetwork(ssid: String, password: String): Int =
+        controller.wifiList.saveWifiNetwork(ssid, password)
 
     /**
      * ViewModel 层异步发送扫描请求，并维护“正在等待 Service 确认”的 UI 状态。

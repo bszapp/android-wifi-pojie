@@ -2,21 +2,25 @@ package io.github.bszapp.wifitoolbox.service
 
 import android.system.Os
 import android.system.OsConstants
+import android.util.Base64
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDeviceRealtime
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionRecord
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionType
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorFrameGroupStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorFrameSubtypeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeFailureReason
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStep
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSignalStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -29,11 +33,8 @@ import org.json.JSONObject
 internal class MonitorModeController(
     private val terminalManager: TerminalManager,
     private val onStatisticsChanged: (MonitorModeStatistics) -> Unit,
+    private val onRecordedBytesChanged: (Long) -> Unit,
     private val onExportCompleted: (requestId: String, path: String, fileName: String) -> Unit,
-    private val onHandshakeTestResult: (
-        requestId: String,
-        outcome: MonitorHandshakeTestOutcome,
-    ) -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
     private val lock = Any()
@@ -50,9 +51,14 @@ internal class MonitorModeController(
     private var exportDirectory: File? = null
     private var targetChannel = 0
     private var targetFrequencyMhz = 0
+    private var recordedBytes = 0L
+    private var statisticsPublishScheduled = false
     private var stopping = false
     private var generation = 0L
     private val accessPoints = linkedMapOf<String, MutableAccessPoint>()
+    private val handshakeArtifacts = linkedMapOf<HandshakeKey, MutableStoredHandshake>()
+    private val disconnectionArtifacts =
+        linkedMapOf<DisconnectionKey, MutableStoredDisconnection>()
 
     fun start(
         rootfsPath: String,
@@ -83,12 +89,16 @@ internal class MonitorModeController(
         val sessionGeneration = synchronized(lock) {
             generation += 1
             accessPoints.clear()
+            handshakeArtifacts.clear()
+            disconnectionArtifacts.clear()
             captureFile = capture
             eventInput = input
             commandWriter = writer
             exportDirectory = pipes.exportDirectory
             this.targetChannel = targetChannel
             this.targetFrequencyMhz = targetFrequencyMhz
+            recordedBytes = 0L
+            statisticsPublishScheduled = false
             stopping = false
             generation
         }
@@ -118,6 +128,7 @@ internal class MonitorModeController(
             terminalManager.writeInput(statisticsId, STATISTICS_COMMAND)
 
             publishEmptyStatistics()
+            executor.execute { pollRecordedBytes(capture, sessionGeneration) }
         } catch (error: Throwable) {
             stop()
             throw error
@@ -144,7 +155,11 @@ internal class MonitorModeController(
                 exportDirectory = null
                 targetChannel = 0
                 targetFrequencyMhz = 0
+                recordedBytes = 0L
+                statisticsPublishScheduled = false
                 accessPoints.clear()
+                handshakeArtifacts.clear()
+                disconnectionArtifacts.clear()
             }
         }
 
@@ -201,31 +216,69 @@ internal class MonitorModeController(
         deviceMac: String,
         handshakeId: String,
     ) {
-        val command = synchronized(lock) {
+        val export = synchronized(lock) {
             check(!stopping && captureFile != null) { "监听模式尚未运行" }
-            val record = accessPoints[bssid]
-                ?.devices
-                ?.get(deviceMac)
-                ?.handshakes
-                ?.firstOrNull { it.id == handshakeId }
+            val stored = handshakeArtifacts[HandshakeKey(bssid, deviceMac, handshakeId)]
                 ?: error("找不到指定的握手记录")
-            check(record.exportPacketCount > 0) { "握手记录没有可导出的数据包" }
-            val writer = commandWriter ?: error("监听模式命令通道尚未建立")
             val directory = exportDirectory ?: error("监听模式导出目录尚未建立")
-            writer to JSONObject()
-                .put("type", "export")
-                .put("requestId", requestId)
-                .put("mode", "handshake")
-                .put("outputDirectory", CONTAINER_EXPORT_DIRECTORY)
-                .put("bssid", bssid)
-                .put("deviceMac", deviceMac)
-                .put("handshakeId", handshakeId)
-                .also { require(directory.isDirectory || directory.mkdirs()) }
+            val pcapBytes = stored.pcap.toByteArray()
+            require(pcapBytes.size >= PCAP_GLOBAL_HEADER_BYTES) { "握手记录尚无可导出的 PCAP 数据" }
+            StoredPcapExport(generation, directory, pcapBytes)
         }
-        synchronized(command.first) {
-            command.first.write(command.second.toString())
-            command.first.write("\n")
-            command.first.flush()
+        exportStoredPcap(requestId, export, "导出握手包 PCAP")
+    }
+
+    fun exportDisconnectionPcap(
+        requestId: String,
+        bssid: String,
+        deviceMac: String,
+        disconnectionId: String,
+    ) {
+        val export = synchronized(lock) {
+            check(!stopping && captureFile != null) { "监听模式尚未运行" }
+            val stored = disconnectionArtifacts[
+                DisconnectionKey(bssid, deviceMac, disconnectionId)
+            ] ?: error("找不到指定的断开记录")
+            val directory = exportDirectory ?: error("监听模式导出目录尚未建立")
+            val pcapBytes = stored.pcap.toByteArray()
+            require(pcapBytes.size >= PCAP_GLOBAL_HEADER_BYTES) {
+                "断开记录尚无可导出的 PCAP 数据"
+            }
+            StoredPcapExport(generation, directory, pcapBytes)
+        }
+        exportStoredPcap(requestId, export, "导出断开事件 PCAP")
+    }
+
+    private fun exportStoredPcap(
+        requestId: String,
+        export: StoredPcapExport,
+        operation: String,
+    ) {
+        executor.execute {
+            var partial: File? = null
+            try {
+                check(isCurrentSession(export.sessionGeneration)) { "监听模式会话已结束" }
+                require(export.directory.isDirectory || export.directory.mkdirs()) {
+                    "无法创建监听模式导出目录"
+                }
+                val target = uniquePcapFile(export.directory)
+                val partialFile = File(target.parentFile, target.name + ".part")
+                partial = partialFile
+                FileOutputStream(partialFile).use { output ->
+                    output.write(export.pcapBytes)
+                    output.fd.sync()
+                }
+                check(isCurrentSession(export.sessionGeneration)) { "监听模式会话已结束" }
+                if (!partialFile.renameTo(target)) {
+                    throw IOException("无法完成 PCAP 导出")
+                }
+                onExportCompleted(requestId, target.absolutePath, target.name)
+            } catch (error: Throwable) {
+                runCatching { partial?.delete() }
+                if (isCurrentSession(export.sessionGeneration)) {
+                    reportError(operation, error)
+                }
+            }
         }
     }
 
@@ -237,46 +290,6 @@ internal class MonitorModeController(
         }
         if (target.exists() && !target.delete()) {
             throw IOException("无法删除监听模式临时导出文件: ${target.absolutePath}")
-        }
-    }
-
-    fun testHandshake(
-        requestId: String,
-        bssid: String,
-        deviceMac: String,
-        handshakeId: String,
-        password: String,
-    ) {
-        val command = synchronized(lock) {
-            check(!stopping && captureFile != null) { "监听模式尚未运行" }
-            val accessPoint = accessPoints[bssid]
-                ?: error("找不到接入点 $bssid")
-            val ssid = accessPoint.ssid
-                ?.takeIf(String::isNotBlank)
-                ?: error("该接入点缺少可用于校验的网络名称")
-            check(
-                MonitorSecurityProtocol.WPA in accessPoint.securityProtocols ||
-                    MonitorSecurityProtocol.WPA2 in accessPoint.securityProtocols,
-            ) { "该接入点未识别为 WPA/WPA2-PSK" }
-            val record = accessPoint.devices[deviceMac]
-                ?.handshakes
-                ?.firstOrNull { it.id == handshakeId }
-                ?: error("找不到指定的握手记录")
-            check(record.canValidate) { "该握手记录缺少可校验的 EAPOL 数据" }
-            val writer = commandWriter ?: error("监听模式命令通道尚未建立")
-            writer to JSONObject()
-                .put("type", "test")
-                .put("requestId", requestId)
-                .put("bssid", bssid)
-                .put("deviceMac", deviceMac)
-                .put("handshakeId", handshakeId)
-                .put("ssid", ssid)
-                .put("password", password)
-        }
-        synchronized(command.first) {
-            command.first.write(command.second.toString())
-            command.first.write("\n")
-            command.first.flush()
         }
     }
 
@@ -327,30 +340,10 @@ internal class MonitorModeController(
         when (event.optString("type")) {
             "statistics" -> handleStatistics(event, sessionGeneration)
             "exportCompleted" -> handleExportCompleted(event, sessionGeneration)
-            "handshakeTestCompleted" -> {
-                if (isCurrentSession(sessionGeneration)) {
-                    onHandshakeTestResult(
-                        event.getString("requestId"),
-                        if (event.getBoolean("matched")) {
-                            MonitorHandshakeTestOutcome.MATCHED
-                        } else {
-                            MonitorHandshakeTestOutcome.NOT_MATCHED
-                        },
-                    )
-                }
-            }
-            "handshakeTestFailed" -> {
-                if (isCurrentSession(sessionGeneration)) {
-                    onHandshakeTestResult(
-                        event.getString("requestId"),
-                        MonitorHandshakeTestOutcome.FAILED,
-                    )
-                    reportError(
-                        "校验 WPA/WPA2 握手包",
-                        IOException(event.optString("message", "Python 校验失败")),
-                    )
-                }
-            }
+            "handshakeData" -> handleHandshakeData(event, sessionGeneration)
+            "handshakeValidation" -> handleHandshakeValidation(event, sessionGeneration)
+            "handshakeFinished" -> handleHandshakeFinished(event, sessionGeneration)
+            "disconnectionData" -> handleDisconnectionData(event, sessionGeneration)
             "exportFailed" -> {
                 if (isCurrentSession(sessionGeneration)) {
                     reportError(
@@ -377,7 +370,7 @@ internal class MonitorModeController(
         } != null
         if (!active) return
         val accessPointUpdates = event.optJSONArray("accessPointUpdates")
-        if (accessPointUpdates != null) {
+        if (accessPointUpdates != null && accessPointUpdates.length() > 0) {
             synchronized(lock) {
                 if (generation != sessionGeneration || stopping) return
                 for (index in 0 until accessPointUpdates.length()) {
@@ -421,7 +414,10 @@ internal class MonitorModeController(
                                 deviceJson.getString("name").takeIf(String::isNotBlank)
                             },
                             frameGroups = parseFrameGroups(deviceJson),
-                            handshakes = parseHandshakes(deviceJson),
+                            handshakes = parseHandshakes(
+                                bssid = bssid,
+                                deviceMac = mac,
+                            ),
                             realtime = MonitorDeviceRealtime(
                                 uploadBytesPerSecond = deviceJson.optLong(
                                     "uploadBytesPerSecond",
@@ -433,33 +429,13 @@ internal class MonitorModeController(
                                 ),
                                 signal = parseSignal(deviceJson.optJSONObject("signal")),
                             ),
+                            probeOnly = deviceJson.optBoolean("probeOnly", false),
                         )
                     }
                 }
             }
+            scheduleStatisticsPublish(sessionGeneration)
         }
-        val statisticsSnapshot = synchronized(lock) {
-            if (generation != sessionGeneration || stopping) return
-            val accessPointSnapshot = accessPoints.values
-                .sortedBy { it.bssid }
-                .map { accessPoint ->
-                    MonitorAccessPoint(
-                        bssid = accessPoint.bssid,
-                        ssid = accessPoint.ssid,
-                        ssidVisibility = accessPoint.ssidVisibility,
-                        securityProtocols = accessPoint.securityProtocols,
-                        signal = accessPoint.signal,
-                        devices = accessPoint.devices.values.sortedBy(MonitorDevice::mac),
-                    )
-                }
-            MonitorModeStatistics(
-                recordedBytes = event.getLong("recordedBytes"),
-                channel = targetChannel,
-                frequencyMhz = targetFrequencyMhz,
-                accessPoints = accessPointSnapshot,
-            )
-        }
-        onStatisticsChanged(statisticsSnapshot)
     }
 
     private fun parseFrameGroups(deviceJson: JSONObject): List<MonitorFrameGroupStatistics> {
@@ -493,50 +469,17 @@ internal class MonitorModeController(
         }
     }
 
-    private fun parseHandshakes(deviceJson: JSONObject): List<MonitorHandshakeRecord> {
-        val handshakes = deviceJson.getJSONArray("handshakes")
-        return buildList(handshakes.length()) {
-            for (index in 0 until handshakes.length()) {
-                val handshake = handshakes.getJSONObject(index)
-                add(
-                    MonitorHandshakeRecord(
-                        id = handshake.getString("id"),
-                        startUnixMillis = handshake.getLong("startUnixMillis"),
-                        durationMillis = handshake.getLong("durationMillis"),
-                        status = when (handshake.getString("status")) {
-                            "inProgress" -> MonitorHandshakeStatus.IN_PROGRESS
-                            "success" -> MonitorHandshakeStatus.SUCCESS
-                            "failed" -> MonitorHandshakeStatus.FAILED
-                            else -> throw IOException(
-                                "未知握手记录状态: ${handshake.getString("status")}",
-                            )
-                        },
-                        canValidate = handshake.getBoolean("canValidate"),
-                        validationDataComplete = handshake.getBoolean(
-                            "validationDataComplete",
-                        ),
-                        capturedSteps = buildList {
-                            val steps = handshake.getJSONArray("capturedSteps")
-                            for (stepIndex in 0 until steps.length()) {
-                                add(parseHandshakeStep(steps.getString(stepIndex)))
-                            }
-                        },
-                        failedAtStep = if (handshake.isNull("failedAtStep")) {
-                            null
-                        } else {
-                            parseHandshakeStep(handshake.getString("failedAtStep"))
-                        },
-                        failureReason = if (handshake.isNull("failureReason")) {
-                            null
-                        } else {
-                            parseHandshakeFailureReason(handshake.getString("failureReason"))
-                        },
-                        m2AttemptCount = handshake.getInt("m2AttemptCount"),
-                        exportPacketCount = handshake.getInt("exportPacketCount"),
-                    ),
-                )
-            }
-        }
+    private fun parseHandshakes(
+        bssid: String,
+        deviceMac: String,
+    ): List<MonitorHandshakeRecord> {
+        val now = System.currentTimeMillis()
+        return handshakeArtifacts
+            .asSequence()
+            .filter { (key, _) -> key.bssid == bssid && key.deviceMac == deviceMac }
+            .map { (_, value) -> value.toRecord(now) }
+            .sortedBy(MonitorHandshakeRecord::startUnixMillis)
+            .toList()
     }
 
     private fun parseHandshakeStep(value: String): MonitorHandshakeStep = when (value) {
@@ -565,6 +508,248 @@ internal class MonitorModeController(
             else -> throw IOException("未知握手失败原因: $value")
         }
 
+    private fun parseHandshakeCaptureQuality(value: String): MonitorHandshakeCaptureQuality =
+        when (value) {
+            "complete" -> MonitorHandshakeCaptureQuality.COMPLETE
+            "dataIncomplete" -> MonitorHandshakeCaptureQuality.DATA_INCOMPLETE
+            "partiallyMissing" -> MonitorHandshakeCaptureQuality.PARTIALLY_MISSING
+            else -> throw IOException("未知握手捕获质量: $value")
+        }
+
+    private fun handleHandshakeData(event: JSONObject, sessionGeneration: Long) {
+        val handshake = event.getJSONObject("handshake")
+        val key = parseHandshakeKey(handshake)
+        val sequence = event.getInt("sequence")
+        val part = decodeBase64(event.getString("pcapPartBase64"), "握手 PCAP 分块")
+        require(part.isNotEmpty() && part.size <= MAX_HANDSHAKE_EVENT_PART_BYTES) {
+            "Python 返回的握手 PCAP 分块长度无效"
+        }
+        synchronized(lock) {
+            if (generation != sessionGeneration || stopping) return
+            val stored = handshakeArtifacts.getOrPut(key) {
+                require(sequence == 0) { "握手 PCAP 首个分块序号必须为 0" }
+                val header = decodeBase64(
+                    event.getString("pcapHeaderBase64"),
+                    "握手 PCAP 文件头",
+                )
+                requireValidPcapHeader(header)
+                MutableStoredHandshake(
+                    key = key,
+                    startedAtMillis = System.currentTimeMillis(),
+                ).also { it.pcap.write(header) }
+            }
+            require(sequence == stored.nextSequence) {
+                "握手 PCAP 分块序号不连续，预期 ${stored.nextSequence}，实际 $sequence"
+            }
+            require(
+                stored.pcap.size() + stored.pendingPacket.size() + part.size <=
+                    MAX_HANDSHAKE_PCAP_BYTES,
+            ) {
+                "握手 PCAP 超过服务缓存上限"
+            }
+            stored.pendingPacket.write(part)
+            if (event.getBoolean("packetComplete")) {
+                stored.pcap.write(stored.pendingPacket.toByteArray())
+                stored.pendingPacket.reset()
+                stored.completedPacketCount += 1
+            }
+            stored.nextSequence += 1
+            applyHandshakeMetadata(stored, handshake)
+            synchronizeHandshakeRecordsLocked(key)
+        }
+        scheduleStatisticsPublish(sessionGeneration)
+    }
+
+    private fun handleHandshakeValidation(event: JSONObject, sessionGeneration: Long) {
+        val handshake = event.getJSONObject("handshake")
+        val key = parseHandshakeKey(handshake)
+        val hc22000 = event.getString("hc22000")
+        require(hc22000.length <= MAX_HC22000_LENGTH && hc22000.startsWith("WPA*02*")) {
+            "Python 返回的 HC22000 文本无效"
+        }
+        synchronized(lock) {
+            if (generation != sessionGeneration || stopping) return
+            val stored = handshakeArtifacts[key] ?: error("收到 HC22000 时握手数据尚未建立")
+            stored.hc22000 = hc22000
+            applyHandshakeMetadata(stored, handshake)
+            synchronizeHandshakeRecordsLocked(key)
+        }
+        scheduleStatisticsPublish(sessionGeneration)
+    }
+
+    private fun handleHandshakeFinished(event: JSONObject, sessionGeneration: Long) {
+        val handshake = event.getJSONObject("handshake")
+        val key = parseHandshakeKey(handshake)
+        synchronized(lock) {
+            if (generation != sessionGeneration || stopping) return
+            val stored = handshakeArtifacts[key] ?: error("收到结束事件时握手数据尚未建立")
+            applyHandshakeMetadata(stored, handshake)
+            require(stored.pendingPacket.size() == 0) {
+                "握手结束时仍有未完成的 PCAP 数据包分块"
+            }
+            require(stored.completedPacketCount == stored.exportPacketCount) {
+                "握手结束时 PCAP 包数量不一致，服务收到 ${stored.completedPacketCount} 个，" +
+                    "Python 声明 ${stored.exportPacketCount} 个"
+            }
+            stored.status = when (handshake.getString("status")) {
+                "success" -> MonitorHandshakeStatus.SUCCESS
+                "failed" -> MonitorHandshakeStatus.FAILED
+                "unknown" -> MonitorHandshakeStatus.UNKNOWN
+                else -> throw IOException("握手结束事件包含无效状态: $handshake")
+            }
+            stored.finishedAtMillis = System.currentTimeMillis()
+            synchronizeHandshakeRecordsLocked(key)
+        }
+        scheduleStatisticsPublish(sessionGeneration)
+    }
+
+    private fun handleDisconnectionData(event: JSONObject, sessionGeneration: Long) {
+        val disconnection = event.getJSONObject("disconnection")
+        val key = DisconnectionKey(
+            bssid = disconnection.getString("bssid"),
+            deviceMac = disconnection.getString("deviceMac"),
+            disconnectionId = disconnection.getString("id"),
+        )
+        val sequence = event.getInt("sequence")
+        val part = decodeBase64(event.getString("pcapPartBase64"), "断开事件 PCAP 分块")
+        require(part.isNotEmpty() && part.size <= MAX_HANDSHAKE_EVENT_PART_BYTES) {
+            "Python 返回的断开事件 PCAP 分块长度无效"
+        }
+        synchronized(lock) {
+            if (generation != sessionGeneration || stopping) return
+            val stored = disconnectionArtifacts.getOrPut(key) {
+                require(sequence == 0) { "断开事件 PCAP 首个分块序号必须为 0" }
+                val header = decodeBase64(
+                    event.getString("pcapHeaderBase64"),
+                    "断开事件 PCAP 文件头",
+                )
+                requireValidPcapHeader(header)
+                MutableStoredDisconnection(
+                    key = key,
+                    timestampUnixMillis = disconnection.getLong("timestampUnixMillis"),
+                    type = when (disconnection.getString("disconnectionType")) {
+                        "disassociation" -> MonitorDisconnectionType.DISASSOCIATION
+                        "deauthentication" -> MonitorDisconnectionType.DEAUTHENTICATION
+                        else -> throw IOException("未知断开事件类型: $disconnection")
+                    },
+                    reasonCode = if (disconnection.isNull("reasonCode")) {
+                        null
+                    } else {
+                        disconnection.getInt("reasonCode")
+                    },
+                    exportPacketCount = disconnection.getInt("exportPacketCount"),
+                ).also { it.pcap.write(header) }
+            }
+            require(sequence == stored.nextSequence) {
+                "断开事件 PCAP 分块序号不连续，预期 ${stored.nextSequence}，实际 $sequence"
+            }
+            require(stored.pcap.size() + stored.pendingPacket.size() + part.size <=
+                MAX_HANDSHAKE_PCAP_BYTES) {
+                "断开事件 PCAP 超过服务缓存上限"
+            }
+            stored.pendingPacket.write(part)
+            if (event.getBoolean("packetComplete")) {
+                stored.pcap.write(stored.pendingPacket.toByteArray())
+                stored.pendingPacket.reset()
+                stored.completed = true
+            }
+            stored.nextSequence += 1
+        }
+        scheduleStatisticsPublish(sessionGeneration)
+    }
+
+    private fun parseHandshakeKey(handshake: JSONObject): HandshakeKey = HandshakeKey(
+        bssid = handshake.getString("bssid"),
+        deviceMac = handshake.getString("deviceMac"),
+        handshakeId = handshake.getString("id"),
+    )
+
+    private fun applyHandshakeMetadata(
+        stored: MutableStoredHandshake,
+        handshake: JSONObject,
+    ) {
+        stored.captureQuality = parseHandshakeCaptureQuality(
+            handshake.getString("captureQuality"),
+        )
+        stored.capturedSteps = buildList {
+            val steps = handshake.getJSONArray("capturedSteps")
+            for (index in 0 until steps.length()) {
+                add(parseHandshakeStep(steps.getString(index)))
+            }
+        }
+        stored.failedAtStep = if (handshake.isNull("failedAtStep")) {
+            null
+        } else {
+            parseHandshakeStep(handshake.getString("failedAtStep"))
+        }
+        stored.failureReason = if (handshake.isNull("failureReason")) {
+            null
+        } else {
+            parseHandshakeFailureReason(handshake.getString("failureReason"))
+        }
+        stored.m2AttemptCount = handshake.getInt("m2AttemptCount")
+        stored.exportPacketCount = handshake.getInt("exportPacketCount")
+    }
+
+    private fun synchronizeAllHandshakeRecordsLocked() {
+        accessPoints.values.forEach { accessPoint ->
+            accessPoint.devices.keys.toList().forEach { deviceMac ->
+                synchronizeHandshakeRecordsLocked(
+                    HandshakeKey(accessPoint.bssid, deviceMac, ""),
+                )
+            }
+        }
+    }
+
+    private fun synchronizeHandshakeRecordsLocked(key: HandshakeKey) {
+        val accessPoint = accessPoints[key.bssid] ?: return
+        val device = accessPoint.devices[key.deviceMac] ?: return
+        accessPoint.devices[key.deviceMac] = device.copy(
+            handshakes = parseHandshakes(
+                bssid = key.bssid,
+                deviceMac = key.deviceMac,
+            ),
+        )
+    }
+
+    private fun statisticsSnapshotLocked(): MonitorModeStatistics = MonitorModeStatistics(
+        recordedBytes = recordedBytes,
+        channel = targetChannel,
+        frequencyMhz = targetFrequencyMhz,
+        accessPoints = accessPoints.values
+            .sortedBy { it.bssid }
+            .map { accessPoint ->
+                MonitorAccessPoint(
+                    bssid = accessPoint.bssid,
+                    ssid = accessPoint.ssid,
+                    ssidVisibility = accessPoint.ssidVisibility,
+                    securityProtocols = accessPoint.securityProtocols,
+                    signal = accessPoint.signal,
+                    devices = accessPoint.devices.values.sortedBy(MonitorDevice::mac),
+                )
+            },
+        disconnections = disconnectionArtifacts.values
+            .asSequence()
+            .filter { it.completed }
+            .map(MutableStoredDisconnection::toRecord)
+            .sortedBy(MonitorDisconnectionRecord::timestampUnixMillis)
+            .toList(),
+    )
+
+    private fun decodeBase64(value: String, name: String): ByteArray = try {
+        Base64.decode(value, Base64.NO_WRAP)
+    } catch (error: IllegalArgumentException) {
+        throw IOException("$name Base64 无效", error)
+    }
+
+    private fun requireValidPcapHeader(header: ByteArray) {
+        require(header.size == PCAP_GLOBAL_HEADER_BYTES) { "握手 PCAP 文件头长度无效" }
+        val magic = header.copyOfRange(0, 4)
+        require(PCAP_MAGIC_VALUES.any { magic.contentEquals(it) }) {
+            "握手 PCAP 文件头格式无效"
+        }
+    }
+
     private fun handleExportCompleted(event: JSONObject, sessionGeneration: Long) {
         val directory = synchronized(lock) {
             exportDirectory?.takeIf { generation == sessionGeneration && !stopping }
@@ -581,6 +766,17 @@ internal class MonitorModeController(
         onExportCompleted(event.getString("requestId"), target.absolutePath, fileName)
     }
 
+    private fun uniquePcapFile(directory: File): File {
+        var timestamp = System.currentTimeMillis()
+        while (true) {
+            val target = File(directory, "$timestamp.pcap")
+            if (!target.exists() && !File(directory, "$timestamp.pcap.part").exists()) {
+                return target
+            }
+            timestamp += 1L
+        }
+    }
+
     private fun parseSignal(value: JSONObject?): MonitorSignalStatistics? {
         value ?: return null
         return MonitorSignalStatistics(
@@ -593,6 +789,55 @@ internal class MonitorModeController(
         )
     }
 
+    private fun pollRecordedBytes(capture: File, sessionGeneration: Long) {
+        while (isCurrentSession(sessionGeneration)) {
+            val nextBytes = capture.length().coerceAtLeast(0L)
+            val changed = synchronized(lock) {
+                if (generation != sessionGeneration || stopping) return
+                if (recordedBytes == nextBytes) {
+                    false
+                } else {
+                    recordedBytes = nextBytes
+                    true
+                }
+            }
+            if (changed) onRecordedBytesChanged(nextBytes)
+            try {
+                Thread.sleep(RECORDED_BYTES_POLL_INTERVAL_MILLIS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
+    private fun scheduleStatisticsPublish(sessionGeneration: Long) {
+        val shouldSchedule = synchronized(lock) {
+            if (generation != sessionGeneration || stopping || statisticsPublishScheduled) {
+                false
+            } else {
+                statisticsPublishScheduled = true
+                true
+            }
+        }
+        if (!shouldSchedule) return
+        executor.execute {
+            try {
+                Thread.sleep(STATISTICS_PUBLISH_INTERVAL_MILLIS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@execute
+            }
+            val snapshot = synchronized(lock) {
+                if (generation != sessionGeneration || stopping) return@synchronized null
+                statisticsPublishScheduled = false
+                synchronizeAllHandshakeRecordsLocked()
+                statisticsSnapshotLocked()
+            }
+            snapshot?.let(onStatisticsChanged)
+        }
+    }
+
     private fun isCurrentSession(sessionGeneration: Long): Boolean = synchronized(lock) {
         generation == sessionGeneration && !stopping
     }
@@ -600,10 +845,11 @@ internal class MonitorModeController(
     private fun publishEmptyStatistics() {
         val statistics = synchronized(lock) {
             MonitorModeStatistics(
-                recordedBytes = captureFile?.length() ?: 0L,
+                recordedBytes = recordedBytes,
                 channel = targetChannel,
                 frequencyMhz = targetFrequencyMhz,
                 accessPoints = emptyList(),
+                disconnections = emptyList(),
             )
         }
         onStatisticsChanged(statistics)
@@ -645,6 +891,80 @@ internal class MonitorModeController(
         val exportDirectory: File,
     )
 
+    private data class HandshakeKey(
+        val bssid: String,
+        val deviceMac: String,
+        val handshakeId: String,
+    )
+
+    private data class DisconnectionKey(
+        val bssid: String,
+        val deviceMac: String,
+        val disconnectionId: String,
+    )
+
+    private data class MutableStoredHandshake(
+        val key: HandshakeKey,
+        val startedAtMillis: Long,
+        var finishedAtMillis: Long? = null,
+        var status: MonitorHandshakeStatus = MonitorHandshakeStatus.IN_PROGRESS,
+        var captureQuality: MonitorHandshakeCaptureQuality =
+            MonitorHandshakeCaptureQuality.COMPLETE,
+        var capturedSteps: List<MonitorHandshakeStep> = emptyList(),
+        var failedAtStep: MonitorHandshakeStep? = null,
+        var failureReason: MonitorHandshakeFailureReason? = null,
+        var m2AttemptCount: Int = 0,
+        var exportPacketCount: Int = 0,
+        var hc22000: String? = null,
+        var nextSequence: Int = 0,
+        var completedPacketCount: Int = 0,
+        val pcap: ByteArrayOutputStream = ByteArrayOutputStream(),
+        val pendingPacket: ByteArrayOutputStream = ByteArrayOutputStream(),
+    ) {
+        fun toRecord(nowMillis: Long): MonitorHandshakeRecord = MonitorHandshakeRecord(
+            id = key.handshakeId,
+            startUnixMillis = startedAtMillis,
+            durationMillis = (finishedAtMillis ?: nowMillis).minus(startedAtMillis).coerceAtLeast(0L),
+            status = status,
+            canValidate = hc22000 != null,
+            captureQuality = captureQuality,
+            capturedSteps = capturedSteps,
+            failedAtStep = failedAtStep,
+            failureReason = failureReason,
+            m2AttemptCount = m2AttemptCount,
+            exportPacketCount = exportPacketCount,
+            hc22000 = hc22000,
+        )
+    }
+
+    private data class MutableStoredDisconnection(
+        val key: DisconnectionKey,
+        val timestampUnixMillis: Long,
+        val type: MonitorDisconnectionType,
+        val reasonCode: Int?,
+        val exportPacketCount: Int,
+        var nextSequence: Int = 0,
+        var completed: Boolean = false,
+        val pcap: ByteArrayOutputStream = ByteArrayOutputStream(),
+        val pendingPacket: ByteArrayOutputStream = ByteArrayOutputStream(),
+    ) {
+        fun toRecord(): MonitorDisconnectionRecord = MonitorDisconnectionRecord(
+            id = key.disconnectionId,
+            timestampUnixMillis = timestampUnixMillis,
+            bssid = key.bssid,
+            deviceMac = key.deviceMac,
+            type = type,
+            reasonCode = reasonCode,
+            exportPacketCount = exportPacketCount,
+        )
+    }
+
+    private data class StoredPcapExport(
+        val sessionGeneration: Long,
+        val directory: File,
+        val pcapBytes: ByteArray,
+    )
+
     private data class MutableAccessPoint(
         val bssid: String,
         var ssid: String? = null,
@@ -662,6 +982,18 @@ internal class MonitorModeController(
         const val EVENT_PIPE_NAME = "events.fifo"
         const val EXPORT_DIRECTORY_NAME = "exports"
         const val CONTAINER_EXPORT_DIRECTORY = "/tmp/wlantool-monitor/exports"
+        const val PCAP_GLOBAL_HEADER_BYTES = 24
+        const val MAX_HANDSHAKE_PCAP_BYTES = 64 * 1024 * 1024
+        const val MAX_HANDSHAKE_EVENT_PART_BYTES = 24 * 1024
+        const val MAX_HC22000_LENGTH = 256 * 1024
+        const val RECORDED_BYTES_POLL_INTERVAL_MILLIS = 50L
+        const val STATISTICS_PUBLISH_INTERVAL_MILLIS = 50L
+        val PCAP_MAGIC_VALUES = arrayOf(
+            byteArrayOf(0xd4.toByte(), 0xc3.toByte(), 0xb2.toByte(), 0xa1.toByte()),
+            byteArrayOf(0x4d, 0x3c, 0xb2.toByte(), 0xa1.toByte()),
+            byteArrayOf(0xa1.toByte(), 0xb2.toByte(), 0xc3.toByte(), 0xd4.toByte()),
+            byteArrayOf(0xa1.toByte(), 0xb2.toByte(), 0x3c, 0x4d),
+        )
         const val CAPTURE_COMMAND =
             "exec tcpdump -U -i wlan0 -e -w /tmp/wlanlogs.pcap"
         const val STATISTICS_COMMAND =

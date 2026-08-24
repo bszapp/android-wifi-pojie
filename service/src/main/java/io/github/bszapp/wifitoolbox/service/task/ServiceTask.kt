@@ -1,10 +1,13 @@
 package io.github.bszapp.wifitoolbox.service.task
 
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
+import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 
-internal fun interface ServiceTask {
+internal interface ServiceTask {
     @Throws(InterruptedException::class)
     fun run(context: TaskContext)
+
+    fun update(update: TaskUpdateRequest): Boolean = false
 }
 
 internal class TaskContext(
