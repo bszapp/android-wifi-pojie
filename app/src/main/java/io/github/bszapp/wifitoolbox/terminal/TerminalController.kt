@@ -261,12 +261,7 @@ class TerminalController(
             if (!isCurrent(binding)) return
             runCatching {
                 val range = readRange(binding.service, terminalId)
-                val reportedCount = binding.service.getTerminalLogCount(terminalId)
-                val stableRange = if (reportedCount == range.lineCount) {
-                    range
-                } else {
-                    readRange(binding.service, terminalId)
-                }
+                val stableRange = range
                 syncTerminal(binding, stableRange)
                 binding.processedRangeGenerations[terminalId] = maxOf(
                     binding.processedRangeGenerations[terminalId] ?: -1L,
@@ -287,7 +282,7 @@ class TerminalController(
     ) {
         if (!isCurrent(binding)) return
         val idSet = ids.toSet()
-        _state.update { current ->
+        updateState(binding) { current ->
             val retained = current.terminals
                 .filterKeys(idSet::contains)
                 .toMutableMap()
@@ -323,15 +318,15 @@ class TerminalController(
         }
 
         var target = announced
-        var local = _state.value.terminals[announced.terminalId]?.entries.orEmpty()
+        var local = ArrayList(_state.value.terminals[announced.terminalId]?.entries.orEmpty()
             .dropWhile { it.id < announced.oldestAvailableId }
-            .takeWhile { it.id <= announced.latestId }
+            .takeWhile { it.id <= announced.latestId })
 
         val locallyContinuous = local.zipWithNext().all { (first, second) ->
             second.id == first.id + 1L
         }
         if (!locallyContinuous || (local.isNotEmpty() && local.first().id != announced.oldestAvailableId)) {
-            local = emptyList()
+            local.clear()
         }
 
         var fromId = local.lastOrNull()?.id?.plus(1L) ?: target.oldestAvailableId
@@ -343,9 +338,11 @@ class TerminalController(
             )
             if (!isCurrent(binding)) return
             target = batch.toRangeUpdate()
-            local = local
-                .dropWhile { it.id < target.oldestAvailableId }
-                .takeWhile { it.id <= target.latestId }
+            if (local.firstOrNull()?.id?.let { it < target.oldestAvailableId } == true) {
+                val dropCount = local.indexOfFirst { it.id >= target.oldestAvailableId }
+                if (dropCount < 0) local.clear() else local.subList(0, dropCount).clear()
+            }
+            while (local.lastOrNull()?.id?.let { it > target.latestId } == true) local.removeAt(local.lastIndex)
 
             val fetched = batch.entries.filter { it.id >= target.oldestAvailableId }
             if (fetched.isEmpty()) {
@@ -358,11 +355,11 @@ class TerminalController(
 
             val expectedId = local.lastOrNull()?.id?.plus(1L) ?: target.oldestAvailableId
             if (fetched.first().id != expectedId) {
-                local = emptyList()
+                local.clear()
                 fromId = target.oldestAvailableId
                 continue
             }
-            local = local + fetched
+            local.addAll(fetched)
             fromId = fetched.last().id + 1L
         }
 
@@ -372,7 +369,7 @@ class TerminalController(
         if (!complete) {
             val loaded = reloadAvailableRange(binding, target)
             target = loaded.range
-            local = loaded.entries
+            local = ArrayList(loaded.entries)
         }
         updateTerminal(binding, target, local)
     }
@@ -382,7 +379,7 @@ class TerminalController(
         initialRange: RangeUpdate,
     ): LoadedTerminal {
         var target = initialRange
-        var entries = emptyList<io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry>()
+        val entries = ArrayList<io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry>()
         var fromId = target.oldestAvailableId
         while (
             isCurrent(binding) &&
@@ -393,16 +390,19 @@ class TerminalController(
                 binding.service.getTerminalLogs(target.terminalId, fromId, toId),
             )
             target = batch.toRangeUpdate()
-            entries = entries.dropWhile { it.id < target.oldestAvailableId }
+            if (entries.firstOrNull()?.id?.let { it < target.oldestAvailableId } == true) {
+                val dropCount = entries.indexOfFirst { it.id >= target.oldestAvailableId }
+                if (dropCount < 0) entries.clear() else entries.subList(0, dropCount).clear()
+            }
             val fetched = batch.entries.filter { it.id >= target.oldestAvailableId }
             if (fetched.isEmpty()) break
             val expected = entries.lastOrNull()?.id?.plus(1L) ?: target.oldestAvailableId
             if (fetched.first().id != expected) {
-                entries = emptyList()
+                entries.clear()
                 fromId = target.oldestAvailableId
                 continue
             }
-            entries = entries + fetched
+            entries.addAll(fetched)
             fromId = fetched.last().id + 1L
         }
         return LoadedTerminal(target, entries)
@@ -416,8 +416,8 @@ class TerminalController(
         if (!isCurrent(binding)) return
         val inputPrompt = binding.service.getTerminalInputPrompt(range.terminalId)
         if (!isCurrent(binding)) return
-        _state.update { current ->
-            if (range.terminalId !in current.aliveTerminalIds) return@update current
+        updateState(binding) { current ->
+            if (range.terminalId !in current.aliveTerminalIds) return@updateState current
             current.copy(
                 terminals = current.terminals + (
                     range.terminalId to TerminalLogState(
@@ -470,6 +470,13 @@ class TerminalController(
         latestId = latestId,
         lineCount = lineCount,
     )
+
+    private inline fun updateState(binding: Binding, transform: (TerminalManagerState) -> TerminalManagerState) {
+        synchronized(connectionLock) {
+            if (activeBinding !== binding) return
+            _state.update(transform)
+        }
+    }
 
     private fun isCurrent(binding: Binding): Boolean = synchronized(connectionLock) {
         activeBinding === binding && binding.service.asBinder().isBinderAlive

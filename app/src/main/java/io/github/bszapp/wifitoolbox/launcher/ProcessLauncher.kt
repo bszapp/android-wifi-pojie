@@ -41,6 +41,7 @@ class ProcessLauncher(
     private var activeBinder: IBinder? = null
     private var deathRecipient: IBinder.DeathRecipient? = null
 
+    private var nextConnectionId = 0L
     private var mainService: IMainService? = null
 
     private var androidApiClient: AndroidApiClient? = null
@@ -206,11 +207,8 @@ class ProcessLauncher(
             _state.value = StartupState(
                 status = StartupStatus.RUNNING,
                 selectedMode = serviceMode,
-                serviceUid = startupInfo.serviceUid,
-                serviceUidStr = startupInfo.serviceUidText,
-                servicePid = startupInfo.servicePid,
-                serviceVersionName = startupInfo.versionName,
-                serviceVersionCode = startupInfo.versionCode
+                serviceInfo = startupInfo,
+                connectionId = ++nextConnectionId
             )
 
             runCatching { onServiceConnected(service, androidApiClient!!) }

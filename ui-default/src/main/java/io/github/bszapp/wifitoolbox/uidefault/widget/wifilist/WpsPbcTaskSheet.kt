@@ -43,7 +43,7 @@ import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.TabRowDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -67,7 +67,7 @@ internal fun WpsPbcTaskSheet(
     val scope = rememberCoroutineScope()
     val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
 
-    OverlayBottomSheet(
+    SingleOverlayBottomSheet(
         show = showSheet,
         title = "WPS-PBC",
         allowDismiss = true,
@@ -95,7 +95,7 @@ internal fun WpsPbcTaskSheet(
                 verticalAlignment = Alignment.Top,
             ) { page ->
                 when (page) {
-                    0 -> WpsCapturedNetworksPage(progress)
+                    0 -> WpsCapturedNetworksPage(trackedTask)
                     else -> WpsTaskLogsPage(trackedTask)
                 }
             }
@@ -136,8 +136,9 @@ internal fun WpsPbcTaskSheet(
 }
 
 @Composable
-private fun WpsCapturedNetworksPage(progress: TaskProgress.WpsPbc?) {
-    val networks = progress?.networks.orEmpty()
+private fun WpsCapturedNetworksPage(task: TrackedTaskState?) {
+    val progress = task?.snapshot?.progress as? TaskProgress.WpsPbc
+    val networks = task?.capturedNetworks.orEmpty()
     when {
         progress == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()

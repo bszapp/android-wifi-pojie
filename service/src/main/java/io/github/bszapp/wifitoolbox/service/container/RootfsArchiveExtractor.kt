@@ -1,4 +1,4 @@
-package io.github.bszapp.wifitoolbox.container
+package io.github.bszapp.wifitoolbox.service.container
 
 import android.system.Os
 import android.system.OsConstants
@@ -13,27 +13,32 @@ internal object RootfsArchiveExtractor {
     private const val TAR_BLOCK_SIZE = 512
     private const val BUFFER_SIZE = 8192
 
-    suspend fun extract(
+    fun extract(
         compressedSize: Long,
         compressedInput: InputStream,
         destination: File,
-        onProgress: suspend (entry: String, fraction: Float) -> Unit,
+        ownerUid: Int,
+        ownerGid: Int,
+        onProgress: (entry: String, fraction: Float) -> Unit,
     ) {
         val counting = CountingInputStream(BufferedInputStream(compressedInput))
         XZInputStream(counting).use { input ->
-            extractTar(input, counting, compressedSize, destination, onProgress)
+            extractTar(input, counting, compressedSize, destination, ownerUid, ownerGid, onProgress)
         }
         onProgress("", 1f)
     }
 
-    private suspend fun extractTar(
+    private fun extractTar(
         input: InputStream,
         counting: CountingInputStream,
         compressedSize: Long,
         destination: File,
-        onProgress: suspend (String, Float) -> Unit,
+        ownerUid: Int,
+        ownerGid: Int,
+        onProgress: (String, Float) -> Unit,
     ) {
         destination.mkdirs()
+        Os.chown(destination.absolutePath, ownerUid, ownerGid)
         val header = ByteArray(TAR_BLOCK_SIZE)
         var longName: String? = null
         var longLink: String? = null
@@ -73,6 +78,7 @@ internal object RootfsArchiveExtractor {
             when (type) {
                 '5' -> {
                     ensureDirectory(output)
+                    Os.chown(output.absolutePath, ownerUid, ownerGid)
                     applyMode(output, mode, 493)
                     report(normalized, counting, compressedSize, onProgress)
                 }
@@ -80,6 +86,7 @@ internal object RootfsArchiveExtractor {
                     ensureParent(output)
                     replaceExisting(output)
                     Os.symlink(linkName, output.absolutePath)
+                    Os.lchown(output.absolutePath, ownerUid, ownerGid)
                     report(normalized, counting, compressedSize, onProgress)
                 }
                 '1' -> {
@@ -88,6 +95,7 @@ internal object RootfsArchiveExtractor {
                     ensureParent(output)
                     replaceExisting(output)
                     Os.link(target.absolutePath, output.absolutePath)
+                    Os.chown(output.absolutePath, ownerUid, ownerGid)
                     report(normalized, counting, compressedSize, onProgress)
                 }
                 '0', '7' -> {
@@ -104,6 +112,7 @@ internal object RootfsArchiveExtractor {
                             report(normalized, counting, compressedSize, onProgress)
                         }
                     }
+                    Os.chown(output.absolutePath, ownerUid, ownerGid)
                     applyMode(output, mode, 420)
                     skipPadding(input, size)
                     report(normalized, counting, compressedSize, onProgress)
@@ -116,11 +125,11 @@ internal object RootfsArchiveExtractor {
         }
     }
 
-    private suspend fun report(
+    private fun report(
         entry: String,
         counting: CountingInputStream,
         compressedSize: Long,
-        callback: suspend (String, Float) -> Unit,
+        callback: (String, Float) -> Unit,
     ) {
         val fraction = if (compressedSize > 0L) {
             (counting.bytesRead.toDouble() / compressedSize).toFloat().coerceIn(0f, 1f)

@@ -61,6 +61,8 @@ import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorDeviceDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
 import io.github.bszapp.wifitoolbox.uidefault.component.WifiIcon
@@ -69,12 +71,9 @@ import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetSubmission
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeAccessPoint
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheetTarget
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.frequencyToChannel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -86,17 +85,33 @@ fun WifiList(
     vm: DefaultViewModel = viewModel(),
     listState: LazyListState = rememberLazyListState(),
     contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+    onSaveHc22000: (content: String, fileName: String) -> Unit = { _, _ -> },
 ) {
     val wifiState by vm.wifiList.state.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
+    val modeState by vm.wifiList.modeState.collectAsStateWithLifecycle()
+    val handshakeTest by vm.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
+    var selectedCaptureDevice by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val capturedAccessPoints = modeState?.monitorStatistics?.accessPoints.orEmpty()
     val currentTask by vm.currentTask.collectAsStateWithLifecycle()
+    val connectWifiSheetCloseRequest by
+        vm.connectWifiSheetCloseRequest.collectAsStateWithLifecycle()
     var selectedSsid by rememberSaveable { mutableStateOf<String?>(null) }
     var connectSheetContent by remember { mutableStateOf<ConnectWifiSheetContent?>(null) }
     var dismissConnectSheet by remember { mutableStateOf(false) }
-    var monitorModeTarget by remember { mutableStateOf<MonitorModeSheetTarget?>(null) }
-    var showMonitorModeSheet by remember { mutableStateOf(false) }
     var isSubmittingTask by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val connectSheetInstanceId = remember(connectSheetContent) { java.util.UUID.randomUUID().toString() }
+
+    LaunchedEffect(connectWifiSheetCloseRequest?.id) {
+        connectWifiSheetCloseRequest?.let { request ->
+            if (request.sheetInstanceId == connectSheetInstanceId) {
+                dismissConnectSheet = true
+                isSubmittingTask = false
+            }
+            vm.consumeConnectWifiSheetCloseRequest(request.id)
+        }
+    }
 
     // WifiState 与 SavedWifiList 是两种同级数据：
     // 扫描结果只来自 Enabled，已保存配置只来自独立的 SavedWifiList。
@@ -108,11 +123,16 @@ fun WifiList(
         savedWifiList?.networks ?: emptyList()
     val connection = (wifiState as? WifiState.Data.Enabled)?.connection
 
-    val groups = remember(scanResults, savedNetworks, connection) {
+    // 设备计数和网速更新不改变列表分组，只以接入点元数据参与列表合并。
+    val capturedMetadata = remember(capturedAccessPoints) {
+        capturedAccessPoints.map { it.copy(devices = emptyList()) }
+    }
+    val groups = remember(scanResults, savedNetworks, connection, capturedMetadata, modeState?.mode) {
         MergedWifiGroup.buildFrom(
             results = scanResults,
             savedWifiList = savedNetworks,
             connection = connection,
+            capturedAccessPoints = if (modeState?.mode == WifiMode.MONITOR) capturedMetadata else emptyList(),
         )
     }
     val selectedGroup = selectedSsid?.let { ssid ->
@@ -148,7 +168,7 @@ fun WifiList(
                             stage = when (val progress = task.progress) {
                                 is TaskProgress.ConnectWifi -> progress.stage.name.toTaskStageText()
                                 is TaskProgress.WpsPbc ->
-                                    "WPS-PBC · 已获取 ${progress.networks.size} 个网络"
+                                    "WPS-PBC · 已获取 ${progress.networkCount} 个网络"
                                 null -> "加载中"
                             },
                             onClick = {
@@ -165,26 +185,7 @@ fun WifiList(
                         )
                     }
                 } else {
-                    groups.forEachIndexed { index, group ->
-                        val startsUnknownSignalSection =
-                            !group.isConnected && group.hasUnknownSignal &&
-                                groups.take(index).none {
-                                    !it.isConnected && it.hasUnknownSignal
-                                }
-                        if (startsUnknownSignalSection) {
-                            item(key = "wifi-unknown-signal-section") {
-                                Text(
-                                    text = "未知信号",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(
-                                        start = 12.dp,
-                                        top = 12.dp,
-                                        bottom = 4.dp,
-                                    ),
-                                )
-                            }
-                        }
+                    groups.forEach { group ->
                         item(key = group.ssid) {
                             WifiGroupCard(
                                 vm = vm,
@@ -196,6 +197,7 @@ fun WifiList(
                                     connectSheetContent = ConnectWifiSheetContent.Network(
                                         ssid = group.ssid,
                                         hasSavedConfiguration = group.savedWifiList.isNotEmpty(),
+                                        allowNetworkCardTest = modeState?.mode == WifiMode.NORMAL,
                                     )
                                 },
                                 onConnectWithConfig = { config ->
@@ -204,56 +206,6 @@ fun WifiList(
                                         networkId = config.networkId,
                                         ssid = group.displaySsid,
                                     )
-                                },
-                                onEnterMonitorMode = {
-                                    val frequency = group.strongest?.frequency
-                                        ?: group.virtualAccessPoint?.frequency
-                                        ?: 0
-                                    val channel = frequencyToChannel(frequency)
-                                    if (channel != null) {
-                                        val accessPoints = scanResults
-                                            .asSequence()
-                                            .filter {
-                                                frequencyToChannel(it.frequency) == channel
-                                            }
-                                            .distinctBy { it.BSSID.lowercase() }
-                                            .map {
-                                                MonitorModeAccessPoint(
-                                                    name = it.SSID
-                                                        ?.takeIf(String::isNotEmpty)
-                                                        ?: "<隐藏的网络>",
-                                                    mac = it.BSSID,
-                                                )
-                                            }
-                                            .toMutableList()
-                                        group.virtualAccessPoint?.let { virtual ->
-                                            val bssid = virtual.bssid
-                                            if (
-                                                frequencyToChannel(virtual.frequency) == channel &&
-                                                !bssid.isNullOrBlank() &&
-                                                accessPoints.none {
-                                                    it.mac.equals(bssid, ignoreCase = true)
-                                                }
-                                            ) {
-                                                accessPoints += MonitorModeAccessPoint(
-                                                    name = virtual.ssid
-                                                        ?.takeUnless {
-                                                            it == WifiManager.UNKNOWN_SSID
-                                                        }
-                                                        ?.removeSurrounding("\"")
-                                                        ?.takeIf(String::isNotEmpty)
-                                                        ?: "<隐藏的网络>",
-                                                    mac = bssid,
-                                                )
-                                            }
-                                        }
-                                        monitorModeTarget = MonitorModeSheetTarget(
-                                            channel = channel,
-                                            frequencyMhz = frequency,
-                                            accessPoints = accessPoints,
-                                        )
-                                        showMonitorModeSheet = true
-                                    }
                                 },
                             )
                         }
@@ -264,21 +216,35 @@ fun WifiList(
     }
 
     selectedGroup?.let { group ->
-        WifiDetailSheet(group = group, onDismiss = { selectedSsid = null })
-    }
-
-    monitorModeTarget?.let { target ->
-        MonitorModeSheet(
-            target = target,
-            show = showMonitorModeSheet,
-            onDismiss = {
-                showMonitorModeSheet = false
+        WifiDetailSheet(
+            group = group,
+            onDismiss = { selectedSsid = null },
+            capturedAccessPoints = capturedAccessPoints.filter { ap ->
+                group.networks.any { it.BSSID.equals(ap.bssid, ignoreCase = true) } ||
+                    group.virtualAccessPoint?.bssid.equals(ap.bssid, ignoreCase = true)
             },
-            onExecute = { command, channel, frequencyMhz ->
-                showMonitorModeSheet = false
-                vm.wifiList.enterMonitorMode(command, channel, frequencyMhz)
+            onDeviceClick = { accessPoint, device ->
+                selectedSsid = null
+                selectedCaptureDevice = accessPoint.bssid to device.mac
             },
         )
+    }
+
+    selectedCaptureDevice?.let { (bssid, mac) ->
+        val accessPoint = capturedAccessPoints.firstOrNull { it.bssid == bssid }
+        val device = accessPoint?.devices?.firstOrNull { it.mac == mac }
+        if (accessPoint != null && device != null) {
+            MonitorDeviceDetailSheet(
+                accessPoint = accessPoint, device = device, savedNetworks = savedNetworks,
+                handshakeTest = handshakeTest,
+                onClearHandshakeTestResult = vm.wifiList::clearMonitorHandshakeTestResult,
+                onDismiss = { selectedCaptureDevice = null },
+                onExport = { vm.wifiList.exportMonitorDevicePcap(bssid, mac, it) },
+                onTestHandshake = { id, password -> vm.wifiList.testMonitorHandshake(bssid, mac, id, password) },
+                onExportHandshake = { vm.wifiList.exportMonitorHandshakePcap(bssid, mac, it) },
+                onSaveHc22000 = onSaveHc22000,
+            )
+        }
     }
 
     connectSheetContent?.let { content ->
@@ -288,7 +254,23 @@ fun WifiList(
             isSubmitting = isSubmittingTask,
             dismissRequested = dismissConnectSheet,
             onSubmit = { submission ->
-                if (!isSubmittingTask) {
+                val savedConfigurationTest =
+                    submission as? ConnectWifiSheetSubmission.TestConnectivity
+                val network = content as? ConnectWifiSheetContent.Network
+                if (
+                    savedConfigurationTest != null &&
+                    network?.hasSavedConfiguration == true
+                ) {
+                    scope.launch {
+                        delay(CONFIRMATION_DIALOG_TEST_DELAY_MILLIS)
+                        vm.confirmSavedConfigurationConnectivityTest(
+                            sheetInstanceId = connectSheetInstanceId,
+                            ssid = network.ssid,
+                            password = savedConfigurationTest.password,
+                            config = savedConfigurationTest.config,
+                        )
+                    }
+                } else if (!isSubmittingTask) {
                     isSubmittingTask = true
                     scope.launch {
                         when (submission) {
@@ -318,6 +300,20 @@ fun WifiList(
                                     }.onSuccess {
                                         connectSheetContent = null
                                     }
+                                }
+                            }
+                            is ConnectWifiSheetSubmission.NetworkCardTest -> {
+                                val network = content as? ConnectWifiSheetContent.Network
+                                if (network != null) {
+                                    runCatching {
+                                        vm.startNetworkCardConnectTask(
+                                            ssid = network.ssid,
+                                            passwords = submission.passwords,
+                                            mac = submission.mac,
+                                            name = submission.name,
+                                            config = submission.config,
+                                        )
+                                    }.onSuccess { connectSheetContent = null }
                                 }
                             }
                             is ConnectWifiSheetSubmission.SaveOnly -> {
@@ -364,6 +360,8 @@ fun WifiList(
 
 }
 
+private const val CONFIRMATION_DIALOG_TEST_DELAY_MILLIS = 1_000L
+
 @Composable
 private fun RunningTaskCard(
     taskId: Long,
@@ -408,6 +406,7 @@ private fun String.toTaskStageText(): String = when (this) {
     "WPA_HANDSHAKE_2_OF_4" -> "WPA 握手 2/4"
     "WPA_HANDSHAKE_3_OF_4" -> "WPA 握手 3/4"
     "WPA_HANDSHAKE_4_OF_4" -> "WPA 握手 4/4"
+    "IP_NEGOTIATION" -> "获取 IP 地址"
     else -> "加载中"
 }
 
@@ -508,7 +507,6 @@ private fun WifiGroupCard(
     onClick: () -> Unit,
     onConnect: () -> Unit,
     onConnectWithConfig: (WifiConfiguration) -> Unit,
-    onEnterMonitorMode: () -> Unit,
 ) {
     val isConnected = group.isConnected
     val levelIndex = group.signalDbm?.let {
@@ -624,7 +622,6 @@ private fun WifiGroupCard(
                 },
                 onOpenDetail = { onClick() },
                 onConnectWithConfig = onConnectWithConfig,
-                onEnterMonitorMode = onEnterMonitorMode,
                 onUpdateConfig = { networkId, patch ->
                     vm.wifiList.updateWifiConfig(networkId, patch)
                 },

@@ -87,6 +87,56 @@ class AndroidApi(
         getConnectionInfoInternal()
     }
 
+    /** 与已有 Provider Binder 调用采用相同身份，读取 Settings.Global.device_name。 */
+    internal fun getDeviceName(): String {
+        val binder = Class.forName("android.os.ServiceManager")
+            .getMethod("getService", String::class.java).invoke(null, "activity") as IBinder
+        val manager = Class.forName("android.app.IActivityManager\$Stub")
+            .getMethod("asInterface", IBinder::class.java).invoke(null, binder)
+        val token = android.os.Binder()
+        val authority = "settings"
+        val holder = systemApi("getContentProviderExternal(settings)") {
+            if (sdk >= 29) manager.javaClass.getMethod(
+                "getContentProviderExternal", String::class.java, Int::class.java,
+                IBinder::class.java, String::class.java,
+            ).invoke(manager, authority, 0, token, callerPackage)
+            else manager.javaClass.getMethod(
+                "getContentProviderExternal", String::class.java, Int::class.java, IBinder::class.java,
+            ).invoke(manager, authority, 0, token)
+        } ?: error("Settings Provider 不可用")
+        try {
+            val provider = holder.javaClass.getField("provider").get(holder)
+                ?: error("Settings Provider Binder 为空")
+            val args = Bundle().apply { putInt("_user", 0) }
+            val result = systemApi("Settings.GET_global(device_name)") {
+                when {
+                    sdk >= 31 -> provider.javaClass.getMethod(
+                        "call", AttributionSource::class.java, String::class.java,
+                        String::class.java, String::class.java, Bundle::class.java,
+                    ).invoke(provider, AttributionSource.Builder(Process.myUid())
+                        .setPackageName(callerPackage).build(), authority, "GET_global", "device_name", args)
+                    sdk >= 30 -> provider.javaClass.getMethod(
+                        "call", String::class.java, String::class.java, String::class.java,
+                        String::class.java, String::class.java, Bundle::class.java,
+                    ).invoke(provider, callerPackage, null, authority, "GET_global", "device_name", args)
+                    sdk >= 29 -> provider.javaClass.getMethod(
+                        "call", String::class.java, String::class.java, String::class.java,
+                        String::class.java, Bundle::class.java,
+                    ).invoke(provider, callerPackage, authority, "GET_global", "device_name", args)
+                    else -> provider.javaClass.getMethod(
+                        "call", String::class.java, String::class.java, String::class.java, Bundle::class.java,
+                    ).invoke(provider, callerPackage, "GET_global", "device_name", args)
+                }
+            } as? Bundle ?: error("Settings Provider 返回类型错误")
+            return result.getString("value")?.takeIf(String::isNotBlank) ?: Build.MODEL
+        } finally {
+            systemApi("removeContentProviderExternal(settings)") {
+                manager.javaClass.getMethod("removeContentProviderExternal", String::class.java, IBinder::class.java)
+                    .invoke(manager, authority, token)
+            }
+        }
+    }
+
     private fun getConnectionInfoInternal(): WifiInfo {
         val wifiService = getWifiService()
         val clazz = wifiService::class.java

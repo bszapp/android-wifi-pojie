@@ -63,8 +63,7 @@ import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -78,6 +77,7 @@ internal sealed interface ConnectWifiSheetContent {
     data class Network(
         val ssid: String,
         val hasSavedConfiguration: Boolean,
+        val allowNetworkCardTest: Boolean = false,
     ) : ConnectWifiSheetContent
 
     data object Task : ConnectWifiSheetContent
@@ -85,6 +85,7 @@ internal sealed interface ConnectWifiSheetContent {
 
 internal enum class ConnectWifiOperation {
     TEST_CONNECTIVITY,
+    TEST_CONNECTIVITY_NETWORK_CARD,
     SAVE_ONLY,
     SAVE_AND_CONNECT,
 }
@@ -101,6 +102,13 @@ internal sealed interface ConnectWifiSheetSubmission {
 
     data class SaveOnly(
         val password: String,
+    ) : ConnectWifiSheetSubmission
+
+    data class NetworkCardTest(
+        val passwords: List<String>,
+        val mac: String?,
+        val name: String?,
+        val config: ConnectWifiTaskConfig,
     ) : ConnectWifiSheetSubmission
 
     data class SaveAndConnect(
@@ -215,23 +223,8 @@ internal fun ConnectWifiTaskSheet(
     val requestDismiss = {
         showSheet = false
     }
-    var pendingDestructiveSubmission by remember(content) {
-        mutableStateOf<ConnectWifiSheetSubmission.TestConnectivity?>(null)
-    }
-    val submitWithConfirmation: (ConnectWifiSheetSubmission) -> Unit = { submission ->
-        val requiresConfirmation =
-            submission is ConnectWifiSheetSubmission.TestConnectivity &&
-                (inputContent as? ConnectWifiSheetContent.Network)
-                    ?.hasSavedConfiguration == true
-        if (requiresConfirmation) {
-            pendingDestructiveSubmission =
-                submission as ConnectWifiSheetSubmission.TestConnectivity
-        } else {
-            onSubmit(submission)
-        }
-    }
 
-    OverlayBottomSheet(
+    SingleOverlayBottomSheet(
         show = showSheet,
         title = when {
             content is ConnectWifiSheetContent.Configuration ->
@@ -344,49 +337,21 @@ internal fun ConnectWifiTaskSheet(
                 isSubmitting = isSubmitting,
                 formState = formState,
                 inputContent = inputContent,
-                onSubmit = submitWithConfirmation,
+                onSubmit = onSubmit,
                 onStop = onStop,
                 onDismiss = requestDismiss,
             )
         }
     }
-
-    OverlayDialog(
-        show = pendingDestructiveSubmission != null,
-        title = "确认开始测试",
-        summary = "该网络存在已保存配置。开始后会永久删除原配置，测试结束时只删除测试配置，不会恢复原配置。确定继续？",
-        onDismissRequest = {
-            pendingDestructiveSubmission = null
-        },
-        content = {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                TextButton(
-                    text = "取消",
-                    onClick = {
-                        pendingDestructiveSubmission = null
-                    },
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(modifier = Modifier.width(20.dp))
-                TextButton(
-                    text = "开始",
-                    onClick = {
-                        val submission = pendingDestructiveSubmission
-                            ?: return@TextButton
-                        pendingDestructiveSubmission = null
-                        onSubmit(submission)
-                    },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                )
-            }
-        },
-    )
 }
 
 @Stable
 private class ConnectWifiConfigurationFormState {
     var password by mutableStateOf("")
+    var networkCardPasswords by mutableStateOf("")
+    var networkCardMac by mutableStateOf("")
+    var networkCardName by mutableStateOf("")
+    var advancedExpanded by mutableStateOf(false)
 
     var operation by mutableStateOf(ConnectWifiOperation.TEST_CONNECTIVITY)
 
@@ -414,6 +379,26 @@ private class ConnectWifiConfigurationFormState {
         is ConnectWifiSheetContent.Network -> when (operation) {
             ConnectWifiOperation.TEST_CONNECTIVITY -> createConfig()?.let {
                 ConnectWifiSheetSubmission.TestConnectivity(password, it)
+            }
+            ConnectWifiOperation.TEST_CONNECTIVITY_NETWORK_CARD -> createConfig()?.let { config ->
+                val passwords = networkCardPasswords.replace("\r\n", "\n").split('\n')
+                val mac = networkCardMac.trim().takeIf(String::isNotEmpty)
+                validationMessage = when {
+                    !content.allowNetworkCardTest -> "网卡测试仅用于普通模式"
+                    passwords.any { it.toByteArray(Charsets.UTF_8).size !in 8..63 } ->
+                        "每行密码需为 8～63 字节，空行也会被视为一项密码"
+                    mac != null && !Regex("(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$").matches(mac) ->
+                        "MAC 格式应为 00:11:45:14:19:1a"
+                    mac != null && ((mac.substringBefore(':').toInt(16) and 1) != 0 ||
+                        mac.equals("00:00:00:00:00:00", ignoreCase = true)) -> "MAC 必须为有效单播地址"
+                    else -> null
+                }
+                if (validationMessage != null) null else ConnectWifiSheetSubmission.NetworkCardTest(
+                    passwords = passwords,
+                    mac = mac,
+                    name = networkCardName.takeIf(String::isNotBlank),
+                    config = config,
+                )
             }
             ConnectWifiOperation.SAVE_ONLY -> {
                 validationMessage = null
@@ -533,12 +518,16 @@ private fun ConnectWifiConfigurationContent(
 
         if (content is ConnectWifiSheetContent.Network) {
             item(key = "network-password") {
+                val cardTest = formState.operation == ConnectWifiOperation.TEST_CONNECTIVITY_NETWORK_CARD
                 TextField(
-                    value = formState.password,
-                    onValueChange = { formState.password = it },
+                    value = if (cardTest) formState.networkCardPasswords else formState.password,
+                    onValueChange = {
+                        if (cardTest) formState.networkCardPasswords = it else formState.password = it
+                        formState.validationMessage = null
+                    },
                     modifier = Modifier.fillMaxWidth(),
-                    label = "密码",
-                    singleLine = true,
+                    label = if (cardTest) "M2 密码（每行一个，按 M1 到达顺序使用）" else "密码",
+                    singleLine = !cardTest,
                 )
             }
 
@@ -562,6 +551,17 @@ private fun ConnectWifiConfigurationContent(
                             formState.validationMessage = null
                         },
                     )
+                    if (content.allowNetworkCardTest) {
+                        OperationTypeRow(
+                            title = "测试连通性（网卡）",
+                            summary = "直接执行 WPA2-PSK/CCMP 握手与 DHCP，不修改保存配置；已有连接会断开",
+                            selected = formState.operation == ConnectWifiOperation.TEST_CONNECTIVITY_NETWORK_CARD,
+                            onClick = {
+                                formState.operation = ConnectWifiOperation.TEST_CONNECTIVITY_NETWORK_CARD
+                                formState.validationMessage = null
+                            },
+                        )
+                    }
                     OperationTypeRow(
                         title = "仅保存",
                         summary = "保存网络配置并关闭自动加入",
@@ -580,6 +580,52 @@ private fun ConnectWifiConfigurationContent(
                             formState.validationMessage = null
                         },
                     )
+                }
+            }
+        }
+
+        if (content is ConnectWifiSheetContent.Network &&
+            formState.operation == ConnectWifiOperation.TEST_CONNECTIVITY_NETWORK_CARD
+        ) {
+            item(key = "network-card-instructions") {
+                Text(
+                    text = "每次有效 M1 使用下一行密码发送 M2；密码行耗尽时中断。取得 IP 后立即断开，IP 与协议详情记录在任务日志中。需要 Root 和最新容器系统。",
+                    style = MiuixTheme.textStyles.body2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
+            item(key = "network-card-advanced") {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    BasicComponent(
+                        title = "高级选项",
+                        summary = if (formState.advancedExpanded) "收起 MAC 和名称设置" else "自定义 MAC 和设备名称",
+                        onClick = { formState.advancedExpanded = !formState.advancedExpanded },
+                    )
+                    AnimatedVisibility(
+                        visible = formState.advancedExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut(),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            TextField(
+                                value = formState.networkCardMac,
+                                onValueChange = { formState.networkCardMac = it; formState.validationMessage = null },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = "MAC（留空使用设备 MAC）",
+                                singleLine = true,
+                            )
+                            TextField(
+                                value = formState.networkCardName,
+                                onValueChange = { formState.networkCardName = it; formState.validationMessage = null },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = "名称（留空使用设备名称）",
+                                singleLine = true,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1038,6 +1084,8 @@ private fun ConnectWifiStage?.displayName(): String = when (this) {
     ConnectWifiStage.WPA_HANDSHAKE_4_OF_4 -> {
         "WPA 握手 4/4"
     }
+
+    ConnectWifiStage.IP_NEGOTIATION -> "获取 IP 地址"
 
     null -> {
         "加载中"

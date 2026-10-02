@@ -3,7 +3,7 @@ package io.github.bszapp.wifitoolbox.uidefault.model
 import android.net.Uri
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
@@ -29,8 +29,8 @@ class WifiListUiState(
     /** 与 WifiState 同级、独立传输的已保存 Wi-Fi 列表。 */
     val savedWifiList = controller.wifiList.savedWifiList
 
-    /** Service 保存的信息源目标与初始化状态。 */
-    val informationSourceState = controller.wifiList.informationSourceState
+    /** Service 已确认的实际网卡模式与扫描、抓取数据。 */
+    val modeState = controller.wifiList.modeState
 
     val monitorPcapExports = controller.wifiList.monitorPcapExports
 
@@ -59,7 +59,9 @@ class WifiListUiState(
 
                 // App 初次订阅时 null -> Enabled 不扫描。
                 // Disabled/Error -> Enabled 时，App 只发送扫描指令；数据刷新由扫描任务完成。
+                val mode = modeState.value
                 val shouldAutoScan =
+                    mode?.mode == WifiMode.NORMAL && !mode.hybridScanEnabled &&
                     (previous is WifiState.Data.Disabled || previous is WifiState.Error) &&
                         current is WifiState.Data.Enabled &&
                         !current.isScanning
@@ -80,11 +82,15 @@ class WifiListUiState(
 
     fun updateSavedNetworks() = controller.wifiList.updateSavedNetworks()
 
-    fun setInformationSource(source: WifiInformationSource) =
-        controller.wifiList.setInformationSource(source)
+    fun setMode(mode: WifiMode) =
+        controller.wifiList.setMode(mode)
 
-    fun enterMonitorMode(command: String, targetChannel: Int, targetFrequencyMhz: Int) =
-        controller.wifiList.enterMonitorMode(command, targetChannel, targetFrequencyMhz)
+    fun setHybridScanEnabled(enabled: Boolean) = controller.wifiList.setHybridScanEnabled(enabled)
+    fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false) =
+        controller.wifiList.setMonitorCapture(enabled, frequencyMhz, hopping)
+    fun clearMonitorCapture(handshakesOnly: Boolean) = controller.wifiList.clearMonitorCapture(handshakesOnly)
+
+    fun enterMonitorMode(command: String) = controller.wifiList.enterMonitorMode(command)
 
     fun exportAllMonitorPcap() = controller.wifiList.exportAllMonitorPcap()
 

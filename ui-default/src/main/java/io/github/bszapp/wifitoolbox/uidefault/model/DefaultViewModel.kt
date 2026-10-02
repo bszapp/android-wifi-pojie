@@ -14,7 +14,13 @@ import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskConfig
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskInput
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.uidefault.model.task.TaskTracker
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+
+data class ConnectWifiSheetCloseRequest(
+    val id: Long,
+    val sheetInstanceId: String,
+)
 
 class DefaultViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -23,6 +29,7 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     /** App 内唯一错误广播源，UI 不再监听任何 Wi-Fi 专用错误流。 */
     val errors = controller.errors
     val serviceLogs = controller.serviceLogs
+    val appLogs = controller.appLogs
     val terminals = controller.terminals
     val tasks = controller.tasks
     val containerState = controller.containers.state
@@ -35,6 +42,17 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     private val taskTracker = TaskTracker(controller.tasks, viewModelScope)
     val currentTask: StateFlow<TaskSnapshot?> = taskTracker.currentTask
     val displayedTask: StateFlow<TrackedTaskState?> = taskTracker.trackedTask
+
+    private val confirmationDialogManager =
+        UiConfirmationDialogManager(viewModelScope)
+    val confirmationDialogs = confirmationDialogManager.dialogs
+
+    private var nextConnectWifiSheetCloseRequestId = 1L
+    private val _connectWifiSheetCloseRequest =
+        MutableStateFlow<ConnectWifiSheetCloseRequest?>(null)
+    val connectWifiSheetCloseRequest:
+        StateFlow<ConnectWifiSheetCloseRequest?> =
+        _connectWifiSheetCloseRequest
 
     suspend fun startTask(request: TaskStartRequest): Long = taskTracker.startTask(request)
 
@@ -68,6 +86,92 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
         ),
     )
 
+    suspend fun startNetworkCardConnectTask(
+        ssid: String,
+        passwords: List<String>,
+        mac: String?,
+        name: String?,
+        config: ConnectWifiTaskConfig,
+    ): Long = startTask(
+        TaskStartRequest.connectWifi(
+            input = ConnectWifiTaskInput(
+                type = ConnectWifiTaskType.CONNECT_TO_NETWORK,
+                target = ConnectWifiTarget.NetworkCard(ssid, passwords, mac, name),
+            ),
+            config = config,
+        ),
+    )
+
+    fun showConfirmationDialog(
+        title: String,
+        content: String,
+        cancelButtonText: String = "取消",
+        confirmButtonText: String = "确定",
+        onDismissed: suspend () -> Unit = {},
+        onCancelled: suspend () -> Unit = {},
+        onConfirmed: suspend () -> Unit = {},
+        onDismissFinished: suspend () -> Unit = {},
+    ): Long = confirmationDialogManager.show(
+        title = title,
+        content = content,
+        cancelButtonText = cancelButtonText,
+        confirmButtonText = confirmButtonText,
+        onDismissed = onDismissed,
+        onCancelled = onCancelled,
+        onConfirmed = onConfirmed,
+        onDismissFinished = onDismissFinished,
+    )
+
+    fun dismissConfirmationDialog(dialogId: Long) {
+        confirmationDialogManager.dismiss(dialogId)
+    }
+
+    fun cancelConfirmationDialog(dialogId: Long) {
+        confirmationDialogManager.cancel(dialogId)
+    }
+
+    fun confirmConfirmationDialog(dialogId: Long) {
+        confirmationDialogManager.confirm(dialogId)
+    }
+
+    fun confirmationDialogDismissFinished(dialogId: Long) {
+        confirmationDialogManager.onDismissFinished(dialogId)
+    }
+
+    fun confirmSavedConfigurationConnectivityTest(
+        sheetInstanceId: String,
+        ssid: String,
+        password: String,
+        config: ConnectWifiTaskConfig,
+    ) {
+        showConfirmationDialog(
+            title = "确认开始测试",
+            content = "该网络存在已保存配置。开始后会永久删除原配置，测试结束时只删除测试配置，不会恢复原配置。确定继续？",
+            confirmButtonText = "开始",
+            onConfirmed = {
+                runCatching {
+                    startTemporaryNetworkConnectTask(
+                        ssid = ssid,
+                        password = password,
+                        config = config,
+                    )
+                }.onSuccess {
+                    _connectWifiSheetCloseRequest.value =
+                        ConnectWifiSheetCloseRequest(
+                            id = nextConnectWifiSheetCloseRequestId++,
+                            sheetInstanceId = sheetInstanceId,
+                        )
+                }
+            },
+        )
+    }
+
+    fun consumeConnectWifiSheetCloseRequest(requestId: Long) {
+        if (_connectWifiSheetCloseRequest.value?.id == requestId) {
+            _connectWifiSheetCloseRequest.value = null
+        }
+    }
+
     fun displayTask(taskId: Long) = taskTracker.track(taskId)
 
     fun stopDisplayedTask() = taskTracker.stopTrackedTask()
@@ -82,7 +186,4 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     fun uninstallContainer() = controller.containers.uninstall()
 
     //TODO: 废弃的API
-    fun startContainerTerminal() = controller.containers.startTerminal()
-    fun stopContainerTerminal() = controller.containers.stopTerminal()
-    fun runContainerWifiScan() = controller.containers.runWifiScan()
 }

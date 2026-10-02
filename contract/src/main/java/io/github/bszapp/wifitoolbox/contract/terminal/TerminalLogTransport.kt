@@ -57,7 +57,7 @@ object TerminalLogTransport {
             val oldestAvailableId = input.readLong()
             val latestId = input.readLong()
             val lineCount = input.readInt()
-            require(lineCount in 0..MAX_ENTRY_COUNT) { "终端日志总行数非法：$lineCount" }
+            require(lineCount >= 0) { "终端日志总行数非法：$lineCount" }
             val count = input.readInt()
             require(count in 0..MAX_ENTRY_COUNT) { "终端日志批次行数非法：$count" }
 

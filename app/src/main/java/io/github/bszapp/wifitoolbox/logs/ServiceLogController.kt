@@ -78,6 +78,12 @@ class ServiceLogController(
                 coroutineScope {
                     LogSource.entries.forEach { source ->
                         launch {
+                            val initial = when (source) {
+                                LogSource.Service -> service.getServiceLogRange()
+                                LogSource.SystemWifi -> service.getSystemWifiLogRange()
+                            }
+                            require(initial.size == 2)
+                            syncTo(binding, source, LogRange(initial[0], initial[1]))
                             for (range in binding.updates.getValue(source)) {
                                 if (!isCurrent(binding)) break
                                 syncTo(binding, source, range)
@@ -150,46 +156,36 @@ class ServiceLogController(
         announcedRange: LogRange,
     ) {
         val state = state(source)
-        var oldestAvailableId = announcedRange.oldestAvailableId
-        var targetId = announcedRange.latestId
-        applyVisibleRange(binding, state, oldestAvailableId, targetId)
-
-        while (isCurrent(binding) && oldestAvailableId <= targetId) {
-            var localEntries = state.mutableEntries.value
-            val fromId = maxOf(
-                oldestAvailableId,
-                localEntries.lastOrNull()?.id?.plus(1L) ?: oldestAvailableId,
-            )
-            if (fromId > targetId) return
-
-            val toId = min(fromId + FETCH_SIZE - 1L, targetId)
-            val descriptor = when (source) {
-                LogSource.Service -> binding.service.getServiceLogs(fromId, toId)
-                LogSource.SystemWifi -> binding.service.getSystemWifiLogs(fromId, toId)
+        var oldest = announcedRange.oldestAvailableId
+        var latest = announcedRange.latestId
+        val existing = state.mutableEntries.value
+        val local = ArrayList(existing.filter { it.id in oldest..latest })
+        if (local.isNotEmpty() && local.first().id != oldest) local.clear()
+        var from = local.lastOrNull()?.id?.plus(1L) ?: oldest
+        while (isCurrent(binding) && from <= latest) {
+            val to = min(from + FETCH_SIZE - 1L, latest)
+            val fd = when (source) {
+                LogSource.Service -> binding.service.getServiceLogs(from, to)
+                LogSource.SystemWifi -> binding.service.getSystemWifiLogs(from, to)
             }
-            val batch = ServiceLogTransport.decode(descriptor)
+            val batch = ServiceLogTransport.decode(fd)
             if (!isCurrent(binding)) return
-
-            oldestAvailableId = maxOf(oldestAvailableId, batch.oldestAvailableId)
-            targetId = maxOf(targetId, batch.latestId)
-            applyVisibleRange(binding, state, oldestAvailableId, targetId)
-            if (oldestAvailableId > targetId) return
-
-            localEntries = state.mutableEntries.value
-            val fetched = batch.entries.filter { it.id >= oldestAvailableId }
-            if (fetched.isEmpty()) {
-                if (fromId < oldestAvailableId) continue
-                return
+            if (batch.oldestAvailableId > oldest) {
+                oldest = batch.oldestAvailableId
+                local.clear()
+                from = oldest
+                latest = batch.latestId
+                continue
             }
-
-            state.mutableEntries.value = if (
-                localEntries.isEmpty() ||
-                fetched.first().id == localEntries.last().id + 1L
-            ) {
-                localEntries + fetched
-            } else {
-                fetched
-            }
+            if (batch.entries.isEmpty()) break
+            require(batch.entries.first().id == from) { "日志范围返回不连续" }
+            local.addAll(batch.entries)
+            from = batch.entries.last().id + 1L
+        }
+        synchronized(lock) {
+            if (activeBinding !== binding) return
+            state.mutableEntries.value = local.toList()
+            state.mutableLatestId.value = latest
         }
     }
 
@@ -205,13 +201,14 @@ class ServiceLogController(
         } else {
             state.mutableEntries.value.dropWhile { it.id < oldestAvailableId }
         }
-        if (latestId > state.mutableLatestId.value) state.mutableLatestId.value = latestId
+        state.mutableLatestId.value = latestId
     }
 
     private fun clearLocalEntries() {
         sourceStates.values.forEach { state ->
             state.mutableEntries.value = emptyList()
-            state.mutableLatestId.value = 0L
+            state.mutableLatestId.value = -1L
+            state.mutableRawViewEnabled.value = false
         }
     }
 
@@ -239,7 +236,7 @@ class ServiceLogController(
     private class LogSourceState {
         val mutableEntries = MutableStateFlow<List<ServiceLogEntry>>(emptyList())
         val entries = mutableEntries.asStateFlow()
-        val mutableLatestId = MutableStateFlow(0L)
+        val mutableLatestId = MutableStateFlow(-1L)
         val latestId = mutableLatestId.asStateFlow()
         val mutableRawViewEnabled = MutableStateFlow(false)
         val rawViewEnabled = mutableRawViewEnabled.asStateFlow()

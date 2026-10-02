@@ -2,7 +2,13 @@
 """Incrementally analyze and export a growing monitor-mode pcap file."""
 
 import argparse
+import copy
+import uuid
 import base64
+import queue
+import signal
+import subprocess
+import sys
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -17,10 +23,12 @@ from scapy.layers.dns import DNS, DNSRR
 from scapy.layers.dot11 import Dot11, Dot11Elt, RadioTap
 from scapy.layers.eap import EAPOL
 from scapy.layers.inet import UDP
+from monitor_diagnostics import interface_snapshot, process_snapshot
 
 
 PUBLISH_INTERVAL_SECONDS = 0.05
 REALTIME_WINDOW_SECONDS = 1.0
+BYTE_RATE_WINDOW_SECONDS = 5.0
 ANALYSIS_BATCH_MAX_BYTES = 1024 * 1024
 ANALYSIS_BATCH_MAX_PACKETS = 2048
 PCAP_GLOBAL_HEADER_SIZE = 24
@@ -38,6 +46,68 @@ WPA_VENDOR_PREFIX = b"\x00\x50\xf2\x01"
 RSN_AKM_OUI = b"\x00\x0f\xac"
 WPA_AKM_OUI = b"\x00\x50\xf2"
 PSK_AKM_TYPE = 2
+
+
+def diagnostic(event, **fields):
+    """独立于事件 FIFO 输出；仅记录进度元数据，不输出包体或凭据。"""
+    try:
+        print("[MonitorDiagnostic] " + json.dumps(dict(
+            timeUnixMillis=int(time.time() * 1000), pid=os.getpid(),
+            thread=threading.current_thread().name, event=event, **fields),
+            ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+class MonitorDiagnostics:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.phases = {}
+        self.sent_events = 0
+        self.sent_characters = 0
+        self.last_sent = None
+        self.stop_event = threading.Event()
+
+    def phase(self, owner, stage, **details):
+        with self.lock:
+            self.phases[owner] = dict(stage=stage, since=time.monotonic(), **details)
+
+    def done(self, owner):
+        with self.lock:
+            self.phases.pop(owner, None)
+
+    def sent(self, event_type, source, character_count):
+        with self.lock:
+            self.sent_events += 1
+            self.sent_characters += character_count
+            self.last_sent = dict(type=event_type, source=source,
+                                  atUnixMillis=int(time.time() * 1000))
+
+    def heartbeat(self, snapshot):
+        while not self.stop_event.wait(1.0):
+            now = time.monotonic()
+            with self.lock:
+                fields = dict(phases={owner: dict(
+                    ageMillis=int((now - state["since"]) * 1000),
+                    **{key: value for key, value in state.items() if key != "since"})
+                    for owner, state in self.phases.items()},
+                    sentEvents=self.sent_events, sentCharacters=self.sent_characters,
+                    lastSent=self.last_sent)
+            try:
+                fields.update(snapshot())
+                diagnostic("heartbeat", **fields)
+            except Exception as error:
+                diagnostic("heartbeatFailed", errorType=type(error).__name__)
+
+
+DIAGNOSTICS = MonitorDiagnostics()
+
+
+def diagnostic_file_size(path):
+    try:
+        return os.path.getsize(path) if path is not None else None
+    except OSError:
+        return None
 
 
 def subtype_definitions(group_id, names):
@@ -530,10 +600,10 @@ def update_device_identity(device, name, priority):
 
 
 def byte_rate(samples, now):
-    cutoff = now - REALTIME_WINDOW_SECONDS
+    cutoff = now - BYTE_RATE_WINDOW_SECONDS
     while samples and samples[0][0] < cutoff:
         samples.popleft()
-    return sum(sample[1] for sample in samples)
+    return int(sum(sample[1] for sample in samples) / BYTE_RATE_WINDOW_SECONDS)
 
 
 def add_frame_counter(device, subtype_id, frame_bytes):
@@ -1070,8 +1140,9 @@ def handshake_capture_quality(record, hc22000):
 
 
 class GrowingPcapReader:
-    def __init__(self, path):
+    def __init__(self, path, source_stream=None):
         self.path = path
+        self.source_stream = source_stream
         self.stream = None
         self.endian = None
         self.link_type = None
@@ -1094,14 +1165,18 @@ class GrowingPcapReader:
 
     def _open_if_ready(self):
         if self.stream is not None:
-            if os.path.getsize(self.path) < self.offset:
+            if self.path is not None and os.path.getsize(self.path) < self.offset:
                 self._reset()
             else:
                 return True
-        try:
-            stream = open(self.path, "rb", buffering=0)
-        except FileNotFoundError:
-            return False
+        if self.source_stream is not None:
+            stream = self.source_stream
+            stream.seek(0)
+        else:
+            try:
+                stream = open(self.path, "rb", buffering=0)
+            except FileNotFoundError:
+                return False
         header = stream.read(PCAP_GLOBAL_HEADER_SIZE)
         if len(header) < PCAP_GLOBAL_HEADER_SIZE:
             stream.close()
@@ -1173,10 +1248,26 @@ class EventWriter:
         self.lock = threading.Lock()
 
     def write(self, event):
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with self.lock:
-            self.stream.write(line)
-            self.stream.flush()
+        owner = "fifo:" + threading.current_thread().name
+        event_type, source = event.get("type"), event.get("source")
+        started = time.monotonic()
+        DIAGNOSTICS.phase(owner, "encodeEvent", type=event_type, source=source)
+        try:
+            line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+            DIAGNOSTICS.phase(owner, "waitWriterLock", type=event_type, source=source,
+                              characters=len(line))
+            with self.lock:
+                DIAGNOSTICS.phase(owner, "writeEvent", type=event_type, source=source,
+                                  characters=len(line))
+                self.stream.write(line)
+                self.stream.flush()
+            DIAGNOSTICS.sent(event_type, source, len(line))
+            elapsed = int((time.monotonic() - started) * 1000)
+            if elapsed >= 1000:
+                diagnostic("slowFifoWrite", type=event_type, source=source,
+                           characters=len(line), elapsedMillis=elapsed)
+        finally:
+            DIAGNOSTICS.done(owner)
 
 
 def unique_export_path(directory):
@@ -1188,25 +1279,25 @@ def unique_export_path(directory):
         timestamp += 1
 
 
-def copy_prefix(source_path, output, byte_count):
-    remaining = byte_count
-    with open(source_path, "rb") as source:
-        while remaining > 0:
-            chunk = source.read(min(1024 * 1024, remaining))
-            if not chunk:
-                raise IOError("原始 pcap 在导出过程中提前结束")
-            output.write(chunk)
-            remaining -= len(chunk)
+def copy_prefix(source, output, byte_count, write_header=True):
+    start = 0 if write_header else PCAP_GLOBAL_HEADER_SIZE
+    source.seek(start)
+    remaining = byte_count - start
+    while remaining > 0:
+        chunk = source.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise IOError("原始 pcap 在导出过程中提前结束")
+        output.write(chunk)
+        remaining -= len(chunk)
 
 
-def export_filtered(source_path, output, cutoff, bssid, device_mac, subtype_ids):
-    reader = GrowingPcapReader(source_path)
+def export_filtered(source, output, cutoff, bssid, device_mac, subtype_ids, write_header=True):
+    reader = GrowingPcapReader(None, source)
     try:
         if not reader._open_if_ready():
             raise IOError("原始 pcap 文件头尚未写入完成")
-        with open(source_path, "rb") as source:
-            global_header = source.read(PCAP_GLOBAL_HEADER_SIZE)
-        output.write(global_header)
+        if write_header:
+            output.write(reader.global_header)
         while reader.offset < cutoff:
             records = reader.read_available(
                 limit_offset=cutoff,
@@ -1256,6 +1347,8 @@ def handshake_event_metadata(record, hc22000=None):
         "id": record["id"],
         "bssid": record["bssid"],
         "deviceMac": record["deviceMac"],
+        "startUnixMillis": record["startUnixMillis"],
+        "lastUnixMillis": record["lastUnixMillis"],
         "status": record["status"],
         "captureQuality": handshake_capture_quality(record, hc22000),
         "capturedSteps": sorted(
@@ -1377,8 +1470,7 @@ def handoff_disconnection(
 
 def run_export(
     command,
-    source_path,
-    cutoff,
+    sources,
     allowed_directory,
     event_writer,
 ):
@@ -1387,7 +1479,7 @@ def run_export(
         requested_directory = os.path.realpath(str(command.get("outputDirectory", "")))
         if requested_directory != allowed_directory:
             raise ValueError("导出目录不在监听模式临时目录内")
-        if cutoff < PCAP_GLOBAL_HEADER_SIZE:
+        if not sources:
             raise IOError("pcap 文件头尚未写入完成")
         os.makedirs(allowed_directory, exist_ok=True)
         os.chmod(allowed_directory, 0o755)
@@ -1396,7 +1488,8 @@ def run_export(
         mode = command.get("mode")
         with open(partial_path, "wb") as output:
             if mode == "all":
-                copy_prefix(source_path, output, cutoff)
+                for index, (source, cutoff) in enumerate(sources):
+                    copy_prefix(source, output, cutoff, write_header=index == 0)
             elif mode == "filtered":
                 bssid = normalized_unicast_mac(command.get("bssid"))
                 device_mac = normalized_unicast_mac(command.get("deviceMac"))
@@ -1405,14 +1498,9 @@ def run_export(
                     raise ValueError("局部导出缺少有效的接入点或设备 MAC")
                 if not subtype_ids or not subtype_ids.issubset(EXPORT_SUBTYPE_IDS):
                     raise ValueError("局部导出的帧子类型无效")
-                export_filtered(
-                    source_path,
-                    output,
-                    cutoff,
-                    bssid,
-                    device_mac,
-                    subtype_ids,
-                )
+                for index, (source, cutoff) in enumerate(sources):
+                    export_filtered(source, output, cutoff, bssid, device_mac,
+                                    subtype_ids, write_header=index == 0)
             else:
                 raise ValueError(f"未知导出模式: {mode}")
             output.flush()
@@ -1441,18 +1529,545 @@ def run_export(
                 "message": str(error) or error.__class__.__name__,
             }
         )
+    finally:
+        for source, _ in sources:
+            source.close()
+
+
+class CaptureSession:
+    """tcpdump 的 stdout 为 pcap；仅追加完整记录，暂停后仍保留主文件。"""
+    def __init__(self, path, writer):
+        self.path = path
+        self.writer = writer
+        self.process = None
+        self.worker = None
+        self.analyzed_offset = 0
+        self.copied_packets = 0
+        self.copied_bytes = 0
+        self.last_packet_unix_millis = None
+
+    def start(self):
+        if self.process is not None:
+            return
+        diagnostic("captureStartRequested", analyzedOffset=self.analyzed_offset)
+        self.process = subprocess.Popen(
+            ["tcpdump", "-U", "-i", "wlan0", "-w", "-"],
+            stdout=subprocess.PIPE, stderr=None)
+        process = self.process
+        diagnostic("captureProcessStarted", tcpdumpPid=process.pid)
+        self.worker = threading.Thread(target=self._copy, args=(process,),
+                                       name="capture-copy", daemon=True)
+        self.worker.start()
+        self.writer.write({"type": "captureState", "capturing": True})
+
+    def _copy(self, process):
+        try:
+            DIAGNOSTICS.phase("copy", "readGlobalHeader", tcpdumpPid=process.pid)
+            header = process.stdout.read(24)
+            if len(header) != 24:
+                raise IOError("tcpdump 没有返回完整 pcap 文件头")
+            endian = "<" if header[:4] in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1") else ">"
+            with open(self.path, "ab", buffering=0) as output:
+                if output.tell() == 0:
+                    output.write(header)
+                while True:
+                    DIAGNOSTICS.phase("copy", "readPacketHeader", tcpdumpPid=process.pid)
+                    record = process.stdout.read(16)
+                    if not record:
+                        diagnostic("captureStreamEnded", tcpdumpPid=process.pid)
+                        break
+                    if len(record) != 16:
+                        diagnostic("capturePartialHeader", tcpdumpPid=process.pid,
+                                   receivedBytes=len(record))
+                        break
+                    length = struct.unpack(endian + "IIII", record)[2]
+                    if length > MAX_CAPTURED_PACKET_SIZE:
+                        raise IOError("tcpdump 返回异常包长度")
+                    DIAGNOSTICS.phase("copy", "readPayload", tcpdumpPid=process.pid,
+                                      expectedBytes=length)
+                    payload = process.stdout.read(length)
+                    if len(payload) != length:
+                        diagnostic("capturePartialPayload", tcpdumpPid=process.pid,
+                                   expectedBytes=length, receivedBytes=len(payload))
+                        break
+                    DIAGNOSTICS.phase("copy", "backpressure", tcpdumpPid=process.pid)
+                    while output.tell() - self.analyzed_offset >= ANALYSIS_BATCH_MAX_BYTES and self.process is process:
+                        time.sleep(0.01)
+                    DIAGNOSTICS.phase("copy", "appendRecord", tcpdumpPid=process.pid)
+                    output.write(record + payload)
+                    self.copied_packets += 1
+                    self.copied_bytes += 16 + length
+                    seconds, fraction = struct.unpack(endian + "IIII", record)[:2]
+                    divisor = 1_000_000 if header[:4] in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d") else 1000
+                    self.last_packet_unix_millis = seconds * 1000 + fraction // divisor
+            DIAGNOSTICS.phase("copy", "waitProcessExit", tcpdumpPid=process.pid)
+            code = process.wait()
+            diagnostic("captureProcessExited", tcpdumpPid=process.pid, exitCode=code,
+                       stopRequested=self.process is not process)
+            if self.process is process:
+                self.process = None
+                self.writer.write({"type": "captureState", "capturing": False})
+                self.writer.write({"type": "commandFailed", "message": f"tcpdump 意外退出，退出码 {code}"})
+        except Exception as error:
+            diagnostic("captureCopyFailed", tcpdumpPid=process.pid, errorType=type(error).__name__)
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
+            process.stdout.close()
+            if self.process is process:
+                self.process = None
+                self.writer.write({"type": "captureState", "capturing": False})
+                self.writer.write({"type": "commandFailed", "message": str(error)})
+        finally:
+            DIAGNOSTICS.done("copy")
+
+    def stop(self):
+        process = self.process
+        self.process = None
+        if process is not None:
+            started = time.monotonic()
+            diagnostic("captureStopBegin", tcpdumpPid=process.pid)
+            DIAGNOSTICS.phase("capture-stop", "terminate", tcpdumpPid=process.pid)
+            process.terminate()
+            DIAGNOSTICS.phase("capture-stop", "waitProcessExit", tcpdumpPid=process.pid)
+            process.wait()
+            if self.worker is not None:
+                DIAGNOSTICS.phase("capture-stop", "joinCopyWorker", tcpdumpPid=process.pid)
+                self.worker.join()
+            process.stdout.close()
+            DIAGNOSTICS.done("capture-stop")
+            diagnostic("captureStopEnd", tcpdumpPid=process.pid, exitCode=process.returncode,
+                       elapsedMillis=int((time.monotonic() - started) * 1000))
+
+
+class CaptureAnalysis:
+    """同一解析实现分别处理完整流与实际保留流，不从旧镜像拼装清理结果。"""
+    def __init__(self):
+        self.access_points = {}
+        self.ssid_access_points = {}
+        self.device_identities = {}
+        self.dirty_access_points = set()
+        self.dirty_devices = set()
+        self.realtime_access_points = set()
+        self.realtime_devices = set()
+        self.handshake_device_keys = set()
+        self.next_handshake_id = 1
+        self.next_disconnection_id = 1
+        self.next_packet_id = 0
+        self.signal_samples = 0
+        self.last_signal_unix_millis = None
+
+    def fork(self):
+        # 包体 bytes 为不可变对象，deepcopy 共享它们；只分离可变解析状态。
+        return copy.deepcopy(self)
+
+    def consume(self, record, packet, pcap_header, event_writer):
+        payload, recorded_bytes, link_type, _, packet_header, packet_timestamp = record
+        # 分段切换后物理偏移会归零，使用单调 ID 标识握手证据与上下文。
+        self.next_packet_id += 1
+        packet_start = self.next_packet_id
+        if packet is None:
+            return False
+        packet_record = (packet_start, packet_header, payload)
+
+        ssid = packet_ssid(packet)
+        ssid_bytes = ssid_element(packet) if ssid else None
+        if ssid_bytes:
+            for known_bssid in tuple(self.ssid_access_points.get(ssid_bytes, ())):
+                known_access_point = self.access_points.get(known_bssid)
+                if known_access_point is None:
+                    continue
+                known_access_point["ssidContextPacket"] = packet_record
+                active_device_macs = (
+                    device_mac
+                    for active_bssid, device_mac in self.handshake_device_keys
+                    if active_bssid == known_bssid
+                )
+                add_context_to_handshake_records(
+                    known_access_point,
+                    packet_record,
+                    ssid_bytes=ssid_bytes,
+                    has_security=False,
+                    device_macs=active_device_macs,
+                )
+
+        bssid = packet_bssid(packet)
+        if bssid is not None:
+            access_point = self.access_points.setdefault(bssid, empty_access_point(bssid))
+            self.dirty_access_points.add(bssid)
+            if ssid:
+                previous_ssid_bytes = access_point["ssidBytes"]
+                access_point["ssid"] = ssid
+                access_point["ssidBytes"] = ssid_bytes
+                access_point["ssidContextPacket"] = packet_record
+                if previous_ssid_bytes != ssid_bytes:
+                    if previous_ssid_bytes:
+                        previous_bssids = self.ssid_access_points.get(previous_ssid_bytes)
+                        if previous_bssids is not None:
+                            previous_bssids.discard(bssid)
+                            if not previous_bssids:
+                                self.ssid_access_points.pop(previous_ssid_bytes, None)
+                    if ssid_bytes:
+                        self.ssid_access_points.setdefault(ssid_bytes, set()).add(bssid)
+            visibility = beacon_visibility(packet)
+            if visibility is not None:
+                access_point["ssidVisibility"] = visibility
+            dot11 = packet.getlayer(Dot11)
+            management_subtype = (
+                int(dot11.subtype)
+                if dot11 is not None and int(dot11.type) == 0
+                else None
+            )
+            protocols = packet_security_protocols(packet)
+            access_point["securityProtocols"].update(protocols)
+            if management_subtype in (0, 2, 5, 8):
+                if protocols:
+                    access_point["securityContextPacket"] = packet_record
+                if ssid or protocols:
+                    active_device_macs = (
+                        device_mac
+                        for active_bssid, device_mac in self.handshake_device_keys
+                        if active_bssid == bssid
+                    )
+                    add_context_to_handshake_records(
+                        access_point,
+                        packet_record,
+                        ssid_bytes=ssid_bytes,
+                        has_security=bool(protocols),
+                        device_macs=active_device_macs,
+                    )
+            transmitter = normalized_unicast_mac(dot11.addr2) if dot11 else None
+            signal_dbm = packet_signal_dbm(packet)
+            if transmitter == bssid:
+                add_signal_sample(
+                    access_point["signal"], packet_timestamp, signal_dbm
+                )
+                if signal_dbm is not None:
+                    self.signal_samples += 1
+                    self.last_signal_unix_millis = int(packet_timestamp * 1000)
+                    self.realtime_access_points.add(bssid)
+
+        dot11 = packet.getlayer(Dot11)
+        transmitter = normalized_unicast_mac(dot11.addr2) if dot11 else None
+        wps_name, wps_priority = wps_device_identity(packet)
+        if transmitter and wps_name:
+            previous = self.device_identities.get(transmitter)
+            if previous is None or wps_priority > previous[1]:
+                self.device_identities[transmitter] = (wps_name, wps_priority)
+                for known_access_point in self.access_points.values():
+                    known_device = known_access_point["devices"].get(transmitter)
+                    if known_device is not None:
+                        update_device_identity(
+                            known_device, wps_name, wps_priority
+                        )
+                        self.dirty_devices.add(
+                            (known_access_point["bssid"], transmitter)
+                        )
+
+        relation = packet_device_relation(
+            packet,
+            known_bssids=self.access_points.keys(),
+        )
+        if relation is None:
+            return False
+        bssid, device_mac, direction = relation
+        access_point = self.access_points.setdefault(bssid, empty_access_point(bssid))
+        self.dirty_access_points.add(bssid)
+        device = access_point["devices"].setdefault(
+            device_mac, empty_device(device_mac)
+        )
+        device_key = (bssid, device_mac)
+        self.dirty_devices.add(device_key)
+        frame_bytes = packet_frame_bytes(packet, recorded_bytes)
+        subtype_id = frame_subtype_id(packet)
+        add_frame_counter(device, subtype_id, frame_bytes)
+        if subtype_id in ("management.10", "management.12"):
+            handoff_disconnection(
+                pcap_header=pcap_header,
+                event_writer=event_writer,
+                disconnection_id=self.next_disconnection_id,
+                bssid=bssid,
+                device_mac=device_mac,
+                packet=packet,
+                packet_record=packet_record,
+                timestamp_millis=int(packet_timestamp * 1000),
+            )
+            self.next_disconnection_id += 1
+        previous_ssid_bytes = access_point["ssidBytes"]
+        self.next_handshake_id = process_handshake_packet(
+            access_point=access_point,
+            device=device,
+            bssid=bssid,
+            device_mac=device_mac,
+            packet=packet,
+            subtype_id=subtype_id,
+            transmitter=transmitter,
+            packet_record=packet_record,
+            packet_timestamp=packet_timestamp,
+            next_handshake_id=self.next_handshake_id,
+        )
+        current_ssid_bytes = access_point["ssidBytes"]
+        if previous_ssid_bytes != current_ssid_bytes:
+            if previous_ssid_bytes:
+                previous_bssids = self.ssid_access_points.get(previous_ssid_bytes)
+                if previous_bssids is not None:
+                    previous_bssids.discard(bssid)
+                    if not previous_bssids:
+                        self.ssid_access_points.pop(previous_ssid_bytes, None)
+            if current_ssid_bytes:
+                self.ssid_access_points.setdefault(current_ssid_bytes, set()).add(bssid)
+        if device["handshakes"]:
+            self.handshake_device_keys.add(device_key)
+        if direction == "upload" and subtype_id != "data.eapol":
+            device["uploadSamples"].append((packet_timestamp, frame_bytes))
+            self.realtime_devices.add(device_key)
+        elif direction == "download" and subtype_id != "data.eapol":
+            device["downloadSamples"].append((packet_timestamp, frame_bytes))
+            self.realtime_devices.add(device_key)
+
+        if transmitter == device_mac:
+            signal_dbm = packet_signal_dbm(packet)
+            add_signal_sample(
+                device["signal"], packet_timestamp, signal_dbm
+            )
+            if signal_dbm is not None:
+                self.signal_samples += 1
+                self.last_signal_unix_millis = int(packet_timestamp * 1000)
+                self.realtime_devices.add(device_key)
+
+        identity_candidates = [dhcp_device_identity(packet)]
+        cached_identity = self.device_identities.get(device_mac)
+        if cached_identity is not None:
+            identity_candidates.append(cached_identity)
+        if direction == "upload":
+            identity_candidates.append(mdns_device_identity(packet))
+        for name, priority in identity_candidates:
+            update_device_identity(device, name, priority)
+
+        return any(packet_start in value["packetOffsets"] for value in device["handshakes"])
+
+    def publish(self, pcap_header, event_writer, now):
+        finish_timed_out_handshakes(
+            self.access_points,
+            self.handshake_device_keys,
+            int(now * 1000),
+        )
+        self.handshake_device_keys = handoff_handshake_updates(
+            self.access_points,
+            self.handshake_device_keys,
+            pcap_header,
+            event_writer,
+        )
+
+        candidate_devices = self.dirty_devices | self.realtime_devices
+        devices_by_bssid = {}
+        for candidate_bssid, candidate_device_mac in candidate_devices:
+            devices_by_bssid.setdefault(candidate_bssid, set()).add(
+                candidate_device_mac
+            )
+        candidate_bssids = (
+            self.dirty_access_points
+            | self.realtime_access_points
+            | set(devices_by_bssid)
+        )
+        next_realtime_access_points = set()
+        next_realtime_devices = set()
+        access_point_updates = []
+        for candidate_bssid in sorted(candidate_bssids):
+            access_point = self.access_points.get(candidate_bssid)
+            if access_point is None:
+                continue
+            signal = signal_snapshot(access_point["signal"], now)
+            if access_point["signal"]["samples"]:
+                next_realtime_access_points.add(candidate_bssid)
+            access_point_signature = stable_signature(
+                {
+                    "ssid": access_point["ssid"],
+                    "ssidVisibility": access_point["ssidVisibility"],
+                    "securityProtocols": sorted(
+                        access_point["securityProtocols"]
+                    ),
+                    "signal": signal,
+                }
+            )
+            changed_device_snapshots = []
+            for device_mac in sorted(devices_by_bssid.get(candidate_bssid, ())):
+                device = access_point["devices"].get(device_mac)
+                if device is None:
+                    continue
+                snapshot = device_snapshot(device, now)
+                if (
+                    device["uploadSamples"]
+                    or device["downloadSamples"]
+                    or device["signal"]["samples"]
+                ):
+                    next_realtime_devices.add((candidate_bssid, device_mac))
+                signature = stable_signature(snapshot)
+                if signature != device["publishedSignature"]:
+                    changed_device_snapshots.append(snapshot)
+                    device["publishedSignature"] = signature
+            if (
+                access_point_signature != access_point["publishedSignature"]
+                or changed_device_snapshots
+            ):
+                access_point_updates.append(
+                    {
+                        "bssid": candidate_bssid,
+                        "ssid": access_point["ssid"],
+                        "ssidVisibility": access_point["ssidVisibility"],
+                        "securityProtocols": sorted(
+                            access_point["securityProtocols"]
+                        ),
+                        "signal": signal,
+                        "devices": changed_device_snapshots,
+                    }
+                )
+                access_point["publishedSignature"] = access_point_signature
+
+        self.dirty_access_points.clear()
+        self.dirty_devices.clear()
+        self.realtime_access_points = next_realtime_access_points
+        self.realtime_devices = next_realtime_devices
+        if access_point_updates:
+            event_writer.write(
+                {
+                    "type": "statistics",
+                    "accessPointUpdates": access_point_updates,
+                }
+            )
+
+
+class AnalysisEventWriter:
+    def __init__(self, writer, source):
+        self.writer = writer
+        self.source = source
+
+    def write(self, event):
+        self.writer.write(dict(event, source=self.source))
+
+
+class CaptureFiles:
+    """保留前缀为不可变 PCAP 段；清理只切换引用，导出时合成单个标准 PCAP。"""
+    def __init__(self, path, directory):
+        self.path = path
+        self.directory = directory
+        os.makedirs(directory, exist_ok=True)
+        self.segments = []
+        self.header = None
+        self.retained_path = None
+        self.retained_stream = None
+        self.non_handshake_bytes = 0
+        self.retired = set()
+        self.lock = threading.Lock()
+        self.deleter = ThreadPoolExecutor(max_workers=1, thread_name_prefix="capture-delete")
+        self._new_retained()
+
+    def _new_path(self):
+        return os.path.join(self.directory, str(uuid.uuid4()) + ".pcap")
+
+    def _new_retained(self):
+        self.retained_path = self._new_path()
+        self.retained_stream = open(self.retained_path, "wb")
+        if self.header is not None:
+            self.retained_stream.write(self.header)
+
+    def retain(self, record, header):
+        if self.header is None:
+            self.header = header
+            self.retained_stream.write(header)
+        self.retained_stream.write(record[4] + record[0])
+
+    def flush(self):
+        self.retained_stream.flush()
+
+    def paths(self):
+        return self.segments + [self.path]
+
+    def snapshot(self, cutoff):
+        sources = []
+        try:
+            for path in self.paths():
+                end = cutoff if path == self.path else os.path.getsize(path)
+                if end >= PCAP_GLOBAL_HEADER_SIZE:
+                    sources.append((open(path, "rb", buffering=0), end))
+            return sources
+        except Exception:
+            for stream, _ in sources:
+                stream.close()
+            raise
+
+    def _remove(self, path):
+        started = time.monotonic()
+        diagnostic("removeSegmentBegin", segment=os.path.basename(path),
+                   bytes=diagnostic_file_size(path))
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        finally:
+            with self.lock:
+                self.retired.discard(path)
+            diagnostic("removeSegmentEnd", segment=os.path.basename(path),
+                       elapsedMillis=int((time.monotonic() - started) * 1000))
+
+    def clear(self, keep):
+        started = time.monotonic()
+        diagnostic("clearFilesBegin", handshakesOnly=keep, segments=len(self.segments),
+                   tailBytes=diagnostic_file_size(self.path),
+                   retainedTailBytes=diagnostic_file_size(self.retained_path))
+        self.flush()
+        self.retained_stream.close()
+        added_segment = None
+        if keep:
+            if os.path.getsize(self.retained_path) > PCAP_GLOBAL_HEADER_SIZE:
+                self.segments.append(self.retained_path)
+                added_segment = self.retained_path
+            else:
+                self._remove(self.retained_path)
+            if os.path.exists(self.path):
+                discarded = self._new_path()
+                os.replace(self.path, discarded)
+                with self.lock:
+                    self.retired.add(discarded)
+                self.deleter.submit(self._remove, discarded)
+        else:
+            # 全部清空包括后台待删除旧段；只删除本会话记录的明确文件。
+            with self.lock:
+                obsolete = set(self.retired)
+            obsolete.update(self.segments)
+            obsolete.update((self.path, self.retained_path))
+            for path in obsolete:
+                self._remove(path)
+            self.segments.clear()
+        with open(self.path, "wb", buffering=0) as output:
+            if self.header is not None:
+                output.write(self.header)
+        self._new_retained()
+        self.non_handshake_bytes = 0
+        diagnostic("clearFilesEnd", handshakesOnly=keep, segments=len(self.segments),
+                   addedSegment=os.path.basename(added_segment) if added_segment else None,
+                   elapsedMillis=int((time.monotonic() - started) * 1000))
+        return added_segment
+
+    def close(self):
+        self.retained_stream.close()
+        self.deleter.shutdown(wait=True)
 
 
 def command_loop(
     path,
     reader,
     reader_lock,
-    source_path,
+    files,
     allowed_directory,
     event_writer,
+    commands,
 ):
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="monitor-commands")
+    DIAGNOSTICS.phase("commands", "openCommandFifo")
     with open(path, "r", encoding="utf-8") as command_pipe:
+        diagnostic("commandFifoOpened", fifoId=os.path.basename(path))
+        DIAGNOSTICS.phase("commands", "readCommand")
         for line in command_pipe:
             if not line.strip():
                 continue
@@ -1460,20 +2075,23 @@ def command_loop(
             try:
                 command = json.loads(line)
                 command_type = command.get("type")
+                diagnostic("commandReceived", type=command_type,
+                           enabled=command.get("enabled"),
+                           handshakesOnly=command.get("handshakesOnly"),
+                           requestId=command.get("requestId"), queued=commands.qsize())
+                DIAGNOSTICS.phase("commands", "dispatchCommand", type=command_type)
                 if command_type == "export":
+                    DIAGNOSTICS.phase("commands", "snapshotExport", type=command_type)
                     with reader_lock:
-                        cutoff = reader.offset
-                    executor.submit(
-                        run_export,
-                        command,
-                        source_path,
-                        cutoff,
-                        allowed_directory,
-                        event_writer,
-                    )
+                        sources = files.snapshot(reader.offset)
+                    executor.submit(run_export, command, sources, allowed_directory, event_writer)
+                elif command_type in ("capture", "clear"):
+                    commands.put(command)
+                    diagnostic("commandQueued", type=command_type, queued=commands.qsize())
                 else:
                     raise ValueError(f"未知监听模式命令: {command_type}")
             except Exception as error:
+                diagnostic("commandFailed", errorType=type(error).__name__)
                 event_writer.write(
                     {
                         "type": "commandFailed",
@@ -1481,338 +2099,213 @@ def command_loop(
                         "message": str(error) or error.__class__.__name__,
                     }
                 )
+            finally:
+                DIAGNOSTICS.phase("commands", "readCommand")
+    diagnostic("commandFifoClosed")
+    DIAGNOSTICS.done("commands")
 
 
 def main():
     args = parse_args()
     reader = GrowingPcapReader(args.pcap)
     reader_lock = threading.Lock()
-    access_points = {}
-    ssid_access_points = {}
-    device_identities = {}
-    dirty_access_points = set()
-    dirty_devices = set()
-    realtime_access_points = set()
-    realtime_devices = set()
-    handshake_device_keys = set()
-    next_handshake_id = 1
-    next_disconnection_id = 1
+    commands = queue.Queue()
+    full = CaptureAnalysis()
+    retained = CaptureAnalysis()
     next_publish = time.monotonic()
-    allowed_export_directory = os.path.realpath(
-        os.path.join(os.path.dirname(args.event_pipe), "exports")
-    )
+    pending_clear = None
+    capture = None
+    files = None
+    interface_diagnostics = None
+    next_interface_diagnostics = 0.0
+    directory = os.path.dirname(args.event_pipe)
+    allowed_export_directory = os.path.realpath(os.path.join(directory, "exports"))
+    def progress_snapshot():
+        nonlocal interface_diagnostics, next_interface_diagnostics
+        if time.monotonic() >= next_interface_diagnostics:
+            interface_diagnostics = interface_snapshot("wlan0")
+            next_interface_diagnostics = time.monotonic() + 3.0
+        tail_bytes = diagnostic_file_size(args.pcap)
+        process = capture.process if capture else None
+        clear = pending_clear
+        return dict(eventFifoId=os.path.basename(args.event_pipe),
+                    commandFifoId=os.path.basename(args.command_pipe),
+                    readerOffset=reader.offset, tailBytes=tail_bytes,
+                    unreadBytes=max(0, tail_bytes - reader.offset) if tail_bytes is not None else None,
+                    analysisBacklogBytes=max(0, tail_bytes - capture.analyzed_offset) if tail_bytes is not None and capture else None,
+                    fullPackets=full.next_packet_id, retainedPackets=retained.next_packet_id,
+                    accessPoints=len(full.access_points), activeHandshakeDevices=len(full.handshake_device_keys),
+                    signalSamples=full.signal_samples, lastSignalUnixMillis=full.last_signal_unix_millis,
+                    retainedAccessPoints=len(retained.access_points),
+                    retainedSignalSamples=retained.signal_samples,
+                    retainedLastSignalUnixMillis=retained.last_signal_unix_millis,
+                    queuedCommands=commands.qsize(), pendingClear=clear is not None,
+                    clearCutoff=clear.get("cutoff") if clear else None,
+                    tcpdumpPid=process.pid if process else None,
+                    tcpdumpState=process_snapshot(process),
+                    interfaceState=interface_diagnostics,
+                    copyWorkerAlive=capture.worker.is_alive() if capture and capture.worker else False,
+                    copiedPackets=capture.copied_packets if capture else 0,
+                    copiedBytes=capture.copied_bytes if capture else 0,
+                    lastPacketUnixMillis=capture.last_packet_unix_millis if capture else None,
+                    analyzedOffset=capture.analyzed_offset if capture else None,
+                    segments=len(files.segments) if files else 0,
+                    nonHandshakeBytes=files.non_handshake_bytes if files else 0,
+                    retainedTailBytes=diagnostic_file_size(files.retained_path) if files else None)
+    diagnostic("analysisStart", eventFifoId=os.path.basename(args.event_pipe),
+               commandFifoId=os.path.basename(args.command_pipe))
+    DIAGNOSTICS.phase("main", "openEventFifo")
+    threading.Thread(target=DIAGNOSTICS.heartbeat, args=(progress_snapshot,),
+                     name="monitor-diagnostics", daemon=True).start()
     try:
         with open(args.event_pipe, "w", encoding="utf-8", buffering=1) as event_pipe:
-            event_writer = EventWriter(event_pipe)
-            threading.Thread(
-                target=command_loop,
-                args=(
-                    args.command_pipe,
-                    reader,
-                    reader_lock,
-                    args.pcap,
-                    allowed_export_directory,
-                    event_writer,
-                ),
-                name="monitor-commands",
-                daemon=True,
-            ).start()
-
+            diagnostic("eventFifoOpened", fifoId=os.path.basename(args.event_pipe))
+            DIAGNOSTICS.phase("main", "prepareCapture")
+            writer = EventWriter(event_pipe)
+            full_writer = AnalysisEventWriter(writer, "full")
+            retained_writer = AnalysisEventWriter(writer, "retained")
+            files = CaptureFiles(args.pcap, os.path.join(directory, "capture"))
+            capture = CaptureSession(args.pcap, writer)
+            writer.write({"type": "captureFiles", "paths": files.paths()})
+            threading.Thread(target=command_loop,
+                             args=(args.command_pipe, reader, reader_lock, files,
+                                   allowed_export_directory, writer, commands),
+                             name="monitor-commands", daemon=True).start()
             while True:
-                with reader_lock:
-                    records = reader.read_available(
-                        max_packets=ANALYSIS_BATCH_MAX_PACKETS,
-                        max_bytes=ANALYSIS_BATCH_MAX_BYTES,
-                    )
-                for (
-                    payload,
-                    recorded_bytes,
-                    link_type,
-                    packet_start,
-                    packet_header,
-                    packet_timestamp,
-                ) in records:
-                    packet = decode_packet(payload, link_type)
-                    if packet is None:
-                        continue
-                    packet_record = (packet_start, packet_header, payload)
+                if pending_clear is None and not commands.empty():
+                    command = commands.get()
+                    diagnostic("commandExecuteBegin", type=command["type"],
+                               enabled=command.get("enabled"), handshakesOnly=command.get("handshakesOnly"),
+                               queued=commands.qsize(), readerOffset=reader.offset)
+                    DIAGNOSTICS.phase("main", "executeCommand", type=command["type"])
+                    try:
+                        if command["type"] == "capture":
+                            if command["enabled"]:
+                                capture.start()
+                            else:
+                                capture.stop()
+                                writer.write({"type": "captureState", "capturing": False})
+                        else:
+                            resume = capture.process is not None
+                            capture.stop()
+                            cutoff = os.path.getsize(args.pcap) if os.path.exists(args.pcap) else 0
+                            pending_clear = dict(command, resume=resume, cutoff=cutoff,
+                                                 startOffset=reader.offset)
+                            diagnostic("clearDrainBegin", handshakesOnly=command["handshakesOnly"],
+                                       resume=resume, cutoff=cutoff, startOffset=reader.offset)
+                    except Exception as error:
+                        diagnostic("commandExecuteFailed", type=command["type"],
+                                   errorType=type(error).__name__)
+                        writer.write({"type": "commandFailed", "message": str(error)})
+                        writer.write({"type": "captureState", "capturing": capture.process is not None})
+                    diagnostic("commandExecuteEnd", type=command["type"], pendingClear=pending_clear is not None)
 
-                    ssid = packet_ssid(packet)
-                    ssid_bytes = ssid_element(packet) if ssid else None
-                    if ssid_bytes:
-                        for known_bssid in tuple(ssid_access_points.get(ssid_bytes, ())):
-                            known_access_point = access_points.get(known_bssid)
-                            if known_access_point is None:
-                                continue
-                            known_access_point["ssidContextPacket"] = packet_record
-                            active_device_macs = (
-                                device_mac
-                                for active_bssid, device_mac in handshake_device_keys
-                                if active_bssid == known_bssid
-                            )
-                            add_context_to_handshake_records(
-                                known_access_point,
-                                packet_record,
-                                ssid_bytes=ssid_bytes,
-                                has_security=False,
-                                device_macs=active_device_macs,
-                            )
+                keep = pending_clear is None or pending_clear["handshakesOnly"]
+                records = []
+                if keep:
+                    DIAGNOSTICS.phase("main", "readBatch", readerOffset=reader.offset)
+                    with reader_lock:
+                        records = reader.read_available(max_packets=ANALYSIS_BATCH_MAX_PACKETS,
+                                                        max_bytes=ANALYSIS_BATCH_MAX_BYTES)
+                    if reader.global_header is not None and files.header is None:
+                        files.header = reader.global_header
+                        files.retained_stream.write(files.header)
+                    DIAGNOSTICS.phase("main", "parseBatch", packets=len(records), endOffset=reader.offset)
+                    for record in records:
+                        packet = decode_packet(record[0], record[2])
+                        evidence = full.consume(record, packet, reader.global_header, full_writer)
+                        dot11 = packet.getlayer(Dot11) if packet is not None else None
+                        candidate = packet is not None and (frame_subtype_id(packet) == "data.eapol" or (
+                            dot11 is not None and int(dot11.type) == 0 and
+                            int(dot11.subtype) in (0, 1, 2, 3, 4, 5, 8, 10, 11, 12)))
+                        if candidate or evidence:
+                            files.retain(record, reader.global_header)
+                            retained.consume(record, packet, reader.global_header, retained_writer)
+                        else:
+                            files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
+                    capture.analyzed_offset = reader.offset
 
-                    bssid = packet_bssid(packet)
-                    if bssid is not None:
-                        access_point = access_points.setdefault(bssid, empty_access_point(bssid))
-                        dirty_access_points.add(bssid)
-                        if ssid:
-                            previous_ssid_bytes = access_point["ssidBytes"]
-                            access_point["ssid"] = ssid
-                            access_point["ssidBytes"] = ssid_bytes
-                            access_point["ssidContextPacket"] = packet_record
-                            if previous_ssid_bytes != ssid_bytes:
-                                if previous_ssid_bytes:
-                                    previous_bssids = ssid_access_points.get(previous_ssid_bytes)
-                                    if previous_bssids is not None:
-                                        previous_bssids.discard(bssid)
-                                        if not previous_bssids:
-                                            ssid_access_points.pop(previous_ssid_bytes, None)
-                                if ssid_bytes:
-                                    ssid_access_points.setdefault(ssid_bytes, set()).add(bssid)
-                        visibility = beacon_visibility(packet)
-                        if visibility is not None:
-                            access_point["ssidVisibility"] = visibility
-                        dot11 = packet.getlayer(Dot11)
-                        management_subtype = (
-                            int(dot11.subtype)
-                            if dot11 is not None and int(dot11.type) == 0
-                            else None
-                        )
-                        protocols = packet_security_protocols(packet)
-                        access_point["securityProtocols"].update(protocols)
-                        if management_subtype in (0, 2, 5, 8):
-                            if protocols:
-                                access_point["securityContextPacket"] = packet_record
-                            if ssid or protocols:
-                                active_device_macs = (
-                                    device_mac
-                                    for active_bssid, device_mac in handshake_device_keys
-                                    if active_bssid == bssid
-                                )
-                                add_context_to_handshake_records(
-                                    access_point,
-                                    packet_record,
-                                    ssid_bytes=ssid_bytes,
-                                    has_security=bool(protocols),
-                                    device_macs=active_device_macs,
-                                )
-                        transmitter = normalized_unicast_mac(dot11.addr2) if dot11 else None
-                        signal_dbm = packet_signal_dbm(packet)
-                        if transmitter == bssid:
-                            add_signal_sample(
-                                access_point["signal"], packet_timestamp, signal_dbm
-                            )
-                            if signal_dbm is not None:
-                                realtime_access_points.add(bssid)
-
-                    dot11 = packet.getlayer(Dot11)
-                    transmitter = normalized_unicast_mac(dot11.addr2) if dot11 else None
-                    wps_name, wps_priority = wps_device_identity(packet)
-                    if transmitter and wps_name:
-                        previous = device_identities.get(transmitter)
-                        if previous is None or wps_priority > previous[1]:
-                            device_identities[transmitter] = (wps_name, wps_priority)
-                            for known_access_point in access_points.values():
-                                known_device = known_access_point["devices"].get(transmitter)
-                                if known_device is not None:
-                                    update_device_identity(
-                                        known_device, wps_name, wps_priority
-                                    )
-                                    dirty_devices.add(
-                                        (known_access_point["bssid"], transmitter)
-                                    )
-
-                    relation = packet_device_relation(
-                        packet,
-                        known_bssids=access_points.keys(),
-                    )
-                    if relation is None:
-                        continue
-                    bssid, device_mac, direction = relation
-                    access_point = access_points.setdefault(bssid, empty_access_point(bssid))
-                    dirty_access_points.add(bssid)
-                    device = access_point["devices"].setdefault(
-                        device_mac, empty_device(device_mac)
-                    )
-                    device_key = (bssid, device_mac)
-                    dirty_devices.add(device_key)
-                    frame_bytes = packet_frame_bytes(packet, recorded_bytes)
-                    subtype_id = frame_subtype_id(packet)
-                    add_frame_counter(device, subtype_id, frame_bytes)
-                    if subtype_id in ("management.10", "management.12"):
-                        handoff_disconnection(
-                            pcap_header=reader.global_header,
-                            event_writer=event_writer,
-                            disconnection_id=next_disconnection_id,
-                            bssid=bssid,
-                            device_mac=device_mac,
-                            packet=packet,
-                            packet_record=packet_record,
-                            timestamp_millis=int(packet_timestamp * 1000),
-                        )
-                        next_disconnection_id += 1
-                    previous_ssid_bytes = access_point["ssidBytes"]
-                    next_handshake_id = process_handshake_packet(
-                        access_point=access_point,
-                        device=device,
-                        bssid=bssid,
-                        device_mac=device_mac,
-                        packet=packet,
-                        subtype_id=subtype_id,
-                        transmitter=transmitter,
-                        packet_record=packet_record,
-                        packet_timestamp=packet_timestamp,
-                        next_handshake_id=next_handshake_id,
-                    )
-                    current_ssid_bytes = access_point["ssidBytes"]
-                    if previous_ssid_bytes != current_ssid_bytes:
-                        if previous_ssid_bytes:
-                            previous_bssids = ssid_access_points.get(previous_ssid_bytes)
-                            if previous_bssids is not None:
-                                previous_bssids.discard(bssid)
-                                if not previous_bssids:
-                                    ssid_access_points.pop(previous_ssid_bytes, None)
-                        if current_ssid_bytes:
-                            ssid_access_points.setdefault(current_ssid_bytes, set()).add(bssid)
-                    if device["handshakes"]:
-                        handshake_device_keys.add(device_key)
-                    if direction == "upload" and subtype_id != "data.eapol":
-                        device["uploadSamples"].append((packet_timestamp, frame_bytes))
-                        realtime_devices.add(device_key)
-                    elif direction == "download" and subtype_id != "data.eapol":
-                        device["downloadSamples"].append((packet_timestamp, frame_bytes))
-                        realtime_devices.add(device_key)
-
-                    if transmitter == device_mac:
-                        signal_dbm = packet_signal_dbm(packet)
-                        add_signal_sample(
-                            device["signal"], packet_timestamp, signal_dbm
-                        )
-                        if signal_dbm is not None:
-                            realtime_devices.add(device_key)
-
-                    identity_candidates = [dhcp_device_identity(packet)]
-                    cached_identity = device_identities.get(device_mac)
-                    if cached_identity is not None:
-                        identity_candidates.append(cached_identity)
-                    if direction == "upload":
-                        identity_candidates.append(mdns_device_identity(packet))
-                    for name, priority in identity_candidates:
-                        update_device_identity(device, name, priority)
-
-                monotonic_now = time.monotonic()
-                if monotonic_now >= next_publish:
-                    now = time.time()
-                    finish_timed_out_handshakes(
-                        access_points,
-                        handshake_device_keys,
-                        int(now * 1000),
-                    )
-                    handshake_device_keys = handoff_handshake_updates(
-                        access_points,
-                        handshake_device_keys,
-                        reader.global_header,
-                        event_writer,
-                    )
-
-                    candidate_devices = dirty_devices | realtime_devices
-                    devices_by_bssid = {}
-                    for candidate_bssid, candidate_device_mac in candidate_devices:
-                        devices_by_bssid.setdefault(candidate_bssid, set()).add(
-                            candidate_device_mac
-                        )
-                    candidate_bssids = (
-                        dirty_access_points
-                        | realtime_access_points
-                        | set(devices_by_bssid)
-                    )
-                    next_realtime_access_points = set()
-                    next_realtime_devices = set()
-                    access_point_updates = []
-                    for candidate_bssid in sorted(candidate_bssids):
-                        access_point = access_points.get(candidate_bssid)
-                        if access_point is None:
-                            continue
-                        signal = signal_snapshot(access_point["signal"], now)
-                        if access_point["signal"]["samples"]:
-                            next_realtime_access_points.add(candidate_bssid)
-                        access_point_signature = stable_signature(
-                            {
-                                "ssid": access_point["ssid"],
-                                "ssidVisibility": access_point["ssidVisibility"],
-                                "securityProtocols": sorted(
-                                    access_point["securityProtocols"]
-                                ),
-                                "signal": signal,
-                            }
-                        )
-                        changed_device_snapshots = []
-                        for device_mac in sorted(devices_by_bssid.get(candidate_bssid, ())):
-                            device = access_point["devices"].get(device_mac)
-                            if device is None:
-                                continue
-                            snapshot = device_snapshot(device, now)
-                            if (
-                                device["uploadSamples"]
-                                or device["downloadSamples"]
-                                or device["signal"]["samples"]
-                            ):
-                                next_realtime_devices.add((candidate_bssid, device_mac))
-                            signature = stable_signature(snapshot)
-                            if signature != device["publishedSignature"]:
-                                changed_device_snapshots.append(snapshot)
-                                device["publishedSignature"] = signature
-                        if (
-                            access_point_signature != access_point["publishedSignature"]
-                            or changed_device_snapshots
-                        ):
-                            access_point_updates.append(
-                                {
-                                    "bssid": candidate_bssid,
-                                    "ssid": access_point["ssid"],
-                                    "ssidVisibility": access_point["ssidVisibility"],
-                                    "securityProtocols": sorted(
-                                        access_point["securityProtocols"]
-                                    ),
-                                    "signal": signal,
-                                    "devices": changed_device_snapshots,
-                                }
-                            )
-                            access_point["publishedSignature"] = access_point_signature
-
-                    dirty_access_points.clear()
-                    dirty_devices.clear()
-                    realtime_access_points = next_realtime_access_points
-                    realtime_devices = next_realtime_devices
-                    if access_point_updates:
-                        event_writer.write(
-                            {
-                                "type": "statistics",
-                                "accessPointUpdates": access_point_updates,
-                            }
-                        )
-                    while next_publish <= monotonic_now:
-                        next_publish += PUBLISH_INTERVAL_SECONDS
-
+                ready = pending_clear is not None and (
+                    not pending_clear["handshakesOnly"] or reader.offset >= pending_clear["cutoff"] or not records)
+                now = time.monotonic()
+                if now >= next_publish or ready:
+                    timestamp = time.time()
+                    DIAGNOSTICS.phase("main", "publishFull")
+                    full.publish(reader.global_header, full_writer, timestamp)
+                    DIAGNOSTICS.phase("main", "publishRetained")
+                    retained.publish(reader.global_header, retained_writer, timestamp)
+                    DIAGNOSTICS.phase("main", "flushRetained")
+                    files.flush()
+                    writer.write({"type": "captureSizes", "nonHandshakeBytes": files.non_handshake_bytes})
+                    next_publish = now + PUBLISH_INTERVAL_SECONDS
+                    if pending_clear is not None:
+                        total = max(0, pending_clear["cutoff"] - pending_clear["startOffset"])
+                        writer.write({"type": "clearProgress", "stage": "preparing",
+                                      "processedBytes": max(0, reader.offset - pending_clear["startOffset"]),
+                                      "totalBytes": total})
+                if ready:
+                    command = pending_clear
+                    pending_clear = None
+                    try:
+                        diagnostic("clearSwitchBegin", handshakesOnly=command["handshakesOnly"],
+                                   resume=command["resume"], readerOffset=reader.offset)
+                        DIAGNOSTICS.phase("main", "switchClearMirror")
+                        writer.write({"type": "clearProgress", "stage": "switching",
+                                      "processedBytes": 0, "totalBytes": 0})
+                        if command["handshakesOnly"]:
+                            next_full = retained.fork()
+                            next_retained = retained
+                        else:
+                            next_full = CaptureAnalysis()
+                            next_retained = CaptureAnalysis()
+                        DIAGNOSTICS.phase("main", "clearFiles")
+                        with reader_lock:
+                            added_segment = files.clear(command["handshakesOnly"])
+                            DIAGNOSTICS.phase("main", "resetReader")
+                            reader._reset()
+                            reader._open_if_ready()
+                            capture.analyzed_offset = reader.offset
+                        full = next_full
+                        retained = next_retained
+                        DIAGNOSTICS.phase("main", "publishCaptureReset")
+                        writer.write({"type": "captureReset", "retainPrepared": command["handshakesOnly"],
+                                      "addedSegment": added_segment})
+                        writer.write({"type": "clearProgress", "stage": "finished",
+                                      "processedBytes": 0, "totalBytes": 0})
+                        if command["resume"]:
+                            DIAGNOSTICS.phase("main", "resumeCapture")
+                            capture.start()
+                        else:
+                            writer.write({"type": "captureState", "capturing": False})
+                        diagnostic("clearSwitchEnd", handshakesOnly=command["handshakesOnly"],
+                                   resumed=capture.process is not None, readerOffset=reader.offset)
+                    except Exception as error:
+                        diagnostic("clearSwitchFailed", errorType=type(error).__name__)
+                        writer.write({"type": "commandFailed", "message": str(error)})
+                        writer.write({"type": "captureState", "capturing": False})
                 try:
                     has_backlog = reader.offset < os.path.getsize(args.pcap)
                 except FileNotFoundError:
                     has_backlog = False
-                if has_backlog:
+                if has_backlog or pending_clear is not None or not commands.empty():
                     continue
-                remaining = next_publish - time.monotonic()
-                if remaining > 0:
-                    time.sleep(remaining)
+                DIAGNOSTICS.phase("main", "idle")
+                time.sleep(max(0, next_publish - time.monotonic()))
     finally:
+        diagnostic("analysisCleanupBegin")
+        DIAGNOSTICS.phase("main", "cleanupCapture")
+        if capture is not None:
+            capture.stop()
+        DIAGNOSTICS.phase("main", "cleanupFiles")
+        if files is not None:
+            files.close()
         reader.close()
+        DIAGNOSTICS.stop_event.set()
+        diagnostic("analysisCleanupEnd")
 
 
 if __name__ == "__main__":
+    def stop_signal(_signal, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_signal)
     main()

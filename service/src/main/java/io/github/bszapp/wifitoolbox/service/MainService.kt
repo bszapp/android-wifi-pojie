@@ -7,6 +7,9 @@ import android.util.Log
 import androidx.annotation.Keep
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiResponse
+import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment
+import io.github.bszapp.wifitoolbox.contract.container.ContainerOperationRequest
+import io.github.bszapp.wifitoolbox.contract.container.ContainerState
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogTransport
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogTransport
@@ -14,8 +17,9 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskLogTransport
 import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
 import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
 import io.github.bszapp.wifitoolbox.service.task.TaskManager
+import io.github.bszapp.wifitoolbox.service.container.ContainerSystemManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 
 @Keep
@@ -58,18 +62,29 @@ open class MainService(
         onTerminalLogRangeChanged = communication::broadcastTerminalLogRangeChanged,
     )
 
-    private val containerTerminalController = ContainerTerminalController(
+    private val hybridWifiScanner = HybridWifiScanner(
         terminalManager = terminalManager,
-        publishEvent = communication::broadcastContainerTerminalEvent,
+    )
+
+    private val containerSystemManager = ContainerSystemManager(
+        trustedUid = { initializer.requireStartupInfo().trustedUid },
+        beforeDelete = hybridWifiScanner::stop,
+        onError = { operation, error ->
+            communication.broadcastServiceError(
+                source = "Service.ContainerSystemManager",
+                operation = operation,
+                error = error,
+            )
+        },
     )
 
     private val wifiListController = WifiListController(
         androidApiProvider = { initializer.androidApi },
-        containerTerminalController = containerTerminalController,
+        hybridWifiScanner = hybridWifiScanner,
         terminalManager = terminalManager,
         onWifiStateChanged = communication::broadcastWifiState,
         onSavedWifiListChanged = communication::broadcastSavedWifiList,
-        onInformationSourceStateChanged = communication::broadcastWifiInformationSourceState,
+        onModeStateChanged = communication::broadcastWifiModeState,
         onMonitorRecordedBytesChanged = communication::broadcastMonitorRecordedBytes,
         onMonitorPcapExported = communication::broadcastMonitorPcapExported,
         onError = { operation, error ->
@@ -86,6 +101,7 @@ open class MainService(
         wifiLogAnalyzer = wifiLogAnalyzer,
         terminalManager = terminalManager,
         hybridTaskEnvironmentProvider = wifiListController::getHybridTaskEnvironment,
+        networkCardTaskEnvironmentProvider = wifiListController::getNetworkCardTaskEnvironment,
         onSavedWifiNetworksChanged = wifiListController::refreshSavedNetworks,
         onError = { operation, error ->
             communication.broadcastServiceError(
@@ -130,6 +146,28 @@ open class MainService(
         initializer.requireStartupInfo()
     }
 
+    override fun configureContainerSystem(environment: ContainerEnvironment) = communication.callFromApp {
+        containerSystemManager.configure(environment)
+    }
+
+    override fun getContainerState(): ContainerState = communication.callFromApp { containerSystemManager.state() }
+
+    override fun executeContainerOperation(
+        request: ContainerOperationRequest,
+        archive: ParcelFileDescriptor?,
+    ): Boolean = communication.callFromApp {
+        try { containerSystemManager.start(request, archive) }
+        finally { archive?.close() }
+    }
+
+    override fun registerContainerSystemCallback(cb: IContainerSystemCallback) = communication.callFromApp {
+        containerSystemManager.register(cb)
+    }
+
+    override fun unregisterContainerSystemCallback(cb: IContainerSystemCallback) = communication.callFromApp {
+        containerSystemManager.unregister(cb)
+    }
+
     override fun executeAndroidApi(request: AndroidApiRequest): AndroidApiResponse =
         communication.callFromApp {
             runCatching {
@@ -141,15 +179,19 @@ open class MainService(
             }.getOrElse(AndroidApiResponse::failure)
         }
 
-    override fun getLatestServiceLogId(): Long = communication.callFromApp {
-        serviceLogRecorder.latestId()
+    override fun getServiceLogRange(): LongArray = communication.callFromApp {
+        serviceLogRecorder.visibleRange().let { longArrayOf(it.first, it.second) }
+    }
+
+    override fun getSystemWifiLogRange(): LongArray = communication.callFromApp {
+        systemWifiLogRecorder.visibleRange().let { longArrayOf(it.first, it.second) }
     }
 
     override fun getServiceLogs(
         fromIdInclusive: Long,
         toIdInclusive: Long,
     ): ParcelFileDescriptor = communication.callFromApp {
-        require(fromIdInclusive >= 1L) { "日志起始 ID 必须大于等于 1" }
+        require(fromIdInclusive >= 0L) { "日志起始 ID 必须大于等于 0" }
         require(toIdInclusive >= fromIdInclusive) { "日志结束 ID 不能小于起始 ID" }
         ServiceLogTransport.encode(
             serviceLogRecorder.getRange(fromIdInclusive, toIdInclusive),
@@ -164,7 +206,7 @@ open class MainService(
         fromIdInclusive: Long,
         toIdInclusive: Long,
     ): ParcelFileDescriptor = communication.callFromApp {
-        require(fromIdInclusive >= 1L) { "系统wifi日志起始 ID 必须大于等于 1" }
+        require(fromIdInclusive >= 0L) { "系统wifi日志起始 ID 必须大于等于 0" }
         require(toIdInclusive >= fromIdInclusive) { "系统wifi日志结束 ID 不能小于起始 ID" }
         ServiceLogTransport.encode(
             systemWifiLogRecorder.getRange(fromIdInclusive, toIdInclusive),
@@ -223,38 +265,57 @@ open class MainService(
         }
     }
 
-    override fun setWifiInformationSource(
+    override fun setWifiMode(
         source: Int,
         rootfsPath: String,
         runtimePath: String,
         terminalPath: String,
     ) = communication.callFromApp {
-        val resolvedSource = WifiInformationSource.fromWireValue(source)
-        wifiListController.setInformationSource(
-            source = resolvedSource,
+        val resolvedSource = WifiMode.fromWireValue(source)
+        wifiListController.setMode(
+            mode = resolvedSource,
             rootfsPath = rootfsPath,
             runtimePath = runtimePath,
             terminalPath = terminalPath,
         )
     }
 
+    override fun configureWifiEnvironment(rootfsPath: String, runtimePath: String, terminalPath: String) = communication.callFromApp {
+        wifiListController.configureEnvironment(rootfsPath, runtimePath, terminalPath)
+    }
+
+    override fun setHybridScanEnabled(enabled: Boolean) = communication.callFromApp {
+        wifiListController.setHybridScanEnabled(enabled)
+    }
+
+    override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) = communication.callFromApp {
+        wifiListController.setMonitorCapture(enabled, frequencyMhz, hopping)
+    }
+
+    override fun clearMonitorCapture(handshakesOnly: Boolean) = communication.callFromApp {
+        wifiListController.clearMonitorCapture(handshakesOnly)
+    }
+
     override fun enterMonitorMode(
         command: String,
-        targetChannel: Int,
-        targetFrequencyMhz: Int,
         rootfsPath: String,
         runtimePath: String,
         terminalPath: String,
     ) = communication.callFromApp {
         wifiListController.enterMonitorMode(
             command = command,
-            targetChannel = targetChannel,
-            targetFrequencyMhz = targetFrequencyMhz,
             rootfsPath = rootfsPath,
             runtimePath = runtimePath,
             terminalPath = terminalPath,
         )
     }
+
+    override fun getMonitorChanges(sessionGeneration: Long, afterRevision: Long): ParcelFileDescriptor =
+        communication.callFromApp {
+            io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
+                wifiListController.getMonitorChanges(sessionGeneration, afterRevision),
+            )
+        }
 
     override fun exportMonitorPcap(
         requestId: String,
@@ -304,31 +365,8 @@ open class MainService(
         )
     }
 
-    override fun startContainerTerminal(
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
-    ) = communication.callFromApp {
-        containerTerminalController.start(rootfsPath, runtimePath, terminalPath)
-        Unit
-    }
-
-    override fun stopContainerTerminal() = communication.callFromApp {
-        containerTerminalController.stop()
-    }
-
-    override fun runContainerWifiScan() = communication.callFromApp {
-        containerTerminalController.runWifiScan()
-        Unit
-    }
-
-    override fun registerContainerTerminalCallback(cb: IContainerTerminalCallback) {
-        communication.registerContainerTerminalCallback(cb)
-        communication.pushContainerTerminalEvent(cb, containerTerminalController.snapshotJson())
-    }
-
-    override fun unregisterContainerTerminalCallback(cb: IContainerTerminalCallback) {
-        communication.unregisterContainerTerminalCallback(cb)
+    override fun stopHybridScanner() = communication.callFromApp {
+        hybridWifiScanner.stop()
     }
 
     override fun getAliveTerminalIds(): LongArray = communication.callFromApp {
@@ -337,10 +375,6 @@ open class MainService(
 
     override fun getAliveTerminalGeneration(): Long = communication.callFromApp {
         terminalManager.aliveSnapshot().generation
-    }
-
-    override fun getTerminalLogCount(terminalId: Long): Int = communication.callFromApp {
-        terminalManager.getLogCount(terminalId)
     }
 
     override fun getTerminalLogRange(terminalId: Long): LongArray = communication.callFromApp {
@@ -363,7 +397,7 @@ open class MainService(
         fromIdInclusive: Long,
         toIdInclusive: Long,
     ): ParcelFileDescriptor = communication.callFromApp {
-        require(fromIdInclusive >= 1L) { "终端日志起始 ID 必须大于等于 1" }
+        require(fromIdInclusive >= 0L) { "终端日志起始 ID 必须大于等于 0" }
         require(toIdInclusive >= fromIdInclusive) { "终端日志结束 ID 不能小于起始 ID" }
         TerminalLogTransport.encode(
             terminalManager.getLogs(terminalId, fromIdInclusive, toIdInclusive),
@@ -427,6 +461,13 @@ open class MainService(
         taskManager.snapshot(taskId)
     }
 
+    override fun getWpsCapturedNetworks(taskId: Long, fromIndex: Int): ParcelFileDescriptor =
+        communication.callFromApp {
+            io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
+                taskManager.capturedNetworkPage(taskId, fromIndex),
+            )
+        }
+
     override fun getTaskLogRange(taskId: Long): LongArray = communication.callFromApp {
         taskManager.taskLogRange(taskId).let { range ->
             longArrayOf(
@@ -443,7 +484,7 @@ open class MainService(
         fromIdInclusive: Long,
         toIdInclusive: Long,
     ): ParcelFileDescriptor = communication.callFromApp {
-        require(fromIdInclusive >= 1L) { "任务日志起始 ID 必须大于等于 1" }
+        require(fromIdInclusive >= 0L) { "任务日志起始 ID 必须大于等于 0" }
         require(toIdInclusive >= fromIdInclusive) { "任务日志结束 ID 不能小于起始 ID" }
         TaskLogTransport.encode(
             taskManager.taskLogs(taskId, fromIdInclusive, toIdInclusive),
@@ -465,7 +506,7 @@ open class MainService(
         fromIdInclusive: Long,
         toIdInclusive: Long,
     ): ParcelFileDescriptor = communication.callFromApp {
-        require(fromIdInclusive >= 1L) { "全局任务日志起始 ID 必须大于等于 1" }
+        require(fromIdInclusive >= 0L) { "全局任务日志起始 ID 必须大于等于 0" }
         require(toIdInclusive >= fromIdInclusive) { "全局任务日志结束 ID 不能小于起始 ID" }
         TaskLogTransport.encode(
             taskManager.globalLogs(fromIdInclusive, toIdInclusive),
@@ -498,11 +539,11 @@ open class MainService(
         chunkIndex: Int,
     ): ParcelFileDescriptor = communication.getSavedWifiListChunk(cb, generation, chunkIndex)
 
-    override fun getWifiInformationSourceStateChunk(
+    override fun getWifiModeStateChunk(
         cb: IMainServiceCallback,
         generation: Long,
         chunkIndex: Int,
-    ): ParcelFileDescriptor = communication.getWifiInformationSourceStateChunk(
+    ): ParcelFileDescriptor = communication.getWifiModeStateChunk(
         cb,
         generation,
         chunkIndex,
@@ -516,19 +557,20 @@ open class MainService(
         communication.acknowledgeSavedWifiList(cb, generation)
     }
 
-    override fun acknowledgeWifiInformationSourceState(
+    override fun acknowledgeWifiModeState(
         cb: IMainServiceCallback,
         generation: Long,
     ) {
-        communication.acknowledgeWifiInformationSourceState(cb, generation)
+        communication.acknowledgeWifiModeState(cb, generation)
     }
 
     override fun shutdown() = communication.callFromApp {
         Log.d(TAG, "收到 shutdown，服务退出")
         wifiEventMonitor.stop()
         wifiListController.stop()
-        containerTerminalController.close()
+        hybridWifiScanner.close()
         taskManager.close()
+        containerSystemManager.close()
         initializer.close()
         terminalManager.close()
         wifiLogAnalyzer.close()
@@ -544,9 +586,9 @@ open class MainService(
         // 重连时分别发送当前两种原始数据；不存在的数据等首次初始化后再推送。
         wifiListController.getWifiState()?.let { communication.pushWifiState(cb, it) }
         wifiListController.getSavedWifiList()?.let { communication.pushSavedWifiList(cb, it) }
-        communication.pushWifiInformationSourceState(
+        communication.pushWifiModeState(
             cb,
-            wifiListController.getInformationSourceState(),
+            wifiListController.getModeState(),
         )
     }
 

@@ -69,12 +69,15 @@ fun HomeScreen(
     viewModel: DefaultViewModel = viewModel(),
     bottomInnerPadding: Dp = 0.dp,
 ) {
-    val uid by viewModel.startup.uid.collectAsStateWithLifecycle()
-    val pid by viewModel.startup.pid.collectAsStateWithLifecycle()
-    val mode by viewModel.startup.mode.collectAsStateWithLifecycle()
-    val versionName by viewModel.startup.serviceVersionName.collectAsStateWithLifecycle()
-    val versionCode by viewModel.startup.serviceVersionCode.collectAsStateWithLifecycle()
-    val uidStr by viewModel.startup.uidStr.collectAsStateWithLifecycle()
+    val serviceInfo by viewModel.startup.serviceInfo.collectAsStateWithLifecycle()
+    val uid = serviceInfo?.serviceUid
+    val pid = serviceInfo?.servicePid
+    val uidStr = serviceInfo?.serviceUidText
+    val mode = serviceInfo?.startupMode?.let {
+        io.github.bszapp.wifitoolbox.contract.startup.StartupMode.valueOf(it)
+    }
+    val versionName = serviceInfo?.versionName
+    val versionCode = serviceInfo?.versionCode
     var showSheet by rememberSaveable { mutableStateOf(false) }
     //TODO:上面这些太散了，这里应该直接配合vm改成viewModel.startup.serviceInfo
 

@@ -61,6 +61,7 @@ internal class ConnectWifiTask(
                         )
                     }
                 }
+                is ConnectWifiTarget.NetworkCard -> error("网卡测试应使用 NetworkCardConnectTask")
             }
 
             var handshakeDeadline: Long? = null

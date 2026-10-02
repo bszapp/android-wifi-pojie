@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 interface IWifiListController {
     val state: StateFlow<WifiState?>
     val savedWifiList: StateFlow<SavedWifiList?>
-    val informationSourceState: StateFlow<WifiInformationSourceState?>
+    val modeState: StateFlow<WifiModeState?>
     val monitorPcapExports: SharedFlow<MonitorPcapExportResult>
     val monitorHandshakeTestResults: SharedFlow<MonitorHandshakeTestResult>
 
@@ -22,11 +22,14 @@ interface IWifiListController {
     @Throws(Exception::class)
     fun startScan()
 
-    /** 请求 Service 切换扫描信息源；选择状态和初始化状态都由 Service 保存。 */
-    fun setInformationSource(source: WifiInformationSource)
+    /** 请求 Service 切换网卡模式；实际模式由 Service 读取并发布。 */
+    fun setMode(mode: WifiMode)
+    fun setHybridScanEnabled(enabled: Boolean)
+    fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false)
+    fun clearMonitorCapture(handshakesOnly: Boolean)
 
-    /** 请求 Service 使用指定脚本、目标信道和该信道的实际频率进入监听模式。 */
-    fun enterMonitorMode(command: String, targetChannel: Int, targetFrequencyMhz: Int)
+    /** 请求 Service 执行进入脚本；持续抓取时单独选择信道。 */
+    fun enterMonitorMode(command: String)
 
     fun exportAllMonitorPcap(): String
 

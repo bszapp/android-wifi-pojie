@@ -15,6 +15,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
 import io.github.bszapp.wifitoolbox.logs.ServiceLogController
+import io.github.bszapp.wifitoolbox.logs.AppLogController
 import io.github.bszapp.wifitoolbox.terminal.TerminalController
 import io.github.bszapp.wifitoolbox.task.TaskController
 import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
@@ -41,6 +42,7 @@ class ToolboxApp : Application(), IAppController {
     private lateinit var processLauncher: ProcessLauncher
     private lateinit var wifiListController: WifiListController
     private lateinit var serviceLogController: ServiceLogController
+    private lateinit var appLogController: AppLogController
     private lateinit var terminalController: TerminalController
     private lateinit var taskController: TaskController
     private lateinit var containerController: ContainerController
@@ -49,8 +51,8 @@ class ToolboxApp : Application(), IAppController {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var predictiveBackController: PredictiveBackController
-    private val _isExiting = kotlinx.coroutines.flow.MutableStateFlow(false)
-    override val isExiting: StateFlow<Boolean> = _isExiting.asStateFlow()
+    private val _exitRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    override val exitRequests: SharedFlow<Unit> = _exitRequests.asSharedFlow()
     private val _monitorMapFilterState = kotlinx.coroutines.flow.MutableStateFlow(
         MonitorMapFilterState(),
     )
@@ -78,7 +80,7 @@ class ToolboxApp : Application(), IAppController {
                     delay(200.milliseconds)
                     Process.killProcess(Process.myPid())
                 }
-                _isExiting.value = true
+                _exitRequests.tryEmit(Unit)
             }
         }
     }
@@ -88,6 +90,9 @@ class ToolboxApp : Application(), IAppController {
 
     override val serviceLogs: ServiceLogController
         get() = serviceLogController
+
+    override val appLogs: AppLogController
+        get() = appLogController
 
     override val terminals: TerminalController
         get() = terminalController
@@ -100,6 +105,7 @@ class ToolboxApp : Application(), IAppController {
 
     override fun onCreate() {
         super.onCreate()
+        appLogController = AppLogController(scope = appScope).also { it.start() }
         settings = SettingsManager(this)
         predictiveBackController = PredictiveBackController(
             application = this,
@@ -218,6 +224,7 @@ class ToolboxApp : Application(), IAppController {
         super.onTerminate()
         predictiveBackController.stop()
         terminalController.close()
+        appLogController.close()
         appScope.cancel()
     }
 

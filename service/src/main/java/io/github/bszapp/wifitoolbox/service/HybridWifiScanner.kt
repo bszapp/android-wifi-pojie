@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.service
 
 import android.os.Process
+import android.util.Log
 import android.system.Os
 import android.system.OsConstants
 import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
@@ -17,9 +18,9 @@ import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal class ContainerTerminalController(
+/** 混合模式独占的扫描桥接；容器安装控制器不公开扫描能力。 */
+internal class HybridWifiScanner(
     private val terminalManager: TerminalManager,
-    private val publishEvent: (String) -> Unit,
 ) {
     private val lock = Any()
     private val executor = Executors.newCachedThreadPool { runnable ->
@@ -31,7 +32,7 @@ internal class ContainerTerminalController(
     private var terminalId: Long? = null
     private var commandWriter: BufferedWriter? = null
     private var eventInput: FileInputStream? = null
-    private var pipeDirectory: File? = null
+    private var pipeFiles: PipeFiles? = null
     private var readySignal: CountDownLatch? = null
     private var startupFuture: CompletableFuture<Unit>? = null
     private var currentRequestId: String? = null
@@ -40,10 +41,6 @@ internal class ContainerTerminalController(
     private var currentScanFinishedHandler: ((Int) -> Unit)? = null
     private val currentScanOutput = StringBuilder()
     private var stopping = false
-
-    fun snapshotJson(): String = synchronized(lock) {
-        stateEvent(status, statusMessage).toString()
-    }
 
     fun start(
         rootfsPath: String,
@@ -129,7 +126,11 @@ internal class ContainerTerminalController(
                     return@execute
                 }
                 publishState()
-                terminalManager.writeInput(createdTerminalId, BRIDGE_COMMAND)
+                terminalManager.writeInput(
+                    createdTerminalId,
+                    "$BRIDGE_COMMAND --command-pipe /tmp/$PIPE_DIRECTORY_NAME/${pipes.commandFifoId} " +
+                        "--event-pipe /tmp/$PIPE_DIRECTORY_NAME/${pipes.eventFifoId}",
+                )
 
                 if (!latch.await(START_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                     throw IOException("等待通信程序就绪超时")
@@ -146,7 +147,16 @@ internal class ContainerTerminalController(
         return future
     }
 
+    fun readPreviousResults(onMessage: (JSONObject) -> Unit): CompletableFuture<Unit> =
+        submitRequest(readOnly = true, onMessage = onMessage, onFinished = {})
+
     fun runWifiScan(
+        onMessage: (JSONObject) -> Unit,
+        onFinished: (Int) -> Unit,
+    ): CompletableFuture<Unit> = submitRequest(false, onMessage, onFinished)
+
+    private fun submitRequest(
+        readOnly: Boolean,
         onMessage: (JSONObject) -> Unit = {},
         onFinished: (Int) -> Unit = {},
     ): CompletableFuture<Unit> {
@@ -173,7 +183,7 @@ internal class ContainerTerminalController(
                     .put("type", "run")
                     .put("requestId", requestId)
                     .put("script", SCAN_SCRIPT)
-                    .put("args", JSONArray(listOf("-i", "wlan0", "-scan"))),//TODO:我不喜欢加上-scan才能扫描，删了这个参数，包括脚本本身
+                    .put("args", JSONArray(listOf("-i", "wlan0") + if (readOnly) listOf("--read-results") else emptyList<String>())),//TODO:我不喜欢加上-scan才能扫描，删了这个参数，包括脚本本身
             )
         } catch (error: Throwable) {
             synchronized(lock) {
@@ -229,12 +239,15 @@ internal class ContainerTerminalController(
             throw IOException("无法创建通信目录: ${directory.absolutePath}")
         }
         Os.chmod(directory.absolutePath, 448)
-        val commandPipe = File(directory, COMMAND_PIPE_NAME)
-        val eventPipe = File(directory, EVENT_PIPE_NAME)
-        Os.mkfifo(commandPipe.absolutePath, 384)
-        Os.mkfifo(eventPipe.absolutePath, 384)
-        synchronized(lock) { pipeDirectory = directory }
-        return PipeFiles(commandPipe, eventPipe)
+        val pipes = PipeFiles(
+            directory = directory,
+            commandFifoId = UUID.randomUUID().toString(),//TODO:以后要是多个管道怎么办？
+            eventFifoId = UUID.randomUUID().toString(),
+        )
+        synchronized(lock) { pipeFiles = pipes }
+        Os.mkfifo(pipes.commandPipe.absolutePath, 384)
+        Os.mkfifo(pipes.eventPipe.absolutePath, 384)
+        return pipes
     }
 
     private fun readEvents(input: FileInputStream) {
@@ -347,7 +360,7 @@ internal class ContainerTerminalController(
     }
 
     private fun handleScanCallback(payload: JSONObject) {
-        if (payload.optString("action") != "start_scan_callback") return
+        if (payload.optString("action") !in listOf("start_scan_callback", "read_results_callback")) return
         val confirmation = synchronized(lock) { currentScanConfirmation } ?: return
         if (payload.optBoolean("ok")) {
             confirmation.complete(Unit)
@@ -405,7 +418,7 @@ internal class ContainerTerminalController(
                 terminalId = terminalId,
                 writer = commandWriter,
                 eventInput = eventInput,
-                pipeDirectory = pipeDirectory,
+                pipeFiles = pipeFiles,
                 startupFuture = startupFuture,
                 scanConfirmation = currentScanConfirmation,
                 scanFinished = currentScanFinishedHandler,
@@ -413,7 +426,7 @@ internal class ContainerTerminalController(
                 terminalId = null
                 commandWriter = null
                 eventInput = null
-                pipeDirectory = null
+                pipeFiles = null
                 readySignal?.countDown()
                 readySignal = null
                 startupFuture = null
@@ -435,7 +448,7 @@ internal class ContainerTerminalController(
         }
         runCatching { resources.writer?.close() }
         runCatching { resources.eventInput?.close() }
-        resources.pipeDirectory?.let { runCatching { it.deleteRecursively() } }
+        resources.pipeFiles?.directory?.let { runCatching { it.deleteRecursively() } }
 
         synchronized(lock) {
             status = STATUS_STOPPED
@@ -468,19 +481,23 @@ internal class ContainerTerminalController(
             .put("message", message)
 
     private fun publish(event: JSONObject) {
-        publishEvent(event.toString())
+        Log.d("HybridWifiScanner", "${event.optString("type")}: ${event.optString("message")}")
     }
 
     private data class PipeFiles(
-        val commandPipe: File,
-        val eventPipe: File,
-    )
+        val directory: File,
+        val commandFifoId: String,
+        val eventFifoId: String,
+    ) {
+        val commandPipe: File get() = File(directory, commandFifoId)
+        val eventPipe: File get() = File(directory, eventFifoId)
+    }
 
     private data class Resources(
         val terminalId: Long?,
         val writer: BufferedWriter?,
         val eventInput: FileInputStream?,
-        val pipeDirectory: File?,
+        val pipeFiles: PipeFiles?,
         val startupFuture: CompletableFuture<Unit>?,
         val scanConfirmation: CompletableFuture<Unit>?,
         val scanFinished: ((Int) -> Unit)?,
@@ -498,11 +515,9 @@ internal class ContainerTerminalController(
         const val STATUS_STOPPING = "STOPPING"
         const val STATUS_ERROR = "ERROR"
         const val PIPE_DIRECTORY_NAME = "wlantool-ipc"
-        const val COMMAND_PIPE_NAME = "commands.fifo"//TODO:以后要是多个管道怎么办？
-        const val EVENT_PIPE_NAME = "events.fifo"
         const val SCAN_SCRIPT = "/wlantool/scan.py"
         const val HOST_TOOL_PATH = "/system/bin:/system/xbin:/system_ext/bin:/product/bin:/vendor/bin:/odm/bin:/apex/com.android.runtime/bin"
-        const val BRIDGE_COMMAND = "/usr/bin/python3 -u /wlantool/terminal_bridge.py --command-pipe /tmp/wlantool-ipc/commands.fifo --event-pipe /tmp/wlantool-ipc/events.fifo"
+        const val BRIDGE_COMMAND = "/usr/bin/python3 -u /wlantool/terminal_bridge.py"
         const val START_TIMEOUT_MILLIS = 20_000L
     }
 }

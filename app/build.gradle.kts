@@ -361,7 +361,6 @@ dependencies {
     implementation(libs.api)
     implementation(libs.provider)
     implementation(libs.hiddenapibypass)
-    implementation(libs.xz)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

@@ -846,6 +846,10 @@ class Nl80211Scanner:
             return current_entries
         return fresh
 
+    def read_results(self) -> List[bytes]:
+        entries, _ = self._dump_scan()
+        return entries
+
     def scan(
         self,
         on_started: Callable[[], None],
@@ -926,6 +930,88 @@ def parse_information_elements(data: bytes) -> List[Tuple[int, bytes]]:
         elements.append((element_id, data[offset:offset + length]))
         offset += length
     return elements
+
+
+def parse_channel_layout(elements: List[Tuple[int, bytes]], frequency: int) -> Tuple[int, int, int]:
+    """Decode operation IEs, returning Android channelWidth/centerFreq0/centerFreq1.
+
+    HT/VHT/HE/EHT operation describes the current channel, unlike capabilities
+    which describe the maximum supported width. Missing operation data stays 20 MHz.
+    """
+    layout = (0, frequency, 0)
+
+    def center(channel: int) -> int:
+        if not channel:
+            return 0
+        if 5925 <= frequency <= 7125:
+            return 5950 + channel * 5
+        if frequency < 2500:
+            return 2484 if channel == 14 else 2407 + channel * 5
+        if frequency < 5000:
+            return 4000 + channel * 5
+        return 5000 + channel * 5
+
+    def wide(width: int, segment0: int, segment1: int) -> Optional[Tuple[int, int, int]]:
+        if not segment0:
+            return None
+        if width == 1:
+            if segment1 and abs(segment1 - segment0) == 8:
+                return (3, center(segment1), 0)
+            if segment1 and abs(segment1 - segment0) > 8:
+                return (4, center(segment0), center(segment1))
+            return (2, center(segment0), 0)
+        if width == 2:
+            return (3, center(segment0), 0)
+        if width == 3 and segment1:
+            return (4, center(segment0), center(segment1))
+        return None
+
+    for kind, value in elements:
+        if kind == 61 and len(value) >= 22:
+            secondary = value[1] & 3
+            if value[1] & 4 and secondary in (1, 3):
+                layout = (1, frequency + (10 if secondary == 1 else -10), 0)
+    for kind, value in elements:
+        if kind == 192 and len(value) >= 5:
+            decoded = wide(value[0], value[1], value[2])
+            if decoded is not None:
+                layout = decoded
+    for kind, value in elements:
+        if kind != 255 or len(value) < 7 or value[0] != 36:
+            continue
+        params = int.from_bytes(value[1:5], "little")
+        offset = 7
+        if params & 0x4000:
+            if len(value) < offset + 3:
+                continue
+            if frequency < 5925:
+                decoded = wide(value[offset], value[offset + 1], value[offset + 2])
+                if decoded is not None:
+                    layout = decoded
+            offset += 3
+        if params & 0x8000:
+            offset += 1
+        if params & 0x20000 and 5925 <= frequency <= 7125 and len(value) >= offset + 5:
+            width = value[offset + 1] & 3
+            segment0, segment1 = value[offset + 2:offset + 4]
+            if width == 0:
+                layout = (0, frequency, 0)
+            elif width in (1, 2) and segment0:
+                layout = (width, center(segment0), 0)
+            elif width == 3:
+                decoded = wide(1, segment0, segment1)
+                if decoded is not None:
+                    layout = decoded
+    for kind, value in elements:
+        # EHT operation: extension ID, parameters, basic MCS/NSS, operation info.
+        if kind == 255 and len(value) >= 9 and value[0] == 106 and value[1] & 1:
+            width = value[6] & 7
+            segment = value[8] if width in (3, 4) else value[7]
+            if width == 0:
+                layout = (0, frequency, 0)
+            elif width in (1, 2, 3, 4) and segment:
+                layout = ({1: 1, 2: 2, 3: 3, 4: 5}[width], center(segment), 0)
+    return layout
 
 
 def parse_wps_attributes(data: bytes) -> Dict[int, List[bytes]]:
@@ -1034,6 +1120,7 @@ def parse_bss(payload: bytes) -> Optional[dict]:
         )
         timestamp_us = max(0, Nl80211Scanner._boottime_ns() // 1_000 - seen_ms * 1_000)
 
+    channel_width, center_freq0, center_freq1 = parse_channel_layout(elements, frequency)
     return {
         "BSSID": ":".join(f"{byte:02X}" for byte in bssid_data),
         "SSID": ssid,
@@ -1041,9 +1128,9 @@ def parse_bss(payload: bytes) -> Optional[dict]:
         "level": level,
         "frequency": frequency,
         "timestamp": timestamp_us,
-        "channelWidth": 0,
-        "centerFreq0": frequency,
-        "centerFreq1": 0,
+        "channelWidth": channel_width,
+        "centerFreq0": center_freq0,
+        "centerFreq1": center_freq1,
         "wps": {
             "supported": bool(wps_data),
             "locked": locked,
@@ -1077,9 +1164,9 @@ def main() -> int:
         help="Name of the wireless interface to use (default: wlan0)",
     )
     parser.add_argument(
-        "-scan",
+        "--read-results",
         action="store_true",
-        help=argparse.SUPPRESS,
+        help="Read cached kernel scan results without initiating a scan",
     )
     parser.add_argument(
         "--wps-pin",
@@ -1098,8 +1185,8 @@ def main() -> int:
 
     if args.wps_pin:
         validation_message = None
-        if args.scan:
-            validation_message = "--wps-pin 不能与 -scan 同时使用"
+        if args.read_results:
+            validation_message = "--wps-pin 不能与 --read-results 同时使用"
         elif not args.bssid or not MAC_ADDRESS_RE.match(args.bssid):
             validation_message = "必须提供格式正确的 --bssid"
         elif not args.pin or not WPS_PIN_RE.match(args.pin):
@@ -1122,7 +1209,7 @@ def main() -> int:
     if sys.hexversion < 0x03060F0:
         emit_json(
             {
-                "action": "start_scan_callback",
+                "action": "read_results_callback" if args.read_results else "start_scan_callback",
                 "ok": False,
                 "message": "Python 版本低于 3.6",
             }
@@ -1161,10 +1248,14 @@ def main() -> int:
 
     try:
         scanner = Nl80211Scanner(args.interface)
-        entries = scanner.scan(
-            on_started=on_started,
-            on_update=publish_entries,
-        )
+        if args.read_results:
+            entries = scanner.read_results()
+            emit_json({"action": "read_results_callback", "ok": True})
+        else:
+            entries = scanner.scan(
+                on_started=on_started,
+                on_update=publish_entries,
+            )
     except ScanTooFrequent:
         emit_json(
             {

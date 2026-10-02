@@ -27,7 +27,7 @@ import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
@@ -148,7 +148,7 @@ fun UninstallContainerConfirmationDialog(
 
 @Composable
 fun ContainerProgressSheet(state: ContainerState) {
-    OverlayBottomSheet(
+    SingleOverlayBottomSheet(
         show = state.isBusy,
         title = state.operation?.title ?: "容器系统",
         allowDismiss = false,

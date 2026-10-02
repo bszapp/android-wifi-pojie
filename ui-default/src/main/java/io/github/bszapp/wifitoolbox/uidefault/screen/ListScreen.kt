@@ -41,6 +41,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -53,6 +54,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AirplanemodeActive
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FilterList
@@ -66,7 +71,7 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
 import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
 import io.github.bszapp.wifitoolbox.contract.wifilist.isScanning
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
@@ -89,6 +94,10 @@ import io.github.bszapp.wifitoolbox.uidefault.widget.WifiList
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorDeviceDetailSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiModeSwitchSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorCaptureSheet
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorCaptureClearSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorHandshakeAction
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WpsPbcTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatHandshakeDuration
@@ -105,7 +114,6 @@ import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Checkbox
-import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.FloatingActionButton
@@ -126,7 +134,7 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -140,24 +148,24 @@ fun ListScreen(
     val wifiState by viewModel.wifiList.state.collectAsStateWithLifecycle()
     val isSendingScanRequest by
         viewModel.wifiList.isSendingScanRequest.collectAsStateWithLifecycle()
-    val informationSourceState by
-        viewModel.wifiList.informationSourceState.collectAsStateWithLifecycle()
+    val modeState by
+        viewModel.wifiList.modeState.collectAsStateWithLifecycle()
     val savedWifiList by viewModel.wifiList.savedWifiList.collectAsStateWithLifecycle()
-    val monitorMapFilterState by
-        viewModel.wifiList.monitorMapFilterState.collectAsStateWithLifecycle()
     val monitorHandshakeTest by
         viewModel.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
     val displayedTask by viewModel.displayedTask.collectAsStateWithLifecycle()
-    val selectedSource = informationSourceState?.source ?: WifiInformationSource.SYSTEM
-    val isInitializing = informationSourceState?.initializing == true
+    val selectedSource = modeState?.mode ?: WifiMode.NORMAL
     val isScanning = wifiState.isScanning || isSendingScanRequest
-    val controlsBusy = isScanning || isInitializing
+    val controlsBusy = isScanning || modeState?.modeSwitch?.isRunning == true
     val taskActionScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val pullState = rememberPullToRefreshState()
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
+    var showStatistics by remember { mutableStateOf(false) }
+    var showMonitorCommand by rememberSaveable { mutableStateOf(false) }
+    var showCaptureChannels by rememberSaveable { mutableStateOf(false) }
     var pendingMonitorExport by remember { mutableStateOf<MonitorPcapExportResult?>(null) }
     val monitorExportSaveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/vnd.tcpdump.pcap"),
@@ -207,38 +215,28 @@ fun ListScreen(
                                 onDismissRequest = { showTopPopup.value = false },
                                 content = {
                                     ListPopupColumn {
-                                        SmallTitle(text = "系统模式")
-                                        DropdownImpl(
-                                            text = "扫描",
-                                            isSelected = selectedSource == WifiInformationSource.SYSTEM,
-                                            optionSize = 3,
-                                            onSelectedIndexChange = {
-                                                showTopPopup.value = false
-                                                viewModel.wifiList.setInformationSource(
-                                                    WifiInformationSource.SYSTEM,
-                                                )
-                                            },
-                                            index = 1,
-                                        )
                                         SmallTitle(text = "网卡模式")
                                         DropdownImpl(
-                                            text = "混合扫描",
-                                            isSelected = selectedSource == WifiInformationSource.HYBRID,
-                                            optionSize = 3,
+                                            text = "普通模式",
+                                            isSelected = selectedSource == WifiMode.NORMAL,
+                                            optionSize = 2,
                                             onSelectedIndexChange = {
                                                 showTopPopup.value = false
-                                                viewModel.wifiList.setInformationSource(
-                                                    WifiInformationSource.HYBRID,
+                                                viewModel.wifiList.setMode(
+                                                    WifiMode.NORMAL,
                                                 )
                                             },
-                                            index = 1,
+                                            index = 0,
                                         )
                                         DropdownImpl(
                                             text = "监听模式",
-                                            isSelected = selectedSource == WifiInformationSource.MONITOR,
-                                            optionSize = 3,
-                                            onSelectedIndexChange = {},
-                                            index = 2,
+                                            isSelected = selectedSource == WifiMode.MONITOR,
+                                            optionSize = 2,
+                                            onSelectedIndexChange = {
+                                                showTopPopup.value = false
+                                                if (selectedSource != WifiMode.MONITOR) showMonitorCommand = true
+                                            },
+                                            index = 1,
                                         )
                                     }
                                 },
@@ -256,42 +254,70 @@ fun ListScreen(
                         }
                     },
                     actions = {
-                        if (selectedSource == WifiInformationSource.MONITOR) {
-                            IconButton(
-                                onClick = { viewModel.wifiList.exportAllMonitorPcap() },
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Download,
-                                    tint = colorScheme.onSurface,
-                                    contentDescription = "导出全部 PCAP",
-                                )
+                        if (selectedSource == WifiMode.NORMAL && modeState?.hybridScanEnabled == true) {
+                            IconButton(onClick = { taskActionScope.launch { runCatching { viewModel.startWpsPbcTask() } } }) {
+                                Icon(Icons.Rounded.WifiProtectedSetup, "启动 WPS-PBC", tint = colorScheme.onSurface)
                             }
-                        } else {
-                            if (selectedSource == WifiInformationSource.HYBRID) {
-                                IconButton(
-                                    onClick = {
-                                        taskActionScope.launch {
-                                            runCatching { viewModel.startWpsPbcTask() }
-                                        }
-                                    },
-                                    enabled = !isInitializing,
+                        }
+                        if (selectedSource == WifiMode.MONITOR) {
+                            IconButton(onClick = { viewModel.wifiList.exportAllMonitorPcap() }) {
+                                Icon(Icons.Rounded.Download, "导出全部 PCAP", tint = colorScheme.onSurface)
+                            }
+                            Box {
+                                val showClear = remember { mutableStateOf(false) }
+                                OverlayListPopup(
+                                    show = showClear.value,
+                                    popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
+                                    alignment = PopupPositionProvider.Align.TopEnd,
+                                    onDismissRequest = { showClear.value = false },
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.WifiProtectedSetup,
-                                        tint = colorScheme.onSurface,
-                                        contentDescription = "启动 WPS-PBC",
-                                    )
+                                    ListPopupColumn {
+                                        // 在 Popup 内容组合中读取实时状态，展开后也持续刷新。
+                                        val statistics = modeState?.monitorStatistics
+                                        listOf(
+                                            "清空抓取数据（${formatMonitorByteCount(statistics?.recordedBytes ?: 0L)}）",
+                                            "仅清空非握手数据（${formatMonitorByteCount(statistics?.nonHandshakeBytes ?: 0L)}）",
+                                        ).forEachIndexed { index, title ->
+                                            DropdownImpl(text = title, isSelected = false, optionSize = 2, index = index,
+                                                onSelectedIndexChange = {
+                                                    showClear.value = false
+                                                    viewModel.wifiList.clearMonitorCapture(index == 1)
+                                                })
+                                        }
+                                    }
+                                }
+                                IconButton(onClick = { showClear.value = true }, enabled = !controlsBusy && modeState?.clearingCapture != true) {
+                                    Icon(Icons.Rounded.DeleteSweep, "清理抓取数据", tint = colorScheme.onSurface)
                                 }
                             }
-                            IconButton(
-                                onClick = { viewModel.wifiList.startScan() },
-                                enabled = !controlsBusy,
-                            ) {
-                                Icon(
-                                    imageVector = MiuixIcons.Refresh,
-                                    tint = colorScheme.onSurface,
-                                    contentDescription = "刷新",
-                                )
+                            IconButton(onClick = { showStatistics = true }) {
+                                Icon(Icons.Rounded.BarChart, "抓取统计", tint = colorScheme.onSurface)
+                            }
+                        }
+                        IconButton(onClick = { viewModel.wifiList.startScan() },
+                            enabled = !controlsBusy && modeState?.clearingCapture != true) {
+                            Icon(MiuixIcons.Refresh, "刷新", tint = colorScheme.onSurface)
+                        }
+                        if (selectedSource == WifiMode.NORMAL) {
+                            Box {
+                                val showMore = remember { mutableStateOf(false) }
+                                OverlayListPopup(
+                                    show = showMore.value,
+                                    popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
+                                    alignment = PopupPositionProvider.Align.TopEnd,
+                                    onDismissRequest = { showMore.value = false },
+                                ) {
+                                    ListPopupColumn {
+                                        DropdownImpl(text = "混合扫描", isSelected = modeState?.hybridScanEnabled == true,
+                                            optionSize = 1, index = 0, onSelectedIndexChange = {
+                                                viewModel.wifiList.setHybridScanEnabled(modeState?.hybridScanEnabled != true)
+                                                showMore.value = false
+                                            })
+                                    }
+                                }
+                                IconButton(onClick = { showMore.value = true }, enabled = !controlsBusy) {
+                                    Icon(MiuixIcons.MoreCircle, "扫描方式", tint = colorScheme.onSurface)
+                                }
                             }
                         }
                     },
@@ -303,86 +329,12 @@ fun ListScreen(
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal),
     ) { innerPadding ->
         val layoutDirection = LocalLayoutDirection.current
-        if (selectedSource == WifiInformationSource.MONITOR) {
-            Box(
-                modifier = Modifier.fillMaxSize().let {
-                    if (backdrop != null) it.layerBackdrop(backdrop) else it
-                },
-            ) {
-                when {
-                    isInitializing -> InitializingContent(bottomInnerPadding)
-                    wifiState is WifiState.Error -> WifiList(
-                        modifier = Modifier.fillMaxHeight(),
-                        vm = viewModel,
-                        listState = listState,
-                        contentPadding = PaddingValues(
-                            top = innerPadding.calculateTopPadding() + 14.dp,
-                            start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
-                            end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
-                            bottom = bottomInnerPadding + 8.dp,
-                        ),
-                    )
-                    else -> MonitorModeContent(
-                        statistics = informationSourceState?.monitorStatistics,
-                        savedNetworks = savedWifiList?.networks.orEmpty(),
-                        handshakeTest = monitorHandshakeTest,
-                        onClearHandshakeTestResult =
-                            viewModel.wifiList::clearMonitorHandshakeTestResult,
-                        onExportDevicePcap = { bssid, deviceMac, subtypeIds ->
-                            viewModel.wifiList.exportMonitorDevicePcap(
-                                bssid = bssid,
-                                deviceMac = deviceMac,
-                                subtypeIds = subtypeIds,
-                            )
-                        },
-                        onTestHandshake = { bssid, deviceMac, handshakeId, password ->
-                            viewModel.wifiList.testMonitorHandshake(
-                                bssid = bssid,
-                                deviceMac = deviceMac,
-                                handshakeId = handshakeId,
-                                password = password,
-                            )
-                        },
-                        onExportHandshake = { bssid, deviceMac, handshakeId ->
-                            viewModel.wifiList.exportMonitorHandshakePcap(
-                                bssid = bssid,
-                                deviceMac = deviceMac,
-                                handshakeId = handshakeId,
-                            )
-                        },
-                        onExportDisconnection = { bssid, deviceMac, disconnectionId ->
-                            viewModel.wifiList.exportMonitorDisconnectionPcap(
-                                bssid = bssid,
-                                deviceMac = deviceMac,
-                                disconnectionId = disconnectionId,
-                            )
-                        },
-                        filterState = monitorMapFilterState,
-                        onFilterStateChange = viewModel.wifiList::updateMonitorMapFilterState,
-                        onSaveHc22000 = { content, fileName ->
-                            pendingHc22000Export = PendingHc22000Export(content, fileName)
-                            hc22000SaveLauncher.launch(fileName)
-                        },
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .nestedScroll(scrollBehavior.nestedScrollConnection),
-                        contentPadding = PaddingValues(
-                            top = innerPadding.calculateTopPadding(),
-                            start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
-                            end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
-                            bottom = bottomInnerPadding + 8.dp,
-                        ),
-                    )
-                }
-            }
-            return@Scaffold
-        }
         val refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "刷新完成")
         PullToRefresh(
             isRefreshing = isScanning,
             pullToRefreshState = pullState,
             onRefresh = {
-                if (!isInitializing) viewModel.wifiList.startScan()
+                viewModel.wifiList.startScan()
             },
             refreshTexts = refreshTexts,
             contentPadding = PaddingValues(
@@ -397,27 +349,86 @@ fun ListScreen(
                     if (backdrop != null) it.layerBackdrop(backdrop) else it
                 },
             ) {
-                if (isInitializing) {
-                    InitializingContent(bottomInnerPadding)
-                } else {
-                    WifiList(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .scrollEndHaptic()
-                            .overScrollVertical()
-                            .nestedScroll(scrollBehavior.nestedScrollConnection),
-                        vm = viewModel,
-                        listState = listState,
-                        contentPadding = PaddingValues(
-                            top = innerPadding.calculateTopPadding() + 14.dp,
-                            start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
-                            end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
-                            bottom = bottomInnerPadding + 8.dp,
-                        ),
-                    )
+                WifiList(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .scrollEndHaptic()
+                        .overScrollVertical()
+                        .nestedScroll(scrollBehavior.nestedScrollConnection),
+                    vm = viewModel,
+                    listState = listState,
+                    onSaveHc22000 = { content, fileName ->
+                        pendingHc22000Export = PendingHc22000Export(content, fileName)
+                        hc22000SaveLauncher.launch(fileName)
+                    },
+                    contentPadding = PaddingValues(
+                        top = innerPadding.calculateTopPadding() + 14.dp,
+                        start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
+                        end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
+                        bottom = bottomInnerPadding + if (selectedSource == WifiMode.MONITOR) 84.dp else 8.dp,
+                    ),
+                )
+                if (selectedSource == WifiMode.MONITOR) {
+                    FloatingActionButton(
+                        onClick = {
+                            if (modeState?.capturing == true) viewModel.wifiList.setMonitorCapture(false)
+                            else showCaptureChannels = true
+                        },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = bottomInnerPadding + 16.dp),
+                    ) {
+                        Icon(
+                            if (modeState?.capturing == true) Icons.Rounded.Stop else Icons.Rounded.AirplanemodeActive,
+                            if (modeState?.capturing == true) "停止持续抓取" else "持续抓取",
+                            tint = colorScheme.onPrimary,
+                        )
+                    }
                 }
             }
         }
+    }
+
+    WifiModeSwitchSheet(progress = modeState?.modeSwitch)
+    MonitorCaptureClearSheet(progress = modeState?.captureClearProgress)
+    MonitorModeSheet(
+        show = showMonitorCommand,
+        onDismiss = { showMonitorCommand = false },
+        onExecute = { command ->
+            showMonitorCommand = false
+            viewModel.wifiList.enterMonitorMode(command)
+        },
+    )
+    MonitorCaptureSheet(
+        show = showCaptureChannels && selectedSource == WifiMode.MONITOR,
+        channels = modeState?.availableChannels.orEmpty(),
+        scanResults = (wifiState as? WifiState.Data.Enabled)?.scanResults.orEmpty(),
+        onDismiss = { showCaptureChannels = false },
+        onStart = { frequency, hopping ->
+            showCaptureChannels = false
+            viewModel.wifiList.setMonitorCapture(true, frequency, hopping)
+        },
+    )
+
+    SingleOverlayBottomSheet(
+        show = showStatistics && selectedSource == WifiMode.MONITOR,
+        title = "抓取统计",
+        onDismissRequest = { showStatistics = false },
+    ) {
+        MonitorStatisticsContent(
+                statistics = modeState?.monitorStatistics,
+                hopping = modeState?.hoppingCapture == true,
+                savedNetworks = savedWifiList?.networks.orEmpty(),
+                handshakeTest = monitorHandshakeTest,
+                onClearHandshakeTestResult = viewModel.wifiList::clearMonitorHandshakeTestResult,
+                onTestHandshake = { bssid, mac, id, password -> viewModel.wifiList.testMonitorHandshake(bssid, mac, id, password) },
+                onExportHandshake = { bssid, mac, id -> viewModel.wifiList.exportMonitorHandshakePcap(bssid, mac, id) },
+                onExportDisconnection = { bssid, mac, id -> viewModel.wifiList.exportMonitorDisconnectionPcap(bssid, mac, id) },
+                onSaveHc22000 = { content, fileName ->
+                    pendingHc22000Export = PendingHc22000Export(content, fileName)
+                    hc22000SaveLauncher.launch(fileName)
+                },
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.8f),
+                contentPadding = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom).asPaddingValues(),
+            )
     }
 
     displayedTask?.let { task ->
@@ -470,36 +481,14 @@ private fun DisplayedTaskSheet(
     }
 }
 
-@Composable
-private fun InitializingContent(bottomInnerPadding: Dp) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(bottom = bottomInnerPadding),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-    ) {
-        CircularProgressIndicator()
-        Text(
-            text = "初始化",
-            modifier = Modifier.padding(top = 12.dp),
-            color = colorScheme.onSurface,
-        )
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MonitorModeContent(
+private fun MonitorStatisticsContent(
     statistics: MonitorModeStatistics?,
+    hopping: Boolean,
     savedNetworks: List<WifiConfiguration>,
     handshakeTest: MonitorHandshakeTestUiState,
     onClearHandshakeTestResult: () -> Unit,
-    onExportDevicePcap: (
-        bssid: String,
-        deviceMac: String,
-        subtypeIds: Set<String>,
-    ) -> Unit,
     onTestHandshake: (
         bssid: String,
         deviceMac: String,
@@ -516,34 +505,18 @@ private fun MonitorModeContent(
         deviceMac: String,
         disconnectionId: String,
     ) -> String,
-    filterState: MonitorMapFilterState,
-    onFilterStateChange: (MonitorMapFilterState) -> Unit,
     onSaveHc22000: (content: String, fileName: String) -> Unit,
     modifier: Modifier,
     contentPadding: PaddingValues,
 ) {
-    val expandedAccessPoints = remember { mutableStateMapOf<String, Boolean>() }
-    var selectedDevice by remember { mutableStateOf<MonitorDeviceSelection?>(null) }
     val pagerState = rememberPagerState(pageCount = { 2 })
     val coroutineScope = rememberCoroutineScope()
-    var showFilterSheet by remember { mutableStateOf(false) }
     var handshakeAction by remember { mutableStateOf<MonitorHandshakeActionSelection?>(null) }
     var disconnectionExportTarget by remember {
         mutableStateOf<MonitorDisconnectionRecord?>(null)
     }
     var disconnectionExportConsent by remember { mutableStateOf(false) }
     val accessPoints = statistics?.accessPoints.orEmpty()
-    val filteredAccessPoints = accessPoints
-        .asSequence()
-        .filter { filterState.showUnknownNetworks || !it.ssid.isNullOrBlank() }
-        .map { accessPoint ->
-            accessPoint.copy(
-                devices = accessPoint.devices.filter { device ->
-                    filterState.showProbeOnlyDevices || !device.probeOnly
-                },
-            )
-        }
-        .toList()
     val connectionLogItems = buildMonitorConnectionLogItems(
         accessPoints = accessPoints,
         disconnections = statistics?.disconnections.orEmpty(),
@@ -560,7 +533,7 @@ private fun MonitorModeContent(
                 top = 14.dp,
                 start = contentPadding.calculateStartPadding(layoutDirection),
                 end = contentPadding.calculateEndPadding(layoutDirection),
-                bottom = contentPadding.calculateBottomPadding() + if (page == 0) 76.dp else 0.dp,
+                bottom = contentPadding.calculateBottomPadding() + 12.dp,
             )
             LazyColumn(
                 modifier = Modifier
@@ -571,12 +544,12 @@ private fun MonitorModeContent(
                 contentPadding = listContentPadding,
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
             ) {
-                if (statistics != null) {
+                if (statistics != null && page == 0) {
                     item {
                         SmallTitle(text = "数据总览")
                     }
                     item {
-                        MonitorModeOverviewCard(statistics = statistics)
+                        MonitorModeOverviewCard(statistics = statistics, hopping = hopping)
                     }
                 }
                 stickyHeader(key = "monitor-mode-tabs-$page") {
@@ -589,27 +562,7 @@ private fun MonitorModeContent(
                         },
                     )
                 }
-                if (page == 0) {
-                    items(
-                        count = filteredAccessPoints.size,
-                        key = { index -> filteredAccessPoints[index].bssid },
-                    ) { index ->
-                        val accessPoint = filteredAccessPoints[index]
-                        MonitorAccessPointCard(
-                            accessPoint = accessPoint,
-                            expanded = expandedAccessPoints[accessPoint.bssid] == true,
-                            onExpandedChange = { expanded ->
-                                expandedAccessPoints[accessPoint.bssid] = expanded
-                            },
-                            onDeviceClick = { device ->
-                                selectedDevice = MonitorDeviceSelection(
-                                    bssid = accessPoint.bssid,
-                                    deviceMac = device.mac,
-                                )
-                            },
-                        )
-                    }
-                } else {
+                if (page == 1) {
                     if (connectionLogItems.isEmpty()) {
                         item { Card { BasicComponent(title = "暂无连接日志") } }
                     } else {
@@ -645,58 +598,6 @@ private fun MonitorModeContent(
                 }
             }
         }
-        if (pagerState.currentPage == 0) {
-            FloatingActionButton(
-                onClick = { showFilterSheet = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(
-                        end = contentPadding.calculateEndPadding(layoutDirection) + 4.dp,
-                        bottom = contentPadding.calculateBottomPadding() + 12.dp,
-                    ),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.FilterList,
-                    contentDescription = "筛选接入点地图",
-                    tint = colorScheme.onPrimary,
-                )
-            }
-        }
-    }
-
-    selectedDevice?.let { selection ->
-        val accessPoint = accessPoints.firstOrNull { it.bssid == selection.bssid }
-        val device = accessPoint?.devices?.firstOrNull { it.mac == selection.deviceMac }
-        if (accessPoint != null && device != null) {
-            MonitorDeviceDetailSheet(
-                accessPoint = accessPoint,
-                device = device,
-                savedNetworks = savedNetworks,
-                handshakeTest = handshakeTest,
-                onClearHandshakeTestResult = onClearHandshakeTestResult,
-                onDismiss = { selectedDevice = null },
-                onExport = { subtypeIds ->
-                    selectedDevice = null
-                    onExportDevicePcap(accessPoint.bssid, device.mac, subtypeIds)
-                },
-                onTestHandshake = { handshakeId, password ->
-                    onTestHandshake(
-                        accessPoint.bssid,
-                        device.mac,
-                        handshakeId,
-                        password,
-                    )
-                },
-                onExportHandshake = { handshakeId ->
-                    onExportHandshake(
-                        accessPoint.bssid,
-                        device.mac,
-                        handshakeId,
-                    )
-                },
-                onSaveHc22000 = onSaveHc22000,
-            )
-        }
     }
 
     handshakeAction?.let { selection ->
@@ -726,13 +627,6 @@ private fun MonitorModeContent(
         }
     }
 
-    MonitorMapFilterSheet(
-        show = showFilterSheet,
-        state = filterState,
-        onStateChange = onFilterStateChange,
-        onDismiss = { showFilterSheet = false },
-    )
-
     MonitorDisconnectionExportDialog(
         record = disconnectionExportTarget,
         accessPoint = disconnectionExportTarget?.let { record ->
@@ -758,7 +652,7 @@ private fun MonitorModeTabRow(
     onSelectedTabChange: (Int) -> Unit,
 ) {
     TabRow(
-        tabs = listOf("接入点地图", "连接日志"),
+        tabs = listOf("数据总览", "连接记录"),
         selectedTabIndex = selectedTab,
         onTabSelected = onSelectedTabChange,
         modifier = Modifier
@@ -767,70 +661,6 @@ private fun MonitorModeTabRow(
             .padding(vertical = 6.dp),
         colors = TabRowDefaults.tabRowColors(backgroundColor = Color.Transparent),
     )
-}
-
-@Composable
-private fun MonitorMapFilterSheet(
-    show: Boolean,
-    state: MonitorMapFilterState,
-    onStateChange: (MonitorMapFilterState) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
-    OverlayBottomSheet(
-        show = show,
-        title = "筛选接入点地图",
-        allowDismiss = true,
-        enableNestedScroll = true,
-        renderInRootScaffold = true,
-        onDismissRequest = onDismiss,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = bottomPadding + 12.dp),
-        ) {
-            MonitorMapFilterRow(
-                text = "显示仅探测的设备",
-                checked = state.showProbeOnlyDevices,
-                onCheckedChange = {
-                    onStateChange(state.copy(showProbeOnlyDevices = it))
-                },
-            )
-            MonitorMapFilterRow(
-                text = "显示未知名称的网络",
-                checked = state.showUnknownNetworks,
-                onCheckedChange = {
-                    onStateChange(state.copy(showUnknownNetworks = it))
-                },
-            )
-        }
-    }
-}
-
-@Composable
-private fun MonitorMapFilterRow(
-    text: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Checkbox(
-            state = if (checked) ToggleableState.On else ToggleableState.Off,
-            onClick = { onCheckedChange(!checked) },
-        )
-        Text(
-            text = text,
-            modifier = Modifier.padding(start = 12.dp),
-            color = colorScheme.onSurface,
-        )
-    }
 }
 
 private sealed interface MonitorConnectionLogItem {
@@ -1088,11 +918,11 @@ private data class PendingHc22000Export(
 )
 
 @Composable
-private fun MonitorModeOverviewCard(statistics: MonitorModeStatistics) {
+private fun MonitorModeOverviewCard(statistics: MonitorModeStatistics, hopping: Boolean) {
     Card {
         BasicComponent(
             title = "已进入监听模式",
-            summary = "信道 ${statistics.channel} · " +
+            summary = if (hopping) "跳频录制 · 循环监听所有可用信道" else if (statistics.frequencyMhz <= 0) "尚未选择抓取信道" else "信道 ${statistics.channel} · " +
                 "${frequencyBand(statistics.frequencyMhz)} · " +
                 "${statistics.frequencyMhz} MHz",
         )
@@ -1110,13 +940,8 @@ private fun MonitorModeOverviewCard(statistics: MonitorModeStatistics) {
     }
 }
 
-private data class MonitorDeviceSelection(
-    val bssid: String,
-    val deviceMac: String,
-)
-
 @Composable
-private fun MonitorAccessPointCard(
+internal fun MonitorAccessPointCard(
     accessPoint: MonitorAccessPoint,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,

@@ -6,6 +6,8 @@ import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
+import io.github.bszapp.wifitoolbox.contract.wifilist.createScanResultCompat
 
 data class MergedWifiGroup(
     val ssid: String,
@@ -45,10 +47,36 @@ data class MergedWifiGroup(
             results: List<ScanResult>,
             savedWifiList: List<WifiConfiguration>,
             connection: WifiInfo?,
+            capturedAccessPoints: List<MonitorAccessPoint> = emptyList(),
         ): List<MergedWifiGroup> {
             val connectionSsid = connection?.normalizedSsid()
-            val visible = results.filter { !it.SSID.isNullOrEmpty() }
-            val hidden = results.filter { it.SSID.isNullOrEmpty() }
+            val capturedByBssid = capturedAccessPoints.associateBy { it.bssid.lowercase() }
+            val mergedResults = results.map { result ->
+                val captured = capturedByBssid[result.BSSID.lowercase()]
+                val capturedSsid = captured?.ssid
+                val capturedSignal = captured?.signal?.latestDbm
+                if ((result.SSID.isNullOrEmpty() && !capturedSsid.isNullOrEmpty()) || capturedSignal != null) {
+                    ScanResult(result).apply {
+                        if (SSID.isNullOrEmpty() && !capturedSsid.isNullOrEmpty()) SSID = capturedSsid
+                        if (capturedSignal != null) level = capturedSignal
+                    }
+                } else result
+            }
+            val scannedBssids = results.mapTo(hashSetOf()) { it.BSSID.lowercase() }
+            // 仅抓包发现的接入点使用最后一次捕获的信号；未读取到的频率保持未知。
+            val capturedOnly = capturedAccessPoints.filter { it.bssid.lowercase() !in scannedBssids }
+                .map { point ->
+                    createScanResultCompat().apply {
+                        SSID = point.ssid ?: ""
+                        BSSID = point.bssid
+                        level = point.signal?.latestDbm ?: 0
+                        frequency = 0
+                        capabilities = point.securityProtocols.joinToString("") { "[${it.name}]" }
+                    }
+                }
+            val allResults = mergedResults + capturedOnly
+            val visible = allResults.filter { !it.SSID.isNullOrEmpty() }
+            val hidden = allResults.filter { it.SSID.isNullOrEmpty() }
 
             val mergedVisible = visible
                 .groupBy { it.SSID!! }
@@ -101,7 +129,7 @@ data class MergedWifiGroup(
             savedWifiList: List<WifiConfiguration>,
             connection: WifiInfo?,
         ): MergedWifiGroup {
-            val sortedNetworks = networks.sortedByDescending { it.level }
+            val sortedNetworks = networks.sortedWith(compareBy<ScanResult> { it.level == 0 }.thenByDescending { it.level })
             val currentBssid = connection?.bssid
             val hasCurrentAccessPoint = currentBssid != null && sortedNetworks.any {
                 currentBssid.equals(it.BSSID, ignoreCase = true)

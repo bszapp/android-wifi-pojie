@@ -26,6 +26,11 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateMapOf
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
+import io.github.bszapp.wifitoolbox.uidefault.screen.MonitorAccessPointCard
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,7 +53,11 @@ import kotlinx.coroutines.launch
 fun WifiDetailSheet(
     group: MergedWifiGroup,
     onDismiss: () -> Unit,
+    capturedAccessPoints: List<MonitorAccessPoint> = emptyList(),
+    onDeviceClick: (MonitorAccessPoint, MonitorDevice) -> Unit = { _, _ -> },
 ) {
+    val lease = io.github.bszapp.wifitoolbox.uidefault.component.rememberSheetLease(true)
+    if (!lease.ownsPresentation) return
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -125,19 +134,24 @@ fun WifiDetailSheet(
                     verticalAlignment = Alignment.Top,
                 ) { page ->
                     when (page) {
-                        0 -> WifiNetworkDetailPage(group)
+                        0 -> WifiNetworkDetailPage(group, capturedAccessPoints, onDeviceClick)
                         else -> WifiConnectionInfoPage(group.connection)
                     }
                 }
             } else {
-                WifiNetworkDetailPage(group)
+                WifiNetworkDetailPage(group, capturedAccessPoints, onDeviceClick)
             }
         }
     }
 }
 
 @Composable
-private fun WifiNetworkDetailPage(group: MergedWifiGroup) {
+private fun WifiNetworkDetailPage(
+    group: MergedWifiGroup,
+    capturedAccessPoints: List<MonitorAccessPoint>,
+    onDeviceClick: (MonitorAccessPoint, MonitorDevice) -> Unit,
+) {
+    val expandedCapture = remember { mutableStateMapOf<String, Boolean>() }
     val accessPoints = buildList<DetailAccessPoint> {
         group.networks.forEach { add(DetailAccessPoint.Scanned(it)) }
         group.virtualAccessPoint?.let { add(DetailAccessPoint.Virtual(it)) }
@@ -171,6 +185,24 @@ private fun WifiNetworkDetailPage(group: MergedWifiGroup) {
                     isCurrent = group.isCurrentAccessPoint(item.value),
                 )
                 is DetailAccessPoint.Virtual -> VirtualApCard(item.value)
+            }
+        }
+
+        if (capturedAccessPoints.isNotEmpty()) {
+            SectionHeader(icon = { Icon(Icons.Rounded.Router, null) },
+                title = "抓包数据", badge = capturedAccessPoints.size.toString())
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                capturedAccessPoints.forEach { accessPoint ->
+                    MonitorAccessPointCard(
+                        accessPoint = accessPoint,
+                        expanded = expandedCapture[accessPoint.bssid] == true,
+                        onExpandedChange = { expandedCapture[accessPoint.bssid] = it },
+                        onDeviceClick = { onDeviceClick(accessPoint, it) },
+                    )
+                }
             }
         }
 

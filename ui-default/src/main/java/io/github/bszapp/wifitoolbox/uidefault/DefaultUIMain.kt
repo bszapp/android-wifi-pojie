@@ -5,16 +5,21 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Log
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.entryProvider
@@ -24,6 +29,7 @@ import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.bszapp.wifitoolbox.uidefault.component.bottombar.BottomBarMiuix
+import io.github.bszapp.wifitoolbox.uidefault.component.CommonConfirmationDialog
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MainScreenState
 import io.github.bszapp.wifitoolbox.uidefault.model.rememberMainScreenState
@@ -58,8 +64,11 @@ private const val TAG = "DefaultUI"
 @Composable
 fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
     val navigator = rememberNavigator(Route.Main)
+    val sheetPresentation = remember { io.github.bszapp.wifitoolbox.uidefault.component.SheetPresentationManager() }
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val confirmationDialogs by
+        viewModel.confirmationDialogs.collectAsStateWithLifecycle()
 
     LaunchedEffect(viewModel, snackbarHostState, context) {
         coroutineScope {
@@ -91,24 +100,58 @@ fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
     }
 
     WifiToolboxDefaultTheme {
-        CompositionLocalProvider(LocalNavigator provides navigator) {
-            NavDisplay(
-                backStack = navigator.backStack,
-                entryDecorators = listOf(
-                    rememberSaveableStateHolderNavEntryDecorator(),
-                    rememberViewModelStoreNavEntryDecorator(),
-                ),
-                onBack = { navigator.pop() },
-                entryProvider = entryProvider {
-                    entry<Route.Main> {
-                        MainPager(
-                            viewModel = viewModel,
-                            snackbarHostState = snackbarHostState,
-                        )
+        CompositionLocalProvider(
+            LocalNavigator provides navigator,
+            io.github.bszapp.wifitoolbox.uidefault.component.LocalSheetPresentationManager provides sheetPresentation,
+        ) {
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    NavDisplay(
+                        backStack = navigator.backStack,
+                        entryDecorators = listOf(
+                            rememberSaveableStateHolderNavEntryDecorator(),
+                            rememberViewModelStoreNavEntryDecorator(),
+                        ),
+                        onBack = { navigator.pop() },
+                        entryProvider = entryProvider {
+                            entry<Route.Main> {
+                                MainPager(
+                                    viewModel = viewModel,
+                                    snackbarHostState = snackbarHostState,
+                                )
+                            }
+                            entry<Route.ColorPalette> { ColorPaletteScreen() }
+                        },
+                    )
+
+                    confirmationDialogs.forEach { dialog ->
+                        key(dialog.id) {
+                            CommonConfirmationDialog(
+                                show = dialog.show,
+                                title = dialog.title,
+                                content = dialog.content,
+                                cancelButtonText = dialog.cancelButtonText,
+                                confirmButtonText = dialog.confirmButtonText,
+                                onDismissRequest = {
+                                    viewModel.dismissConfirmationDialog(dialog.id)
+                                },
+                                onCancel = {
+                                    viewModel.cancelConfirmationDialog(dialog.id)
+                                },
+                                onConfirm = {
+                                    viewModel.confirmConfirmationDialog(dialog.id)
+                                },
+                                onDismissFinished = {
+                                    viewModel.confirmationDialogDismissFinished(dialog.id)
+                                },
+                            )
+                        }
                     }
-                    entry<Route.ColorPalette> { ColorPaletteScreen() }
-                },
-            )
+                }
+            }
         }
     }
 }

@@ -17,8 +17,8 @@ data class TerminalLogBatch(
 data class TerminalLogState(
     val terminalId: Long,
     val generation: Long = 0L,
-    val oldestAvailableId: Long = 1L,
-    val latestId: Long = 0L,
+    val oldestAvailableId: Long = 0L,
+    val latestId: Long = -1L,
     val lineCount: Int = 0,
     val entries: List<TerminalLogEntry> = emptyList(),
     val inputPrompt: String? = null,

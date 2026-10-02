@@ -138,10 +138,12 @@ class Companion:
         if not line:
             self.wpas.wait()
             return False
-        line = line.rstrip('\n')
 
         if verbose:
-            sys.stderr.write(line + '\n')
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+        line = line.rstrip('\n')
 
         if line.startswith('WPS: '):
             if 'Building Message WSC_Done' in line:
@@ -151,6 +153,8 @@ class Companion:
                 n = int(line.split('Building Message M')[1].replace('D', ''))
                 self.connection_status.last_m_message = n
                 self.__print_with_indicators('*', 'Sending WPS Message M{}…'.format(n))
+            elif 'Received M2D' in line:
+                self.__print_with_indicators('*', 'Received WPS Message M2D')
             elif 'Received M' in line:
                 n = int(line.split('Received M')[1])
                 self.connection_status.last_m_message = n
@@ -292,7 +296,10 @@ class Companion:
 
     def __single_connection_attempt(self, bssid=None, pin=None, pbc_mode=False, verbose=None):
         self.connection_status.clear()
-        self.wpas.stdout.read(300)   # Clean the pipe
+        initial_output = self.wpas.stdout.read(300)   # Clean the pipe
+        if verbose or self.print_debug:
+            sys.stdout.write(initial_output)
+            sys.stdout.flush()
 
         if pbc_mode:
             # Consume each reply before WPS_PBC so a stale blacklist reply

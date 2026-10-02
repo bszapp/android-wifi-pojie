@@ -58,7 +58,6 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStep
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSignalStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
 import java.text.SimpleDateFormat
@@ -74,7 +73,7 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -174,7 +173,7 @@ internal fun MonitorDeviceDetailSheet(
         }
     }
 
-    OverlayBottomSheet(
+    SingleOverlayBottomSheet(
         show = showDeviceDetails,
         title = if (page == DeviceSheetPage.DETAILS) "设备详情" else "导出 PCAP",
         allowDismiss = true,
@@ -212,28 +211,8 @@ internal fun MonitorDeviceDetailSheet(
                         }
                     }
                     item {
-                        SmallTitle(text = "实时网速")
-                        Card {
-                            BasicComponent(
-                                title = "上传",
-                                summary = formatBytesPerSecond(
-                                    device.realtime.uploadBytesPerSecond,
-                                ),
-                            )
-                            BasicComponent(
-                                title = "下载",
-                                summary = formatBytesPerSecond(
-                                    device.realtime.downloadBytesPerSecond,
-                                ),
-                            )
-                        }
-                    }
-                    item {
-                        SmallTitle(text = "信号分析")
-                        Card {
-                            SignalComponents("目标设备信号", device.realtime.signal)
-                            SignalComponents("接入点信号", accessPoint.signal)
-                        }
+                        SmallTitle(text = "信号与传输")
+                        MonitorDeviceTrafficDiagram(accessPoint = accessPoint, device = device)
                     }
                     item {
                         SmallTitle(text = "802.11 帧统计")
@@ -970,29 +949,6 @@ private fun FrameStatisticsValues(byteCount: Long, packetCount: Long) {
         )
     }
 }
-
-@Composable
-private fun SignalComponents(title: String, signal: MonitorSignalStatistics?) {
-    if (signal == null) {
-        BasicComponent(title = title, summary = "未知")
-        return
-    }
-    BasicComponent(title = title, summary = "${signal.latestDbm} dBm")
-    BasicComponent(
-        title = "$title · 最近一秒",
-        summary = if (signal.sampleCount > 0) {
-            "平均 ${formatDbm(signal.averageDbm)} · " +
-                "范围 ${signal.minimumDbm}～${signal.maximumDbm} dBm · " +
-                "${signal.sampleCount} 个样本"
-        } else {
-            "暂无最近一秒样本"
-        },
-    )
-}
-
-private fun formatDbm(value: Float): String = "%.1f dBm".format(value)
-
-private fun formatBytesPerSecond(value: Long): String = "${formatMonitorByteCount(value)}/s"
 
 private fun monitorNetworkPlaceholder(accessPoint: MonitorAccessPoint): String =
     if (accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN) {

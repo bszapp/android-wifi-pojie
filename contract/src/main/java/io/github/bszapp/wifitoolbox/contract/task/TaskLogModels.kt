@@ -20,8 +20,8 @@ data class TaskLogBatch(
 data class TaskLogState(
     val scopeTaskId: Long,
     val generation: Long = 0L,
-    val oldestAvailableId: Long = 1L,
-    val latestId: Long = 0L,
+    val oldestAvailableId: Long = 0L,
+    val latestId: Long = -1L,
     val lineCount: Int = 0,
     val entries: List<TaskLogEntry> = emptyList(),
 )
@@ -29,6 +29,7 @@ data class TaskLogState(
 data class TrackedTaskState(
     val snapshot: TaskSnapshot,
     val logs: TaskLogState,
+    val capturedNetworks: List<WpsCapturedNetwork> = emptyList(),
 )
 
 data class TaskControllerState(

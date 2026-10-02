@@ -12,12 +12,12 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.io.PrintStream
 import java.text.SimpleDateFormat
-import java.util.ArrayDeque
+import io.github.bszapp.wifitoolbox.contract.log.sliceLogRange
 import java.util.Date
 import java.util.Locale
 
 /** 一个日志来源对应一个纯内存 logcat 记录器；解析与缓存逻辑由所有来源共用。 */
-internal class LogcatRecorder(
+class LogcatRecorder(
     private val recorderName: String,
     private val threadName: String,
     private val startMessage: String,
@@ -27,10 +27,10 @@ internal class LogcatRecorder(
     private val redirectStandardStreams: Boolean = false,
 ) {
     private val lock = Any()
-    private val entries = ArrayDeque<ServiceLogEntry>()
+    private val entries = ArrayList<ServiceLogEntry>()
     private val entryListeners = linkedSetOf<(ServiceLogEntry) -> Unit>()
 
-    private var nextId = 1L
+    private var nextId = 0L
     private var logcatProcess: java.lang.Process? = null
     private var stopping = false
     private var onVisibleRangeChanged: ((oldestAvailableId: Long, latestId: Long) -> Unit)? = null
@@ -133,9 +133,9 @@ internal class LogcatRecorder(
     fun getRange(fromIdInclusive: Long, toIdInclusive: Long): ServiceLogBatch =
         synchronized(lock) {
             val latestId = nextId - 1L
-            val oldestAvailableId = entries.peekFirst()?.id ?: nextId
+            val oldestAvailableId = entries.firstOrNull()?.id ?: nextId
             val selected = if (fromIdInclusive <= toIdInclusive) {
-                entries.filter { it.id in fromIdInclusive..toIdInclusive }
+                entries.sliceLogRange(oldestAvailableId, fromIdInclusive, toIdInclusive, 500)
             } else {
                 emptyList()
             }
@@ -473,9 +473,8 @@ internal class LogcatRecorder(
             rawLine = line,
         )
 
-        entries.addLast(entry)
+        entries.add(entry)
 
-        while (entries.size > MAX_BUFFER_ENTRIES) entries.removeFirst()
         return entry
     }
 
@@ -511,7 +510,7 @@ internal class LogcatRecorder(
     }
 
     private fun visibleRangeLocked(): Pair<Long, Long> =
-        (entries.peekFirst()?.id ?: nextId) to (nextId - 1L)
+        (entries.firstOrNull()?.id ?: nextId) to (nextId - 1L)
 
     private fun extractTag(line: String): String {
         if (line.startsWith("[logcat stderr]")) return "logcat"
@@ -817,7 +816,6 @@ internal class LogcatRecorder(
         )
 
         const val MAX_LOGCAT_MESSAGE_CHARACTERS = 3_000
-        const val MAX_BUFFER_ENTRIES = 50_000
         const val STACK_TRACE_SPACES_PER_INDENT = 4
         const val LOGCAT_BOUNDARY_LOOKBACK_MILLIS = 1_000L
         const val LOGCAT_BUFFER_MARKER_PREFIX = "--------- beginning of"

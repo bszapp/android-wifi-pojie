@@ -14,6 +14,9 @@ internal class TaskContext(
     private val taskId: Long,
     private val manager: TaskManager,
 ) {
+    fun recordCapturedNetwork(network: io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork) =
+        manager.recordCapturedNetwork(taskId, network)
+
     fun log(text: String) = manager.appendLog(taskId, text)
 
     fun updateProgress(progress: TaskProgress) = manager.updateProgress(taskId, progress)

@@ -32,7 +32,7 @@ import kotlinx.parcelize.Parcelize
  * ## 日志
  *
  * 每个任务拥有独立日志 ID 范围，同时所有任务日志组成一个长期显示的全局范围。两种范围
- * 都最多保存 50,000 行，清空后日志 ID 继续递增。回调仅表示权威数据范围发生变化，App
+ * 不设自动裁剪总量上限，日志 ID 从 0 开始，清空后继续递增。回调仅表示权威数据范围发生变化，App
  * 必须根据回调提供的 generation 和 ID 范围重新读取，不得把回调顺序当作最终状态顺序。
  *
  * ## ConnectWifiTask
@@ -48,6 +48,17 @@ import kotlinx.parcelize.Parcelize
  * SSID 的任意分析事件时，本任务立即结束并在日志中记录失败。WPA 1/4 开始握手步骤计时；
  * 每次 2/4 将握手计数加一，计数大于配置的最大次数时立即结束；Key negotiation completed
  * 表示连接成功。所有结论都写入任务日志。
+ *
+ * ### 网卡测试目标
+ *
+ * [ConnectWifiTarget.NetworkCard] 仅在普通网卡模式、Root 服务和已安装容器下启动。
+ * Service 通过 chroot 中的 managed_connect.py 直接使用 nl80211 和 EAPOL 完成
+ * WPA2-PSK/CCMP 测试，不新增、更新或删除 Android 保存配置。已有连接先由网卡断开。
+ * passwords 的每一项对应一次有效 M1 后发送的 M2；再次收到 M1 且没有下一项密码时
+ * 立即中断，不循环、不复用末项。mac/name 为 null 时使用网卡当前 MAC / 系统设备名称。
+ * 成功条件包含密钥协商及 DHCP 地址读回，IP 只写入日志；随后立即断开。停止及所有
+ * 失败路径均须清理本次 IP、断开本次连接并恢复原 MAC。协议原始包、状态码和清理结果
+ * 全部记录到通用任务日志。FINISHED 仍不携带结果，UI 不得推测结果。
  *
  * ## WpsPbcTask
  *
@@ -83,7 +94,7 @@ sealed class TaskProgress : Parcelable {
         val autoSaveToDevice: Boolean,
         val useIncompleteProtocol: Boolean,
         val ignoreRepeatedDevices: Boolean,
-        val networks: List<WpsCapturedNetwork>,
+        val networkCount: Int,
     ) : TaskProgress()
 }
 
@@ -95,6 +106,7 @@ enum class ConnectWifiStage {
     WPA_HANDSHAKE_2_OF_4,
     WPA_HANDSHAKE_3_OF_4,
     WPA_HANDSHAKE_4_OF_4,
+    IP_NEGOTIATION,
 }
 
 enum class ConnectWifiTaskType {
@@ -111,6 +123,13 @@ sealed class ConnectWifiTarget : Parcelable {
     data class TemporaryNetwork(
         val ssid: String,
         val password: String,
+    ) : ConnectWifiTarget()
+
+    data class NetworkCard(
+        val ssid: String,
+        val passwords: List<String>,
+        val mac: String? = null,
+        val name: String? = null,
     ) : ConnectWifiTarget()
 }
 
@@ -228,4 +247,12 @@ data class TaskSnapshot(
     val request: TaskStartRequest,
     val state: TaskExecutionState,
     val progress: TaskProgress?,
+) : Parcelable
+
+/** 累计结果按索引读取；允许同一网络重复出现。 */
+@Parcelize
+data class WpsCapturedNetworkPage(
+    val fromIndex: Int,
+    val totalCount: Int,
+    val networks: List<WpsCapturedNetwork>,
 ) : Parcelable

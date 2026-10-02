@@ -24,7 +24,7 @@ import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -40,7 +40,7 @@ fun ServiceStatusDialog(
     onExit: () -> Unit,
     onReselect: () -> Unit,
 ) {
-    OverlayBottomSheet(
+    SingleOverlayBottomSheet(
         title = "服务状态",
         show = show,
         allowDismiss = true,

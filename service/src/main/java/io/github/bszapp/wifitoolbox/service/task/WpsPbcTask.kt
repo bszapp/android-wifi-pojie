@@ -182,6 +182,7 @@ internal class WpsPbcTask(
         synchronized(lock) {
             networks += network
         }
+        context.recordCapturedNetwork(network)
         context.log("已获取网络：ssid=${network.ssid} mac=${network.mac}")
         publishProgress(context)
 
@@ -209,11 +210,11 @@ internal class WpsPbcTask(
                 autoSaveToDevice = autoSaveToDevice,
                 useIncompleteProtocol = useIncompleteProtocol,
                 ignoreRepeatedDevices = ignoreRepeatedDevices,
-                networks = networks.toList(),
+                networkCount = networks.size,
             )
         }
         context.updateProgress(progress)
-        context.log("WPS-PBC 进度已发布：networkCount=${progress.networks.size}")
+        context.log("WPS-PBC 进度已发布：networkCount=${progress.networkCount}")
     }
 
     private fun captureAttemptSettings(): AttemptSettings = synchronized(lock) {

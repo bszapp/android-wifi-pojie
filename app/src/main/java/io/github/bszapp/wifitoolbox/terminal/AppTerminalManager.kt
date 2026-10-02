@@ -236,7 +236,7 @@ internal class AppTerminalManager(
         val lock = Any()
         val logs = ArrayDeque<TerminalLogEntry>()
         val outputAccumulator = TerminalOutputAccumulator()
-        var nextLogId = 1L
+        var nextLogId = 0L
         var logGeneration = 0L
         var stopping = false
         var inputPrompt: String? = null
@@ -249,7 +249,6 @@ internal class AppTerminalManager(
                     changed = true
                 }
             }
-            while (logs.size > MAX_LOG_LINES) logs.removeFirst()
             inputPrompt = update.inputPrompt
             if (!changed) return@synchronized false
             logGeneration++
@@ -276,7 +275,6 @@ internal class AppTerminalManager(
 
     private companion object {
         const val TAG = "AppTerminalManager"
-        const val MAX_LOG_LINES = 50_000
         const val STATE_PUBLISH_INTERVAL_MILLIS = 100L
         const val STOP_TIMEOUT_MILLIS = 1_500L
         const val HOST_TOOL_PATH =

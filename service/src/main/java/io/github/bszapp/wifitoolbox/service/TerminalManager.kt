@@ -11,7 +11,7 @@ import io.github.bszapp.wifitoolbox.contract.terminal.TerminalOutputUpdate
 import java.io.BufferedWriter
 import java.io.File
 import java.io.IOException
-import java.util.ArrayDeque
+import io.github.bszapp.wifitoolbox.contract.log.sliceLogRange
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
@@ -343,9 +343,9 @@ internal class TerminalManager(
         val onExit: (terminalId: Long, exitCode: Int) -> Unit,
     ) {
         val lock = Any()
-        val logs = ArrayDeque<TerminalLogEntry>()
+        val logs = ArrayList<TerminalLogEntry>()
         val outputAccumulator = TerminalOutputAccumulator()
-        var nextLogId = 1L
+        var nextLogId = 0L
         var logGeneration = 0L
         var stopping = false
         var forcedStop = false
@@ -364,11 +364,10 @@ internal class TerminalManager(
             var changed = update.inputPromptChanged
             update.completedLines.forEach { line ->
                 if (line.isNotEmpty()) {
-                    logs.addLast(TerminalLogEntry(nextLogId++, line))
+                    logs.add(TerminalLogEntry(nextLogId++, line))
                     changed = true
                 }
             }
-            while (logs.size > MAX_LOG_LINES) logs.removeFirst()
             currentInputPrompt = update.inputPrompt
             if (!changed) return@synchronized null
             logGeneration++
@@ -396,7 +395,7 @@ internal class TerminalManager(
                     oldestAvailableId = range.oldestAvailableId,
                     latestId = range.latestId,
                     lineCount = range.lineCount,
-                    entries = logs.filter { it.id in fromIdInclusive..toIdInclusive },
+                    entries = logs.sliceLogRange(range.oldestAvailableId, fromIdInclusive, toIdInclusive, 500),
                 )
             }
 
@@ -411,7 +410,6 @@ internal class TerminalManager(
 
     companion object {
         private const val TAG = "TerminalManager"
-        private const val MAX_LOG_LINES = 50_000
         private const val STOP_TIMEOUT_MILLIS = 1_500L
         private const val OWNER_THREAD_JOIN_MILLIS = 1_500L
         private const val HOST_TOOL_PATH =

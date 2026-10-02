@@ -3,35 +3,65 @@ package io.github.bszapp.wifitoolbox.contract.wifilist
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
-enum class WifiInformationSource(
+enum class WifiMode(
     val wireValue: Int,
     val displayName: String,
 ) {
-    SYSTEM(0, "扫描"),
-    HYBRID(1, "混合扫描"),
+    NORMAL(0, "普通模式"),
     MONITOR(2, "监听模式");
 
     companion object {
-        fun fromWireValue(value: Int): WifiInformationSource =
+        fun fromWireValue(value: Int): WifiMode =
             entries.firstOrNull { it.wireValue == value }
                 ?: throw IllegalArgumentException("未知 Wi-Fi 信息源: $value")
     }
 }
 
 @Parcelize
-data class WifiInformationSourceState(
-    val source: WifiInformationSource,
-    val initializing: Boolean,
+data class WifiModeState(
+    val mode: WifiMode,
+    val hybridScanEnabled: Boolean = false,
+    val capturing: Boolean = false,
+    val hoppingCapture: Boolean = false,
+    val clearingCapture: Boolean = false,
+    val availableChannels: List<MonitorChannel> = emptyList(),
     val monitorStatistics: MonitorModeStatistics? = null,
+    val modeSwitch: WifiModeSwitch? = null,
+    val captureClearProgress: MonitorCaptureClearProgress? = null,
+) : Parcelable
+
+enum class MonitorCaptureClearStage { PREPARING, SWITCHING, FINISHED }
+
+/** 清理操作进度；完成后保留内容供 Sheet 退场，不作为网卡模式。 */
+@Parcelize
+data class MonitorCaptureClearProgress(
+    val handshakesOnly: Boolean,
+    val isRunning: Boolean,
+    val stage: MonitorCaptureClearStage = MonitorCaptureClearStage.PREPARING,
+    val processedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+) : Parcelable
+
+/** 切换操作的进度，不代表网卡类型；结束后保留目标供界面退场使用。 */
+@Parcelize
+data class WifiModeSwitch(
+    val targetMode: WifiMode,
+    val isRunning: Boolean,
 ) : Parcelable
 
 @Parcelize
+data class MonitorChannel(val channel: Int, val frequencyMhz: Int) : Parcelable
+
+@Parcelize
 data class MonitorModeStatistics(
+    val sessionGeneration: Long = 0L,
+    val revision: Long = 0L,
     val recordedBytes: Long = 0L,
     val channel: Int = 0,
     val frequencyMhz: Int = 0,
     val accessPoints: List<MonitorAccessPoint> = emptyList(),
     val disconnections: List<MonitorDisconnectionRecord> = emptyList(),
+    val nonHandshakeBytes: Long = 0L,
 ) : Parcelable
 
 @Parcelize

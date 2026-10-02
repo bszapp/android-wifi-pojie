@@ -10,7 +10,6 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,7 +36,6 @@ fun WifiGroupCardActions(
     onDisconnect: () -> Unit = {},
     onOpenDetail: () -> Unit = {},
     onConnectWithConfig: (WifiConfiguration) -> Unit = {},
-    onEnterMonitorMode: () -> Unit = {},
     onUpdateConfig: (networkId: Int, patch: WifiConfigPatch) -> Unit = { _, _ -> },
 ) {
     var menuExpanded by rememberSaveable { mutableStateOf(false) }
@@ -131,21 +129,6 @@ fun WifiGroupCardActions(
             )
         }
 
-        add(
-            MenuGroupConfig(
-                title = null,
-                items = listOf(
-                    MenuItemConfig(
-                        title = "进入监听模式",
-                        icon = Icons.Outlined.Radar,
-                        onCheckedChange = {
-                            menuExpanded = false
-                            onEnterMonitorMode()
-                        },
-                    ),
-                ),
-            ),
-        )
     }
 
     ActionButtonGroupWithMenu(

@@ -1,5 +1,6 @@
 package io.github.bszapp.wifitoolbox.uidefault.screen
 
+import android.os.Process
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -123,6 +124,8 @@ fun LogScreen(
     val context = LocalContext.current
     val entries by viewModel.serviceLogs.entries.collectAsStateWithLifecycle()
     val rawViewEnabled by viewModel.serviceLogs.rawViewEnabled.collectAsStateWithLifecycle()
+    val appEntries by viewModel.appLogs.entries.collectAsStateWithLifecycle()
+    val appRawViewEnabled by viewModel.appLogs.rawViewEnabled.collectAsStateWithLifecycle()
     val systemWifiEntries by viewModel.serviceLogs.systemWifiEntries.collectAsStateWithLifecycle()
     val systemWifiRawViewEnabled by
         viewModel.serviceLogs.systemWifiRawViewEnabled.collectAsStateWithLifecycle()
@@ -130,11 +133,12 @@ fun LogScreen(
     val appTerminalManagerState by viewModel.terminals.appState.collectAsStateWithLifecycle()
     val taskManagerState by viewModel.tasks.state.collectAsStateWithLifecycle()
     val taskLogEntries = taskManagerState.globalLogs.entries
-    val servicePid by viewModel.startup.pid.collectAsStateWithLifecycle()
+    val serviceInfo by viewModel.startup.serviceInfo.collectAsStateWithLifecycle()
+    val servicePid = serviceInfo?.servicePid
     val serviceTerminalIds = terminalManagerState.aliveTerminalIds
     val appTerminalIds = appTerminalManagerState.aliveTerminalIds
     val pages = remember(serviceTerminalIds, appTerminalIds) {
-        listOf<LogPage>(LogPage.Service, LogPage.SystemWifi, LogPage.Task) +
+        listOf<LogPage>(LogPage.Service, LogPage.SystemWifi, LogPage.Task, LogPage.App) +
             serviceTerminalIds.map(LogPage::ServiceTerminal) +
             appTerminalIds.map(LogPage::AppTerminal)
     }
@@ -144,6 +148,7 @@ fun LogScreen(
                 LogPage.Service -> "日志"
                 LogPage.SystemWifi -> "系统wifi日志"
                 LogPage.Task -> "任务日志"
+                LogPage.App -> "应用日志"
                 is LogPage.ServiceTerminal -> "终端 ${page.id}"
                 is LogPage.AppTerminal -> "App终端 ${page.id}"
             }
@@ -153,22 +158,24 @@ fun LogScreen(
     val selectedTabIndex = pagerState.currentPage.coerceIn(0, tabs.lastIndex)
     val selectedPage = pages.getOrNull(selectedTabIndex) ?: LogPage.Service
     val selectedTerminal = when (selectedPage) {
-        LogPage.Service, LogPage.SystemWifi, LogPage.Task -> null
+        LogPage.Service, LogPage.SystemWifi, LogPage.Task, LogPage.App -> null
         is LogPage.ServiceTerminal -> terminalManagerState.terminals[selectedPage.id]
         is LogPage.AppTerminal -> appTerminalManagerState.terminals[selectedPage.id]
     }
     val selectedRawViewEnabled = when (selectedPage) {
         LogPage.Service -> rawViewEnabled
         LogPage.SystemWifi -> systemWifiRawViewEnabled
+        LogPage.App -> appRawViewEnabled
         LogPage.Task -> false
         is LogPage.ServiceTerminal, is LogPage.AppTerminal -> false
     }
     val selectedPageIsTerminal =
         selectedPage is LogPage.ServiceTerminal || selectedPage is LogPage.AppTerminal
     val selectedPageSupportsParsedView =
-        selectedPage == LogPage.Service || selectedPage == LogPage.SystemWifi
+        selectedPage == LogPage.Service || selectedPage == LogPage.SystemWifi || selectedPage == LogPage.App
     val currentServiceEntriesForSave by rememberUpdatedState(entries)
     val currentSystemWifiEntriesForSave by rememberUpdatedState(systemWifiEntries)
+    val currentAppEntriesForSave by rememberUpdatedState(appEntries)
     val currentTaskEntriesForSave by rememberUpdatedState(taskLogEntries)
     val currentServiceTerminalsForSave by rememberUpdatedState(
         serviceTerminalIds.map { terminalId ->
@@ -179,6 +186,8 @@ fun LogScreen(
     val rawListState = rememberLazyListState()
     val systemWifiListState = rememberLazyListState()
     val systemWifiRawListState = rememberLazyListState()
+    val appListState = rememberLazyListState()
+    val appRawListState = rememberLazyListState()
     val taskLogListState = rememberLazyListState()
     val terminalListStates = remember { mutableMapOf<LogPage, LazyListState>() }
     val scope = rememberCoroutineScope()
@@ -205,6 +214,7 @@ fun LogScreen(
         if (uri != null) {
             val serviceEntries = currentServiceEntriesForSave
             val systemWifiLogEntries = currentSystemWifiEntriesForSave
+            val appLogEntries = currentAppEntriesForSave
             val taskEntries = currentTaskEntriesForSave
             val serviceTerminals = currentServiceTerminalsForSave
             scope.launch(Dispatchers.IO) {
@@ -218,6 +228,9 @@ fun LogScreen(
                     }
                     zip.writeLogEntry("任务日志.log") {
                         taskEntries.forEach { entry -> emit(entry.displayLogLine()) }
+                    }
+                    zip.writeLogEntry("应用日志.log") {
+                        appLogEntries.forEach { entry -> emit(entry.rawLine) }
                     }
                     serviceTerminals.forEach { (terminalId, terminalEntries) ->
                         zip.writeLogEntry("终端${terminalId}.log") {
@@ -269,6 +282,7 @@ fun LogScreen(
                                         !systemWifiRawViewEnabled,
                                     )
                                 LogPage.Task -> Unit
+                                LogPage.App -> viewModel.appLogs.setRawViewEnabled(!appRawViewEnabled)
                                 is LogPage.ServiceTerminal, is LogPage.AppTerminal -> Unit
                             }
                             showMenu = false
@@ -295,6 +309,11 @@ fun LogScreen(
                                     }
                                     LogPage.Task -> if (taskLogEntries.isNotEmpty()) {
                                         taskLogListState.animateScrollToItem(0)
+                                    }
+                                    LogPage.App -> if (appRawViewEnabled) {
+                                        appRawListState.animateScrollToItem(0)
+                                    } else if (appEntries.isNotEmpty()) {
+                                        appListState.animateScrollToItem(0)
                                     }
                                 }
                             }
@@ -331,6 +350,11 @@ fun LogScreen(
                                             taskLogEntries.lastIndex,
                                         )
                                     }
+                                    LogPage.App -> if (appRawViewEnabled && appEntries.isNotEmpty()) {
+                                        appRawListState.animateScrollToItem(appEntries.lastIndex)
+                                    } else if (appEntries.isNotEmpty()) {
+                                        appListState.animateScrollToItem(appEntries.lastIndex)
+                                    }
                                 }
                             }
                         },
@@ -340,6 +364,7 @@ fun LogScreen(
                                 LogPage.Service -> viewModel.serviceLogs.clear()
                                 LogPage.SystemWifi -> viewModel.serviceLogs.clearSystemWifi()
                                 LogPage.Task -> viewModel.tasks.clearLogs()
+                                LogPage.App -> viewModel.appLogs.clear()
                                 is LogPage.ServiceTerminal -> viewModel.terminals.clearLogs(selectedPage.id)
                                 is LogPage.AppTerminal -> viewModel.terminals.clearAppLogs(selectedPage.id)
                             }
@@ -347,7 +372,7 @@ fun LogScreen(
                         onCloseTerminal = {
                             showMenu = false
                             when (selectedPage) {
-                                LogPage.Service, LogPage.SystemWifi, LogPage.Task -> Unit
+                                LogPage.Service, LogPage.SystemWifi, LogPage.Task, LogPage.App -> Unit
                                 is LogPage.ServiceTerminal -> viewModel.terminals.closeTerminal(selectedPage.id)
                                 is LogPage.AppTerminal -> viewModel.terminals.closeAppTerminal(selectedPage.id)
                             }
@@ -457,6 +482,32 @@ fun LogScreen(
                         endPadding = innerPadding.calculateEndPadding(layoutDirection),
                         bottomPadding = bottomInnerPadding,
                     )
+                }
+                LogPage.App -> {
+                    if (appRawViewEnabled) {
+                        RawLogView(
+                            entries = appEntries,
+                            text = ServiceLogEntry::rawLine,
+                            listState = appRawListState,
+                            softWrap = rawSoftWrapEnabled,
+                            scrollBehavior = scrollBehavior,
+                            topPadding = innerPadding.calculateTopPadding(),
+                            startPadding = innerPadding.calculateStartPadding(layoutDirection),
+                            endPadding = innerPadding.calculateEndPadding(layoutDirection),
+                            bottomPadding = bottomInnerPadding,
+                        )
+                    } else {
+                        LogCardList(
+                            entries = appEntries,
+                            listState = appListState,
+                            scrollBehavior = scrollBehavior,
+                            fallbackPid = Process.myPid(),
+                            topPadding = innerPadding.calculateTopPadding(),
+                            startPadding = innerPadding.calculateStartPadding(layoutDirection),
+                            endPadding = innerPadding.calculateEndPadding(layoutDirection),
+                            bottomPadding = bottomInnerPadding,
+                        )
+                    }
                 }
                 is LogPage.ServiceTerminal -> {
                     val terminalId = logPage.id
@@ -1002,6 +1053,8 @@ private sealed interface LogPage {
     data object SystemWifi : LogPage
 
     data object Task : LogPage
+
+    data object App : LogPage
 
     data class ServiceTerminal(val id: Long) : LogPage
 

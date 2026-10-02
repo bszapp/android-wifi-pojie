@@ -58,7 +58,7 @@ object TaskLogTransport {
             val oldestAvailableId = input.readLong()
             val latestId = input.readLong()
             val lineCount = input.readInt()
-            require(lineCount in 0..MAX_RETAINED_LINES) { "任务日志总行数非法：$lineCount" }
+            require(lineCount >= 0) { "任务日志总行数非法：$lineCount" }
             val count = input.readInt()
             require(count in 0..MAX_ENTRY_COUNT) { "任务日志批次行数非法：$count" }
             val entries = ArrayList<TaskLogEntry>(count)
@@ -96,6 +96,5 @@ object TaskLogTransport {
 
     private const val MAGIC = 0x4B544C47 // KTLG
     private const val MAX_ENTRY_COUNT = 5_000
-    private const val MAX_RETAINED_LINES = 50_000
     private const val MAX_TEXT_BYTES = 128 * 1024
 }

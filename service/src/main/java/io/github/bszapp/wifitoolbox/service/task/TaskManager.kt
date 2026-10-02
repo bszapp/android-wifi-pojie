@@ -18,6 +18,10 @@ import io.github.bszapp.wifitoolbox.service.ITaskManagerCallback
 import io.github.bszapp.wifitoolbox.service.TerminalManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 import io.github.bszapp.wifitoolbox.service.wifilog.decodeHexSsid
+import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork
+import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetworkPage
+import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
+import io.github.bszapp.wifitoolbox.contract.log.sliceLogRange
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 
@@ -26,12 +30,13 @@ internal class TaskManager(
     private val wifiLogAnalyzer: WifiLogAnalyzer,
     private val terminalManager: TerminalManager,
     private val hybridTaskEnvironmentProvider: () -> HybridTaskEnvironment?,
+    private val networkCardTaskEnvironmentProvider: () -> HybridTaskEnvironment?,
     private val onSavedWifiNetworksChanged: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) : AutoCloseable {
     private val lock = Any()
     private val records = linkedMapOf<Long, TaskRecord>()
-    private val globalLogs = ArrayDeque<TaskLogEntry>()
+    private val globalLogs = ArrayList<TaskLogEntry>()
     private val callbacks = RemoteCallbackList<ITaskManagerCallback>()
     private val taskExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "service-task-runner").apply { isDaemon = true }
@@ -40,8 +45,13 @@ internal class TaskManager(
         Thread(runnable, "service-task-callback").apply { isDaemon = true }
     }
 
+    private val changedTasks = linkedSetOf<Long>()
+    private val changedLogRanges = linkedSetOf<Long>()
+    private var globalRangeDirty = false
+    private var notificationScheduled = false
+
     private var nextTaskId = 1L
-    private var nextGlobalLogId = 1L
+    private var nextGlobalLogId = 0L
     private var globalLogGeneration = 0L
     private var currentTaskId: Long? = null
     private var closed = false
@@ -125,9 +135,7 @@ internal class TaskManager(
                 oldestAvailableId = range.oldestAvailableId,
                 latestId = range.latestId,
                 lineCount = range.lineCount,
-                entries = record.logs.filter {
-                    it.taskLineId in fromIdInclusive..toIdInclusive
-                },
+                entries = record.logs.sliceLogRange(range.oldestAvailableId, fromIdInclusive, toIdInclusive, 500),
             )
         }
 
@@ -140,10 +148,30 @@ internal class TaskManager(
                 oldestAvailableId = range.oldestAvailableId,
                 latestId = range.latestId,
                 lineCount = range.lineCount,
-                entries = globalLogs.filter {
-                    it.globalLineId in fromIdInclusive..toIdInclusive
-                },
+                entries = globalLogs.sliceLogRange(range.oldestAvailableId, fromIdInclusive, toIdInclusive, 500),
             )
+        }
+
+    internal fun recordCapturedNetwork(taskId: Long, network: WpsCapturedNetwork) {
+        synchronized(lock) {
+            val record = records[taskId] ?: error("任务 $taskId 不存在")
+            record.capturedNetworks.add(network)
+        }
+    }
+
+    fun capturedNetworkPage(taskId: Long, fromIndex: Int): WpsCapturedNetworkPage =
+        synchronized(lock) {
+            val networks = records[taskId]?.capturedNetworks ?: error("任务 $taskId 不存在")
+            require(fromIndex in 0..networks.size) { "捕获结果起始下标非法" }
+            var end = minOf(fromIndex + 50, networks.size)
+            while (true) {
+                val page = WpsCapturedNetworkPage(fromIndex, networks.size, networks.subList(fromIndex, end).toList())
+                if (PagedDataTransport.bytes(page).size <= PagedDataTransport.MAX_PAGE_BYTES) return@synchronized page
+                check(end > fromIndex + 1) { "单条捕获结果超出传输预算" }
+                end--
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("不可达")
         }
 
     fun clearLogs() {
@@ -190,10 +218,8 @@ internal class TaskManager(
                 timestampMillis = System.currentTimeMillis(),
                 text = text,
             )
-            record.logs.addLast(entry)
-            globalLogs.addLast(entry)
-            while (record.logs.size > MAX_LOG_LINES) record.logs.removeFirst()
-            while (globalLogs.size > MAX_LOG_LINES) globalLogs.removeFirst()
+            record.logs.add(entry)
+            globalLogs.add(entry)
             record.logGeneration++
             globalLogGeneration++
             record.rangeLocked() to globalRangeLocked()
@@ -242,6 +268,17 @@ internal class TaskManager(
             val task = when (val payload = request.payload) {
                 is TaskRequestPayload.ConnectWifi -> {
                     val connectRequest = payload.request
+                    val cardTarget = connectRequest.input.target as? ConnectWifiTarget.NetworkCard
+                    if (cardTarget != null) {
+                        NetworkCardConnectTask(
+                            target = cardTarget,
+                            config = connectRequest.config,
+                            environment = synchronized(lock) { records[taskId]?.hybridEnvironment }
+                                ?: error("网卡测试缺少启动时的容器环境"),
+                            terminalManager = terminalManager,
+                            deviceName = cardTarget.name ?: androidApi.getDeviceName(),
+                        )
+                    } else {
                     val expectedSsid = when (val target = connectRequest.input.target) {
                         is ConnectWifiTarget.SavedNetwork -> androidApi.getSavedWifiList()
                             .firstOrNull { it.networkId == target.networkId }
@@ -252,6 +289,7 @@ internal class TaskManager(
                                 "找不到 networkId=${target.networkId} 的已保存 Wi-Fi 配置",
                             )
                         is ConnectWifiTarget.TemporaryNetwork -> target.ssid
+                        is ConnectWifiTarget.NetworkCard -> error("网卡目标由独立执行器处理")
                     }
                     ConnectWifiTask(
                         request = connectRequest,
@@ -259,6 +297,7 @@ internal class TaskManager(
                         androidApi = androidApi,
                         wifiLogAnalyzer = wifiLogAnalyzer,
                     )
+                    }
                 }
                 is TaskRequestPayload.WpsPbc -> WpsPbcTask(
                     input = payload.input,
@@ -306,12 +345,16 @@ internal class TaskManager(
                 state = TaskExecutionState.FINISHED,
             )
             if (currentTaskId == taskId) currentTaskId = null
+            record.activeTask = null
+            record.hybridEnvironment = null
+            record.pendingUpdates.clear()
             record.snapshot
         }
         broadcastManagerChanged(snapshot)
     }
 
     private fun validate(request: TaskStartRequest): HybridTaskEnvironment? {
+        var taskEnvironment: HybridTaskEnvironment? = null
         when (val payload = request.payload) {
             is TaskRequestPayload.ConnectWifi -> {
                 val connect = payload.request
@@ -321,6 +364,28 @@ internal class TaskManager(
                     }
                     is ConnectWifiTarget.TemporaryNetwork -> {
                         require(target.ssid.isNotBlank()) { "临时连接的 SSID 不能为空" }
+                    }
+                    is ConnectWifiTarget.NetworkCard -> {
+                        require(android.os.Process.myUid() == 0) { "网卡测试需要 Root 工作模式" }
+                        require(target.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
+                        require(target.passwords.isNotEmpty() && target.passwords.all {
+                            it.toByteArray(Charsets.UTF_8).size in 8..63
+                        }) { "每行 WPA2 密码需为 8～63 字节" }
+                        target.mac?.let { mac ->
+                            require(MAC_ADDRESS.matches(mac)) { "MAC 格式非法" }
+                            require((mac.substringBefore(':').toInt(16) and 1) == 0 &&
+                                mac != "00:00:00:00:00:00") { "MAC 必须为有效单播地址" }
+                        }
+                        val environment = checkNotNull(networkCardTaskEnvironmentProvider()) {
+                            "网卡测试只能在普通模式且容器环境已配置时运行"
+                        }
+                        taskEnvironment = environment
+                        require(io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled(
+                            java.io.File(environment.rootfsPath),
+                        )) { "容器系统尚未安装" }
+                        require(java.io.File(environment.rootfsPath, "wlantool/managed_connect.py").isFile) {
+                            "容器缺少 managed_connect.py，请更新容器系统"
+                        }
                     }
                 }
                 if (connect.input.type == ConnectWifiTaskType.USE_SAVED_NETWORK) {
@@ -345,7 +410,7 @@ internal class TaskManager(
                 }
             }
         }
-        return null
+        return taskEnvironment
     }
 
     private fun validateUpdate(request: TaskStartRequest, update: TaskUpdateRequest) {
@@ -376,17 +441,49 @@ internal class TaskManager(
     )
 
     private fun broadcastManagerChanged(snapshot: TaskSnapshot) {
-        val current = synchronized(lock) { currentTaskId ?: NO_TASK_ID }
+        synchronized(lock) { changedTasks.add(snapshot.taskId) }
+        scheduleNotifications()
+    }
+
+    private fun scheduleNotifications() {
+        synchronized(lock) {
+            if (closed || notificationScheduled) return
+            notificationScheduled = true
+        }
         callbackExecutor.execute {
-            forEachCallback { callback ->
-                pushManagerChanged(
-                    callback,
-                    snapshot,
-                    current,
-                )
+            try {
+                while (true) {
+                    val update = synchronized(lock) {
+                        if (changedTasks.isEmpty() && changedLogRanges.isEmpty() && !globalRangeDirty) return@execute
+                        Notification(
+                            currentTaskId ?: NO_TASK_ID,
+                            changedTasks.mapNotNull { records[it]?.snapshot },
+                            changedLogRanges.mapNotNull { records[it]?.rangeLocked() },
+                            if (globalRangeDirty) globalRangeLocked() else null,
+                        ).also { changedTasks.clear(); changedLogRanges.clear(); globalRangeDirty = false }
+                    }
+                    forEachCallback { cb ->
+                        update.snapshots.forEach { pushManagerChanged(cb, it, update.currentTaskId) }
+                        update.ranges.forEach { pushTaskLogRange(cb, it) }
+                        update.globalRange?.let { pushGlobalLogRange(cb, it) }
+                    }
+                }
+            } finally {
+                val pending = synchronized(lock) {
+                    notificationScheduled = false
+                    changedTasks.isNotEmpty() || changedLogRanges.isNotEmpty() || globalRangeDirty
+                }
+                if (pending) scheduleNotifications()
             }
         }
     }
+
+    private data class Notification(
+        val currentTaskId: Long,
+        val snapshots: List<TaskSnapshot>,
+        val ranges: List<TaskLogRangeSnapshot>,
+        val globalRange: TaskLogRangeSnapshot?,
+    )
 
     private fun pushManagerChanged(
         callback: ITaskManagerCallback,
@@ -402,9 +499,8 @@ internal class TaskManager(
     }
 
     private fun broadcastTaskLogRange(range: TaskLogRangeSnapshot) {
-        callbackExecutor.execute {
-            forEachCallback { callback -> pushTaskLogRange(callback, range) }
-        }
+        synchronized(lock) { changedLogRanges.add(range.taskId) }
+        scheduleNotifications()
     }
 
     private fun pushTaskLogRange(
@@ -423,9 +519,8 @@ internal class TaskManager(
     }
 
     private fun broadcastGlobalLogRange(range: TaskLogRangeSnapshot) {
-        callbackExecutor.execute {
-            forEachCallback { callback -> pushGlobalLogRange(callback, range) }
-        }
+        synchronized(lock) { globalRangeDirty = true }
+        scheduleNotifications()
     }
 
     private fun pushGlobalLogRange(
@@ -453,9 +548,10 @@ internal class TaskManager(
 
     private data class TaskRecord(
         var snapshot: TaskSnapshot,
-        val hybridEnvironment: HybridTaskEnvironment?,
-        val logs: ArrayDeque<TaskLogEntry> = ArrayDeque(),
-        var nextLogId: Long = 1L,
+        var hybridEnvironment: HybridTaskEnvironment?,
+        val logs: ArrayList<TaskLogEntry> = ArrayList(),
+        val capturedNetworks: ArrayList<WpsCapturedNetwork> = ArrayList(),
+        var nextLogId: Long = 0L,
         var logGeneration: Long = 0L,
         var runnerThread: Thread? = null,
         var stopRequested: Boolean = false,
@@ -472,7 +568,6 @@ internal class TaskManager(
 
     companion object {
         const val NO_TASK_ID = 0L
-        const val MAX_LOG_LINES = 50_000
         private val MAC_ADDRESS = Regex("(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
     }
 }

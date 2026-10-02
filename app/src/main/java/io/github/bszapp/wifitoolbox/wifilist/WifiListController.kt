@@ -6,15 +6,21 @@ import android.content.Context
 import android.net.Uri
 import android.os.DeadObjectException
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
+import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChangesPage
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChange
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorPcapExportResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSource
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiInformationSourceState
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiModeState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.service.IMainService
@@ -37,6 +43,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 /**
@@ -61,9 +69,9 @@ class WifiListController(
     private val _savedWifiList = MutableStateFlow<SavedWifiList?>(null)
     override val savedWifiList: StateFlow<SavedWifiList?> = _savedWifiList.asStateFlow()
 
-    private val _informationSourceState = MutableStateFlow<WifiInformationSourceState?>(null)
-    override val informationSourceState: StateFlow<WifiInformationSourceState?> =
-        _informationSourceState.asStateFlow()
+    private val _modeState = MutableStateFlow<WifiModeState?>(null)
+    override val modeState: StateFlow<WifiModeState?> =
+        _modeState.asStateFlow()
 
     private val _monitorPcapExports = MutableSharedFlow<MonitorPcapExportResult>(
         extraBufferCapacity = 8,
@@ -93,6 +101,7 @@ class WifiListController(
     private var connectionGeneration = 0L
 
     private val connectionLock = Any()
+    private var monitorSyncJob: Job? = null
 
     private data class DetachedConnection(
         val service: IMainService,
@@ -146,13 +155,19 @@ class WifiListController(
 
         _state.value = null
         _savedWifiList.value = null
-        _informationSourceState.value = null
+        _modeState.value = null
         unregisterDetached(plan.detached, operation = "注销已替换的 Wi-Fi 数据回调")
 
         scope.launch(Dispatchers.IO) {
             if (!isCurrentConnection(plan.generation, plan.callback)) return@launch
 
-            runCatching { service.registerCallback(plan.callback) }
+            runCatching {
+                val data = requireNotNull(context.filesDir.parentFile)
+                service.configureWifiEnvironment(File(data, "rootfs").absolutePath,
+                    File(context.noBackupFilesDir, "rftool-runtime").absolutePath,
+                    File(context.applicationInfo.nativeLibraryDir, "libterminal.so").absolutePath)
+                service.registerCallback(plan.callback)
+            }
                 .onSuccess {
                     if (isCurrentConnection(plan.generation, plan.callback)) {
                         Log.d(TAG, "已注册 Wi-Fi 数据回调，generation=${plan.generation}")
@@ -183,6 +198,8 @@ class WifiListController(
      * 远端注销只做后台尽力清理，不阻塞 Service 关闭或 StartupState 更新。
      */
     fun disconnect() {
+        monitorSyncJob?.cancel()
+        monitorSyncJob = null
         val detached = synchronized(connectionLock) {
             val current = currentConnectionLocked()
             connectionGeneration += 1
@@ -195,7 +212,7 @@ class WifiListController(
 
         _state.value = null
         _savedWifiList.value = null
-        _informationSourceState.value = null
+        _modeState.value = null
         unregisterDetached(detached, operation = "注销 Wi-Fi 数据回调")
     }
 
@@ -203,6 +220,124 @@ class WifiListController(
         generation: Long,
         service: IMainService,
     ): IMainServiceCallback = object : IMainServiceCallback.Stub() {
+        private val monitorUpdates = Channel<Unit>(Channel.CONFLATED)
+        private val mirror = MonitorMirror()
+        @Volatile private var diagnosticSyncPhase = "waitingUpdate"
+        @Volatile private var diagnosticSyncAt = SystemClock.elapsedRealtime()
+        @Volatile private var diagnosticSyncDetails = "none"
+        @Volatile private var diagnosticSnapshotPhase = "waitingSnapshot"
+        @Volatile private var diagnosticSnapshotAt = SystemClock.elapsedRealtime()
+        @Volatile private var diagnosticSnapshotDetails = "none"
+        @Volatile private var diagnosticReceivedSnapshots = 0L
+        @Volatile private var diagnosticPages = 0L
+        @Volatile private var diagnosticLastSignalUnixMillis = 0L
+        @Volatile private var diagnosticLastAckAttemptAt = 0L
+        @Volatile private var diagnosticBytesDetails = "none"
+        private var diagnosticLastModeKey = ""
+
+        init {
+            monitorSyncJob?.cancel()
+            monitorSyncJob = scope.launch(Dispatchers.IO) {
+                val heartbeat = launch {
+                    while (isActive) {
+                        delay(1000L)
+                        if (_modeState.value?.mode != WifiMode.MONITOR &&
+                            diagnosticSyncPhase == "waitingUpdate" && diagnosticSnapshotPhase == "waitingSnapshot") continue
+                        val now = SystemClock.elapsedRealtime()
+                        Log.d(TAG, "[MonitorDiagnostic] heartbeat connection=$generation syncPhase=$diagnosticSyncPhase " +
+                            "syncAgeMs=${now - diagnosticSyncAt} sync=$diagnosticSyncDetails " +
+                            "snapshotPhase=$diagnosticSnapshotPhase snapshotAgeMs=${now - diagnosticSnapshotAt} " +
+                            "snapshot=$diagnosticSnapshotDetails receivedSnapshots=$diagnosticReceivedSnapshots pages=$diagnosticPages " +
+                            "lastSignalUnixMillis=$diagnosticLastSignalUnixMillis " +
+                            "ackAttemptAgeMs=${if (diagnosticLastAckAttemptAt == 0L) -1L else now - diagnosticLastAckAttemptAt} " +
+                            "recordedBytes=$diagnosticBytesDetails")
+                    }
+                }
+                try {
+                    for (signal in monitorUpdates) {
+                        if (!isCurrentConnection(generation, objectCallback())) break
+                        try {
+                            val initial = _modeState.value?.monitorStatistics ?: continue
+                            var header = initial
+                            var targetSession = initial.sessionGeneration
+                            var targetRevision = initial.revision
+                            val syncStarted = SystemClock.elapsedRealtime()
+                            var pageCount = 0
+                            diagnosticSyncDetails = "targetEpoch=$targetSession targetRevision=$targetRevision mirrorEpoch=${mirror.session} cursor=${mirror.revision}"
+                            while (isCurrentConnection(generation, objectCallback())) {
+                                diagnosticSyncPhase = "getPage"
+                                val requestedAt = SystemClock.elapsedRealtime()
+                                diagnosticSyncAt = requestedAt
+                                diagnosticSyncDetails = "targetEpoch=$targetSession targetRevision=$targetRevision " +
+                                    "requestEpoch=${mirror.session} after=${mirror.revision} pagesThisSync=$pageCount"
+                                val page = PagedDataTransport.decode(
+                                    service.getMonitorChanges(mirror.session, mirror.revision),
+                                    MonitorChangesPage::class.java,
+                                )
+                                val receivedAt = SystemClock.elapsedRealtime()
+                                diagnosticSyncPhase = "applyPage"
+                                diagnosticSyncAt = receivedAt
+                                mirror.apply(page)
+                                diagnosticPages++
+                                pageCount++
+                                for (change in page.changes) {
+                                    val signalAt = when (change) {
+                                        is MonitorChange.AccessPoint -> change.value.signal?.lastSeenUnixMillis
+                                        is MonitorChange.Device -> change.value.realtime.signal?.lastSeenUnixMillis
+                                        else -> null
+                                    }
+                                    if (signalAt != null) diagnosticLastSignalUnixMillis = maxOf(diagnosticLastSignalUnixMillis, signalAt)
+                                }
+                                diagnosticSyncDetails = "targetEpoch=$targetSession targetRevision=$targetRevision " +
+                                    "epoch=${page.header.sessionGeneration} serverRevision=${page.header.revision} " +
+                                    "cursor=${mirror.revision} changes=${page.changes.size} pagesThisSync=$pageCount " +
+                                    "requestDecodeMs=${receivedAt - requestedAt} applyMs=${SystemClock.elapsedRealtime() - receivedAt}"
+                                header = page.header
+                                if (header.sessionGeneration != targetSession) {
+                                    targetSession = header.sessionGeneration
+                                    targetRevision = header.revision
+                                }
+                                if (mirror.revision >= targetRevision) break
+                            }
+                            diagnosticSyncPhase = "buildSnapshot"
+                            diagnosticSyncAt = SystemClock.elapsedRealtime()
+                            val snapshot = mirror.snapshot(header)
+                            diagnosticSyncPhase = "waitMainApply"
+                            diagnosticSyncAt = SystemClock.elapsedRealtime()
+                            withContext(Dispatchers.Main.immediate) {
+                                if (!isCurrentConnection(generation, objectCallback())) return@withContext
+                                _modeState.update { current ->
+                                    val previous = current?.monitorStatistics
+                                    if (current?.mode != WifiMode.MONITOR ||
+                                        previous?.sessionGeneration != snapshot.sessionGeneration) current
+                                    else current.copy(monitorStatistics = snapshot.copy(
+                                        recordedBytes = maxOf(previous.recordedBytes, snapshot.recordedBytes),
+                                        nonHandshakeBytes = maxOf(previous.nonHandshakeBytes, snapshot.nonHandshakeBytes),
+                                    ))
+                                }
+                                val applied = _modeState.value?.monitorStatistics
+                                diagnosticSyncDetails = "epoch=${snapshot.sessionGeneration} revision=${snapshot.revision} " +
+                                    "appliedEpoch=${applied?.sessionGeneration} appliedRevision=${applied?.revision} " +
+                                    "aps=${snapshot.accessPoints.size} bytes=${applied?.recordedBytes} " +
+                                    "elapsedMs=${SystemClock.elapsedRealtime() - syncStarted} pagesThisSync=$pageCount"
+                            }
+                        } catch (error: Throwable) {
+                            if (error is CancellationException) throw error
+                            if (isCurrentConnection(generation, objectCallback())) report("同步监听变化页", error)
+                        } finally {
+                            diagnosticSyncPhase = "waitingUpdate"
+                            diagnosticSyncAt = SystemClock.elapsedRealtime()
+                        }
+                    }
+                } finally {
+                    heartbeat.cancel()
+                    Log.d(TAG, "[MonitorDiagnostic] syncStopped connection=$generation pages=$diagnosticPages")
+                }
+            }
+        }
+
+        private fun objectCallback(): IMainServiceCallback = this
+
         override fun onWifiStateChanged(
             snapshotGeneration: Long,
             chunkCount: Int,
@@ -275,7 +410,7 @@ class WifiListController(
             }
         }
 
-        override fun onWifiInformationSourceStateChanged(
+        override fun onWifiModeStateChanged(
             snapshotGeneration: Long,
             chunkCount: Int,
             totalBytes: Int,
@@ -284,13 +419,18 @@ class WifiListController(
             val callback = this
 
             scope.launch(Dispatchers.IO) {
+                val receivedAt = SystemClock.elapsedRealtime()
+                diagnosticReceivedSnapshots++
+                diagnosticSnapshotPhase = "decodeSnapshot"
+                diagnosticSnapshotAt = receivedAt
+                diagnosticSnapshotDetails = "generation=$snapshotGeneration chunks=$chunkCount bytes=$totalBytes"
                 val result = runCatching {
-                    WifiParcelTransport.decodeWifiInformationSourceState(
+                    WifiParcelTransport.decodeWifiModeState(
                         generation = snapshotGeneration,
                         chunkCount = chunkCount,
                         totalBytes = totalBytes,
                     ) { chunkIndex ->
-                        service.getWifiInformationSourceStateChunk(
+                        service.getWifiModeStateChunk(
                             callback,
                             snapshotGeneration,
                             chunkIndex,
@@ -300,12 +440,25 @@ class WifiListController(
 
                 if (!isCurrentConnection(generation, callback)) return@launch
 
+                diagnosticSnapshotPhase = "waitMainApply"
+                diagnosticSnapshotAt = SystemClock.elapsedRealtime()
                 withContext(Dispatchers.Main.immediate) {
                     if (!isCurrentConnection(generation, callback)) return@withContext
                     result
                         .onSuccess { incoming ->
-                            _informationSourceState.update { current ->
-                                mergeInformationSourceState(current, incoming)
+                            _modeState.update { current ->
+                                mergeModeState(current, incoming)
+                            }
+                            monitorUpdates.trySend(Unit)
+                            val header = incoming.monitorStatistics
+                            diagnosticSnapshotDetails = "generation=$snapshotGeneration chunks=$chunkCount bytes=$totalBytes " +
+                                "epoch=${header?.sessionGeneration} revision=${header?.revision} mode=${incoming.mode} " +
+                                "capturing=${incoming.capturing} clearing=${incoming.clearingCapture} recordedBytes=${header?.recordedBytes} " +
+                                "receiveApplyMs=${SystemClock.elapsedRealtime() - receivedAt}"
+                            val modeKey = "${incoming.mode}:${incoming.capturing}:${incoming.clearingCapture}:${header?.sessionGeneration}"
+                            if (modeKey != diagnosticLastModeKey) {
+                                diagnosticLastModeKey = modeKey
+                                Log.d(TAG, "[MonitorDiagnostic] modeApplied connection=$generation $diagnosticSnapshotDetails")
                             }
                         }
                         .onFailure {
@@ -315,32 +468,43 @@ class WifiListController(
                             )
                         }
                 }
-                acknowledgeWifiInformationSourceState(
+                diagnosticSnapshotPhase = "ackSnapshot"
+                diagnosticSnapshotAt = SystemClock.elapsedRealtime()
+                acknowledgeWifiModeState(
                     service,
                     callback,
                     generation,
                     snapshotGeneration,
                 )
+                diagnosticLastAckAttemptAt = SystemClock.elapsedRealtime()
+                diagnosticSnapshotPhase = "waitingSnapshot"
+                diagnosticSnapshotAt = diagnosticLastAckAttemptAt
             }
         }
 
-        override fun onMonitorRecordedBytesChanged(recordedBytes: Long) {
-            if (recordedBytes < 0L || !isCurrentConnection(generation, this)) return
-            _informationSourceState.update { current ->
-                val statistics = current?.monitorStatistics
-                if (
-                    current?.source != WifiInformationSource.MONITOR ||
-                    current.initializing ||
-                    statistics == null
-                ) {
-                    current
-                } else {
-                    current.copy(
-                        monitorStatistics = statistics.copy(
-                            recordedBytes = maxOf(statistics.recordedBytes, recordedBytes),
-                        ),
-                    )
+        override fun onMonitorRecordedBytesChanged(sessionGeneration: Long, recordedBytes: Long) {
+            if (recordedBytes < 0L) return
+            synchronized(connectionLock) {
+                if (!isCurrentConnection(generation, this)) return
+                _modeState.update { current ->
+                    val statistics = current?.monitorStatistics
+                    if (
+                        current?.mode != WifiMode.MONITOR ||
+                        statistics == null || statistics.sessionGeneration != sessionGeneration
+                    ) {
+                        current
+                    } else {
+                        current.copy(
+                            monitorStatistics = statistics.copy(
+                                recordedBytes = maxOf(statistics.recordedBytes, recordedBytes),
+                            ),
+                        )
+                    }
                 }
+                val applied = _modeState.value?.monitorStatistics
+                diagnosticBytesDetails = "receivedEpoch=$sessionGeneration receivedBytes=$recordedBytes " +
+                    "appliedEpoch=${applied?.sessionGeneration} appliedBytes=${applied?.recordedBytes} " +
+                    "receivedAtElapsedMs=${SystemClock.elapsedRealtime()}"
             }
         }
 
@@ -385,14 +549,14 @@ class WifiListController(
         }
     }
 
-    override fun setInformationSource(source: WifiInformationSource) {
+    override fun setMode(mode: WifiMode) {
         val appDataDirectory = requireNotNull(context.filesDir.parentFile)
         val rootfs = File(appDataDirectory, "rootfs")
         val runtime = File(context.noBackupFilesDir, "rftool-runtime")
         val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
-        callService("切换 Wi-Fi 信息源为 ${source.displayName}") { service ->
-            service.setWifiInformationSource(
-                source.wireValue,
+        callService("切换 Wi-Fi 信息源为 ${mode.displayName}") { service ->
+            service.setWifiMode(
+                mode.wireValue,
                 rootfs.absolutePath,
                 runtime.absolutePath,
                 terminal.absolutePath,
@@ -400,20 +564,27 @@ class WifiListController(
         }
     }
 
+    override fun setHybridScanEnabled(enabled: Boolean) {
+        callService("修改混合扫描方式") { it.setHybridScanEnabled(enabled) }
+    }
+    //TODO:这啥玩意有用吗
+    override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) {
+        callService(if (enabled) "开始持续抓取" else "停止持续抓取") { it.setMonitorCapture(enabled, frequencyMhz, hopping) }
+    }
+    override fun clearMonitorCapture(handshakesOnly: Boolean) {
+        callService("清理抓取数据") { it.clearMonitorCapture(handshakesOnly) }
+    }
+
     override fun enterMonitorMode(
         command: String,
-        targetChannel: Int,
-        targetFrequencyMhz: Int,//TODO:这啥玩意有用吗
     ) {
         val appDataDirectory = requireNotNull(context.filesDir.parentFile)
         val rootfs = File(appDataDirectory, "rootfs")
         val runtime = File(context.noBackupFilesDir, "rftool-runtime")
         val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
-        callService("进入监听模式，信道 $targetChannel，${targetFrequencyMhz} MHz") { service ->
+        callService("进入监听模式") { service ->
             service.enterMonitorMode(
                 command,
-                targetChannel,
-                targetFrequencyMhz,
                 rootfs.absolutePath,
                 runtime.absolutePath,
                 terminal.absolutePath,
@@ -547,7 +718,7 @@ class WifiListController(
         val requestId = UUID.randomUUID().toString()
         scope.launch(Dispatchers.Default) {
             val outcome = runCatching {
-                val record = _informationSourceState.value
+                val record = _modeState.value
                     ?.monitorStatistics
                     ?.accessPoints
                     ?.firstOrNull { it.bssid.equals(bssid, ignoreCase = true) }
@@ -716,26 +887,25 @@ class WifiListController(
             }
     }
 
-    private fun mergeInformationSourceState(
-        current: WifiInformationSourceState?,
-        incoming: WifiInformationSourceState,
-    ): WifiInformationSourceState {
+    private fun mergeModeState(
+        current: WifiModeState?,
+        incoming: WifiModeState,
+    ): WifiModeState {
         val currentStatistics = current?.monitorStatistics
         val incomingStatistics = incoming.monitorStatistics
         return if (
-            current?.source == WifiInformationSource.MONITOR &&
-            incoming.source == WifiInformationSource.MONITOR &&
-            !current.initializing &&
-            !incoming.initializing &&
+            current?.mode == WifiMode.MONITOR &&
+            incoming.mode == WifiMode.MONITOR &&
             currentStatistics != null &&
-            incomingStatistics != null
+            incomingStatistics != null &&
+            currentStatistics.sessionGeneration == incomingStatistics.sessionGeneration
         ) {
             incoming.copy(
                 monitorStatistics = incomingStatistics.copy(
-                    recordedBytes = maxOf(
-                        currentStatistics.recordedBytes,
-                        incomingStatistics.recordedBytes,
-                    ),
+                    accessPoints = currentStatistics.accessPoints,
+                    disconnections = currentStatistics.disconnections,
+                    recordedBytes = maxOf(currentStatistics.recordedBytes, incomingStatistics.recordedBytes),
+                    nonHandshakeBytes = maxOf(currentStatistics.nonHandshakeBytes, incomingStatistics.nonHandshakeBytes),
                 ),
             )
         } else {
@@ -765,16 +935,23 @@ class WifiListController(
             }
     }
 
-    private fun acknowledgeWifiInformationSourceState(
+    private fun acknowledgeWifiModeState(
         service: IMainService,
         callback: IMainServiceCallback,
         connectionGeneration: Long,
         snapshotGeneration: Long,
     ) {
         if (!isCurrentConnection(connectionGeneration, callback)) return
+        val started = SystemClock.elapsedRealtime()
         runCatching {
-            service.acknowledgeWifiInformationSourceState(callback, snapshotGeneration)
+            service.acknowledgeWifiModeState(callback, snapshotGeneration)
+        }.onSuccess {
+            val elapsed = SystemClock.elapsedRealtime() - started
+            if (elapsed >= 1000L) Log.d(TAG, "[MonitorDiagnostic] ackSlow connection=$connectionGeneration " +
+                "generation=$snapshotGeneration elapsedMs=$elapsed")
         }.onFailure { error ->
+            Log.w(TAG, "[MonitorDiagnostic] ackFailed connection=$connectionGeneration generation=$snapshotGeneration " +
+                "elapsedMs=${SystemClock.elapsedRealtime() - started} errorType=${error.javaClass.name}")
             if (error is DeadObjectException ||
                 !isCurrentConnection(connectionGeneration, callback)
             ) {

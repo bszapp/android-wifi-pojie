@@ -1,6 +1,9 @@
 package io.github.bszapp.wifitoolbox.service;
 
 import android.os.ParcelFileDescriptor;
+import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment;
+import io.github.bszapp.wifitoolbox.contract.container.ContainerOperationRequest;
+import io.github.bszapp.wifitoolbox.contract.container.ContainerState;
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest;
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiResponse;
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo;
@@ -9,9 +12,9 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot;
 import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest;
 import io.github.bszapp.wifitoolbox.service.IMainServiceCallback;
 import io.github.bszapp.wifitoolbox.service.IServiceLogCallback;
-import io.github.bszapp.wifitoolbox.service.IContainerTerminalCallback;
 import io.github.bszapp.wifitoolbox.service.ITerminalManagerCallback;
 import io.github.bszapp.wifitoolbox.service.ITaskManagerCallback;
+import io.github.bszapp.wifitoolbox.service.IContainerSystemCallback;
 
 interface IMainService {
     void initializeStartupInfo(in StartupInfo startupInfo);
@@ -20,7 +23,14 @@ interface IMainService {
     StartupInfo getStartupInfo();
     AndroidApiResponse executeAndroidApi(in AndroidApiRequest request);
 
-    long getLatestServiceLogId();
+    void configureContainerSystem(in ContainerEnvironment environment);
+    ContainerState getContainerState();
+    boolean executeContainerOperation(in ContainerOperationRequest request, in ParcelFileDescriptor archive);
+    void registerContainerSystemCallback(IContainerSystemCallback cb);
+    void unregisterContainerSystemCallback(IContainerSystemCallback cb);
+
+    long[] getServiceLogRange();
+    long[] getSystemWifiLogRange();
     ParcelFileDescriptor getServiceLogs(long fromIdInclusive, long toIdInclusive);
     oneway void clearServiceLogs();
     ParcelFileDescriptor getSystemWifiLogs(long fromIdInclusive, long toIdInclusive);
@@ -31,22 +41,25 @@ interface IMainService {
     void refreshSavedWifiNetworks();
     int saveWifiNetwork(String ssid, String password);
     boolean startWifiScan();
-    void setWifiInformationSource(int source, String rootfsPath, String runtimePath, String terminalPath);//TODO:为什么传这么多信息，服务不知道吗？下同
-    void enterMonitorMode(String command, int targetChannel, int targetFrequencyMhz, String rootfsPath, String runtimePath, String terminalPath);
+    void setWifiMode(int source, String rootfsPath, String runtimePath, String terminalPath);//TODO:为什么传这么多信息，服务不知道吗？下同
+    void configureWifiEnvironment(String rootfsPath, String runtimePath, String terminalPath);
+    void setHybridScanEnabled(boolean enabled);
+    void setMonitorCapture(boolean enabled, int frequencyMhz, boolean hopping);
+    void clearMonitorCapture(boolean handshakesOnly);
+    void enterMonitorMode(String command, String rootfsPath, String runtimePath, String terminalPath);
+    ParcelFileDescriptor getMonitorChanges(long sessionGeneration, long afterRevision);
     void exportMonitorPcap(String requestId, String mode, String bssid, String deviceMac, in String[] subtypeIds);
     void exportMonitorHandshakePcap(String requestId, String bssid, String deviceMac, String handshakeId);
     void exportMonitorDisconnectionPcap(String requestId, String bssid, String deviceMac, String disconnectionId);
     oneway void releaseMonitorPcapExport(String path);
 
-    void startContainerTerminal(String rootfsPath, String runtimePath, String terminalPath);
-    void stopContainerTerminal();//TODO:不指定id就stop？
-    void runContainerWifiScan();//TODO:这啥，有用吗
-    void registerContainerTerminalCallback(IContainerTerminalCallback cb);
-    void unregisterContainerTerminalCallback(IContainerTerminalCallback cb);
+    void stopHybridScanner();
+    //TODO:不指定id就stop？
+    //TODO:这啥，有用吗
 
     long[] getAliveTerminalIds();
     long getAliveTerminalGeneration();
-    int getTerminalLogCount(long terminalId);//TODO:Count？不应该只有日志id的范围吗
+    //TODO:Count？不应该只有日志id的范围吗
     long[] getTerminalLogRange(long terminalId);
     String getTerminalInputPrompt(long terminalId);
     ParcelFileDescriptor getTerminalLogs(long terminalId, long fromIdInclusive, long toIdInclusive);
@@ -62,6 +75,7 @@ interface IMainService {
     boolean updateTask(long taskId, in TaskUpdateRequest update);
     long getCurrentTaskId();
     TaskSnapshot getTaskSnapshot(long taskId);
+    ParcelFileDescriptor getWpsCapturedNetworks(long taskId, int fromIndex);
     long[] getTaskLogRange(long taskId);
     ParcelFileDescriptor getTaskLogs(long taskId, long fromIdInclusive, long toIdInclusive);
     long[] getGlobalTaskLogRange();
@@ -72,10 +86,10 @@ interface IMainService {
 
     ParcelFileDescriptor getWifiStateChunk(IMainServiceCallback cb, long generation, int chunkIndex);
     ParcelFileDescriptor getSavedWifiListChunk(IMainServiceCallback cb, long generation, int chunkIndex);
-    ParcelFileDescriptor getWifiInformationSourceStateChunk(IMainServiceCallback cb, long generation, int chunkIndex);
+    ParcelFileDescriptor getWifiModeStateChunk(IMainServiceCallback cb, long generation, int chunkIndex);
     oneway void acknowledgeWifiState(IMainServiceCallback cb, long generation);
     oneway void acknowledgeSavedWifiList(IMainServiceCallback cb, long generation);
-    oneway void acknowledgeWifiInformationSourceState(IMainServiceCallback cb, long generation);
+    oneway void acknowledgeWifiModeState(IMainServiceCallback cb, long generation);
 
     void shutdown();
     void registerCallback(IMainServiceCallback cb);

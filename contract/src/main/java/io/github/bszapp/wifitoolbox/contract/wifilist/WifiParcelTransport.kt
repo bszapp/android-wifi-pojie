@@ -76,23 +76,23 @@ object WifiParcelTransport {
         chunkProvider = chunkProvider,
     ) as? SavedWifiList ?: throw IllegalStateException("传输数据不是 SavedWifiList")
 
-    fun encodeWifiInformationSourceState(value: WifiInformationSourceState): EncodedSnapshot =
+    fun encodeWifiModeState(value: WifiModeState): EncodedSnapshot =
         encode(TYPE_WIFI_INFORMATION_SOURCE_STATE, value)
 
-    fun decodeWifiInformationSourceState(
+    fun decodeWifiModeState(
         generation: Long,
         chunkCount: Int,
         totalBytes: Int,
         chunkProvider: (Int) -> ParcelFileDescriptor,
-    ): WifiInformationSourceState = decodeSnapshot(
+    ): WifiModeState = decodeSnapshot(
         expectedType = TYPE_WIFI_INFORMATION_SOURCE_STATE,
         generation = generation,
         chunkCount = chunkCount,
         totalBytes = totalBytes,
-        classLoader = WifiInformationSourceState::class.java.classLoader,
+        classLoader = WifiModeState::class.java.classLoader,
         chunkProvider = chunkProvider,
-    ) as? WifiInformationSourceState
-        ?: throw IllegalStateException("传输数据不是 WifiInformationSourceState")
+    ) as? WifiModeState
+        ?: throw IllegalStateException("传输数据不是 WifiModeState")
 
     private fun encode(type: Int, value: Parcelable): EncodedSnapshot {
         val payload = marshall(value)

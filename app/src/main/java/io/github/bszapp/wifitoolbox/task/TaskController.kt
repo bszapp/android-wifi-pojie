@@ -2,6 +2,9 @@ package io.github.bszapp.wifitoolbox.task
 
 import android.os.DeadObjectException
 import android.util.Log
+import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
+import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
+import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetworkPage
 import io.github.bszapp.wifitoolbox.contract.task.ITaskController
 import io.github.bszapp.wifitoolbox.contract.task.TaskControllerState
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogBatch
@@ -50,7 +53,7 @@ class TaskController(
             ) {
                 if (!isCurrent(binding)) return
                 synchronized(binding.pendingLock) {
-                    if (currentTaskId > 0L) binding.pendingTaskIds += currentTaskId
+                    binding.currentTaskId = currentTaskId.takeIf { it > 0L }
                     if (changedTaskId > 0L) binding.pendingTaskIds += changedTaskId
                 }
                 binding.signal.trySend(Unit)
@@ -64,7 +67,7 @@ class TaskController(
                 lineCount: Int,
             ) {
                 if (!isCurrent(binding)) return
-                synchronized(binding.pendingLock) { binding.pendingTaskIds += taskId }
+                synchronized(binding.pendingLock) { binding.pendingLogIds += taskId }
                 binding.signal.trySend(Unit)
             }
 
@@ -74,7 +77,10 @@ class TaskController(
                 latestId: Long,
                 lineCount: Int,
             ) {
-                if (isCurrent(binding)) binding.signal.trySend(Unit)
+                if (isCurrent(binding)) {
+                    synchronized(binding.pendingLock) { binding.globalLogsDirty = true }
+                    binding.signal.trySend(Unit)
+                }
             }
         }
         binding = Binding(service, callback)
@@ -82,6 +88,7 @@ class TaskController(
             activeBinding.also { activeBinding = binding }
         }
         release(previous)
+        _state.value = TaskControllerState()
 
         binding.job = scope.launch(Dispatchers.IO) {
             try {
@@ -89,6 +96,11 @@ class TaskController(
                     if (!isCurrent(binding)) return@launch
                     service.registerTaskManagerCallback(callback)
                     binding.registered = true
+                }
+                synchronized(binding.pendingLock) {
+                    binding.currentTaskId = service.getCurrentTaskId().takeIf { it > 0L }
+                    binding.currentTaskId?.let { binding.pendingTaskIds += it; binding.pendingLogIds += it }
+                    binding.globalLogsDirty = true
                 }
                 reconcile(binding)
                 while (isActive && isCurrent(binding)) {
@@ -108,7 +120,7 @@ class TaskController(
             activeBinding.also { activeBinding = null }
         }
         release(previous)
-        _state.update { it.copy(currentTaskId = null) }
+        _state.value = TaskControllerState()
     }
 
     override suspend fun startTask(request: TaskStartRequest): Long {
@@ -121,18 +133,19 @@ class TaskController(
                 }
                 binding.service.startTask(request).also { taskId ->
                     val snapshot = binding.service.getTaskSnapshot(taskId)
-                    _state.update { current ->
+                    updateState(binding) { current ->
                         current.copy(
                             tasks = current.tasks + (
                                 taskId to TrackedTaskState(
                                     snapshot = snapshot,
                                     logs = current.tasks[taskId]?.logs
                                         ?: TaskLogState(scopeTaskId = taskId),
+                                    capturedNetworks = current.tasks[taskId]?.capturedNetworks.orEmpty(),
                                 )
                             ),
                         )
                     }
-                    synchronized(binding.pendingLock) { binding.pendingTaskIds += taskId }
+                    synchronized(binding.pendingLock) { binding.pendingTaskIds += taskId; binding.pendingLogIds += taskId }
                     binding.signal.trySend(Unit)
                 }
             } catch (error: Throwable) {
@@ -174,7 +187,10 @@ class TaskController(
 
     override fun trackTask(taskId: Long) {
         val binding = synchronized(connectionLock) { activeBinding } ?: return
-        synchronized(binding.pendingLock) { binding.pendingTaskIds += taskId }
+        synchronized(binding.pendingLock) {
+            binding.pendingTaskIds += taskId
+            binding.pendingLogIds += taskId
+        }
         binding.signal.trySend(Unit)
     }
 
@@ -195,61 +211,74 @@ class TaskController(
     private fun reconcile(binding: Binding) {
         if (!isCurrent(binding)) return
         val service = binding.service
-        val currentTaskId = service.getCurrentTaskId().takeIf { it > 0L }
-        val requestedIds = synchronized(binding.pendingLock) {
-            buildSet {
-                addAll(binding.pendingTaskIds)
+        val pending = synchronized(binding.pendingLock) {
+            Triple(binding.pendingTaskIds.toSet(), binding.pendingLogIds.toSet(), binding.globalLogsDirty).also {
                 binding.pendingTaskIds.clear()
-                addAll(_state.value.tasks.keys)
-                currentTaskId?.let(::add)
+                binding.pendingLogIds.clear()
+                binding.globalLogsDirty = false
             }
         }
+        val requestedIds = pending.first
         requestedIds.sorted().forEach { taskId ->
             if (!isCurrent(binding)) return
             runCatching {
                 val snapshot = service.getTaskSnapshot(taskId)
-                _state.update { current ->
+                if (!isCurrent(binding)) return
+                updateState(binding) { current ->
                     val existingLogs = current.tasks[taskId]?.logs
                         ?: TaskLogState(scopeTaskId = taskId)
                     current.copy(
                         tasks = current.tasks + (
-                            taskId to TrackedTaskState(snapshot, existingLogs)
+                            taskId to TrackedTaskState(snapshot, existingLogs, current.tasks[taskId]?.capturedNetworks.orEmpty())
                         ),
                     )
                 }
-                syncLogs(binding, taskId)
+                syncCapturedNetworks(binding, taskId)
             }.onFailure { error ->
                 if (error !is DeadObjectException && error !is IOException && isCurrent(binding)) {
                     Log.d(TAG, "任务 $taskId 对账失败：${error.message}")
                 }
             }
         }
-        syncLogs(binding, GLOBAL_SCOPE_TASK_ID)
+        pending.second.forEach { taskId ->
+            if (taskId in _state.value.tasks) syncLogs(binding, taskId)
+        }
+        if (pending.third) syncLogs(binding, GLOBAL_SCOPE_TASK_ID)
         if (!isCurrent(binding)) return
-        _state.update {
+        updateState(binding) {
             it.copy(
-                currentTaskId = currentTaskId,
+                currentTaskId = synchronized(binding.pendingLock) { binding.currentTaskId },
             )
+        }
+    }
+
+    private fun syncCapturedNetworks(binding: Binding, taskId: Long) {
+        val task = _state.value.tasks[taskId] ?: return
+        val count = (task.snapshot.progress as? TaskProgress.WpsPbc)?.networkCount ?: return
+        val networks = ArrayList(task.capturedNetworks)
+        while (isCurrent(binding) && networks.size < count) {
+            val page = PagedDataTransport.decode(
+                binding.service.getWpsCapturedNetworks(taskId, networks.size),
+                WpsCapturedNetworkPage::class.java,
+            )
+            require(page.fromIndex == networks.size && page.networks.isNotEmpty()) { "捕获结果分页不连续" }
+            networks.addAll(page.networks)
+        }
+        if (!isCurrent(binding)) return
+        updateState(binding) { current ->
+            val old = current.tasks[taskId] ?: return@updateState current
+            current.copy(tasks = current.tasks + (taskId to old.copy(capturedNetworks = networks.toList())))
         }
     }
 
     private fun syncLogs(binding: Binding, scopeTaskId: Long) {
         if (!isCurrent(binding)) return
         var range = readRange(binding.service, scopeTaskId)
-        var local = if (scopeTaskId == GLOBAL_SCOPE_TASK_ID) {
+        val existing = if (scopeTaskId == GLOBAL_SCOPE_TASK_ID) {
             _state.value.globalLogs.entries
-        } else {
-            _state.value.tasks[scopeTaskId]?.logs?.entries.orEmpty()
-        }
-        local = local
-            .dropWhile { entryId(it, scopeTaskId) < range.oldestAvailableId }
-            .takeWhile { entryId(it, scopeTaskId) <= range.latestId }
-        val continuous = local.zipWithNext().all { (first, second) ->
-            entryId(second, scopeTaskId) == entryId(first, scopeTaskId) + 1L
-        }
-        if (!continuous || (local.isNotEmpty() && entryId(local.first(), scopeTaskId) != range.oldestAvailableId)) {
-            local = emptyList()
-        }
+        } else _state.value.tasks[scopeTaskId]?.logs?.entries.orEmpty()
+        val local = ArrayList(existing.filter { entryId(it, scopeTaskId) in range.oldestAvailableId..range.latestId })
+        if (local.isNotEmpty() && entryId(local.first(), scopeTaskId) != range.oldestAvailableId) local.clear()
 
         var fromId = local.lastOrNull()?.let { entryId(it, scopeTaskId) + 1L }
             ?: range.oldestAvailableId
@@ -263,7 +292,7 @@ class TaskController(
                 },
             )
             range = batch.toRange()
-            local = local.dropWhile { entryId(it, scopeTaskId) < range.oldestAvailableId }
+            if (local.firstOrNull()?.let { entryId(it, scopeTaskId) < range.oldestAvailableId } == true) local.clear()
             val fetched = batch.entries.filter {
                 entryId(it, scopeTaskId) >= range.oldestAvailableId
             }
@@ -271,14 +300,14 @@ class TaskController(
             val expected = local.lastOrNull()?.let { entryId(it, scopeTaskId) + 1L }
                 ?: range.oldestAvailableId
             if (entryId(fetched.first(), scopeTaskId) != expected) {
-                local = emptyList()
+                local.clear()
                 fromId = range.oldestAvailableId
                 continue
             }
-            local = local + fetched
+            local.addAll(fetched)
             fromId = entryId(fetched.last(), scopeTaskId) + 1L
         }
-        applyLogState(binding, scopeTaskId, range, local)
+        applyLogState(binding, scopeTaskId, range, local.toList())
     }
 
     private fun applyLogState(
@@ -296,11 +325,11 @@ class TaskController(
             lineCount = range.lineCount,
             entries = entries,
         )
-        _state.update { current ->
+        updateState(binding) { current ->
             if (scopeTaskId == GLOBAL_SCOPE_TASK_ID) {
                 current.copy(globalLogs = logState)
             } else {
-                val task = current.tasks[scopeTaskId] ?: return@update current
+                val task = current.tasks[scopeTaskId] ?: return@updateState current
                 current.copy(
                     tasks = current.tasks + (
                         scopeTaskId to task.copy(logs = logState)
@@ -337,6 +366,13 @@ class TaskController(
     private fun entryId(entry: TaskLogEntry, scopeTaskId: Long): Long =
         if (scopeTaskId == GLOBAL_SCOPE_TASK_ID) entry.globalLineId else entry.taskLineId
 
+    private inline fun updateState(binding: Binding, transform: (TaskControllerState) -> TaskControllerState) {
+        synchronized(connectionLock) {
+            if (activeBinding !== binding) return
+            _state.update(transform)
+        }
+    }
+
     private fun isCurrent(binding: Binding): Boolean = synchronized(connectionLock) {
         activeBinding === binding && binding.service.asBinder().isBinderAlive
     }
@@ -364,6 +400,9 @@ class TaskController(
         val pendingLock: Any = Any(),
         val registrationLock: Any = Any(),
         val pendingTaskIds: MutableSet<Long> = mutableSetOf(),
+        val pendingLogIds: MutableSet<Long> = mutableSetOf(),
+        var globalLogsDirty: Boolean = false,
+        var currentTaskId: Long? = null,
         @Volatile var registered: Boolean = false,
         @Volatile var job: Job? = null,
     )
