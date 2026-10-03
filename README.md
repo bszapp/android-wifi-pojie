@@ -1,6 +1,10 @@
 > 最近学业很忙，没时间更新，预计要过几个月（2026/01/30）
 > 
 > 看起来最新的版本又写成屎山了，太散了可维护性差，下个版本加上跑pin的，继续重构！（2026/03/12）
+>
+
+新版开发中，源码位于master分支，正在从旧版移植其他功能以及新增更多功能，欢迎来 [https://t.me/bszapp](https://t.me/s/bszapp) 划水，已经实现抓握手包和跑包功能，新功能动态在这里发布（2026/10/04）
+
 # wifi工具箱
 
 [![Stars](https://img.shields.io/github/stars/bszapp/android-wifi-pojie?style=flat-square&logo=github&color=blue)](https://github.com/bszapp/android-wifi-pojie/stargazers) [![Total Downloads](https://img.shields.io/github/downloads/bszapp/android-wifi-pojie/total?style=flat-square&logo=github&color=orange)](https://github.com/bszapp/android-wifi-pojie/releases)
