@@ -15,6 +15,8 @@ import io.github.bszapp.wifitoolbox.service.IServiceLogCallback;
 import io.github.bszapp.wifitoolbox.service.ITerminalManagerCallback;
 import io.github.bszapp.wifitoolbox.service.ITaskManagerCallback;
 import io.github.bszapp.wifitoolbox.service.IContainerSystemCallback;
+import io.github.bszapp.wifitoolbox.service.IHashcatCallback;
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch;
 
 interface IMainService {
     void initializeStartupInfo(in StartupInfo startupInfo);
@@ -83,6 +85,17 @@ interface IMainService {
     oneway void clearTaskLogs();
     void registerTaskManagerCallback(ITaskManagerCallback cb);
     void unregisterTaskManagerCallback(ITaskManagerCallback cb);
+
+    void startHashcat(in HashcatLaunch request, in ParcelFileDescriptor inputs);
+    boolean pauseHashcat(String taskId);
+    void resumeHashcat(in HashcatLaunch request, in ParcelFileDescriptor inputs);
+    ParcelFileDescriptor getHashcatTask(String taskId);
+    ParcelFileDescriptor getHashcatMemory();
+    // UUID 分页，单次最多 64 项，避免历史数量增长占用 Binder 事务。
+    String[] getHashcatTaskIds(int offset);
+    void registerHashcatCallback(IHashcatCallback cb);
+    void unregisterHashcatCallback(IHashcatCallback cb);
+    boolean prepareHashcatShutdown();
 
     ParcelFileDescriptor getWifiStateChunk(IMainServiceCallback cb, long generation, int chunkIndex);
     ParcelFileDescriptor getSavedWifiListChunk(IMainServiceCallback cb, long generation, int chunkIndex);

@@ -33,7 +33,7 @@ abstract class StageTerminalLibTask : DefaultTask() {
         target.mkdirs()
 
         source.walkTopDown()
-            .filter { it.isFile && it.name == "libterminal.so" }
+            .filter { it.isFile && it.name in setOf("libterminal.so", "libhashcat.so") }
             .forEach { file ->
                 val destination = target.resolve(file.relativeTo(source))
                 destination.parentFile.mkdirs()
@@ -94,7 +94,10 @@ val linuxProjectPath = if (isWindowsHost) {
 android {
     namespace = "io.github.bszapp.wifitoolbox"
     compileSdk {
-        version = release(37)
+        version = release(37) {
+            minorApiLevel = 2
+        }
+
     }
     ndkVersion = "27.2.12479018"
 
@@ -107,6 +110,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
+            //noinspection ChromeOsAbiSupport ChromeOS关我何事？
             abiFilters += "arm64-v8a"
         }
 
@@ -144,6 +148,28 @@ android {
             useLegacyPackaging = true
         }
     }
+}
+
+val linuxAndroidSdkDir = if (isLinuxHost) {
+    providers.environmentVariable("ANDROID_SDK_ROOT")
+        .orElse(providers.environmentVariable("ANDROID_HOME"))
+        .orElse(providers.provider {
+            val properties = Properties()
+            val localProperties = rootProject.file("local.properties")
+            if (localProperties.isFile) {
+                localProperties.inputStream().use { properties.load(it) }
+            }
+            properties.getProperty("sdk.dir")
+                ?: error("Set ANDROID_SDK_ROOT, ANDROID_HOME, or sdk.dir in local.properties.")
+        })
+        .get()
+} else {
+    null
+}
+val linuxNdkDir = if (isWindowsHost) {
+    "/var/cache/wlantool-android/android-ndk-r27c"
+} else {
+    File(linuxAndroidSdkDir!!, "ndk/27.2.12479018").absolutePath
 }
 
 val rootfsWorkDir = if (isWindowsHost) {
@@ -212,27 +238,6 @@ val buildRootfs = tasks.register<Exec>("buildRootfs") {
     }
 }
 
-val linuxAndroidSdkDir = if (isLinuxHost) {
-    providers.environmentVariable("ANDROID_SDK_ROOT")
-        .orElse(providers.environmentVariable("ANDROID_HOME"))
-        .orElse(providers.provider {
-            val properties = Properties()
-            val localProperties = rootProject.file("local.properties")
-            if (localProperties.isFile) {
-                localProperties.inputStream().use { properties.load(it) }
-            }
-            properties.getProperty("sdk.dir")
-                ?: error("Set ANDROID_SDK_ROOT, ANDROID_HOME, or sdk.dir in local.properties.")
-        })
-        .get()
-} else {
-    null
-}
-val linuxNdkDir = if (isWindowsHost) {
-    "/var/cache/wlantool-android/android-ndk-r27c"
-} else {
-    File(linuxAndroidSdkDir!!, "ndk/27.2.12479018").absolutePath
-}
 val linuxCmakeBinDir = if (isWindowsHost) {
     null
 } else {
@@ -277,20 +282,24 @@ val buildTerminalCommand = """
       -DCMAKE_TOOLCHAIN_FILE="${'$'}NDK_DIR/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI=arm64-v8a \
       -DANDROID_PLATFORM=android-24 \
+      -DANDROID_STL=c++_static \
       -DAPP_GENERATED_JNI_DIR="${'$'}WORK_DIR/out"
-    "${'$'}CMAKE_BIN" --build ./build/native --target terminal
+    "${'$'}CMAKE_BIN" --build ./build/native --target terminal hashcat
     mkdir -p "${'$'}OUTPUT_DIR/arm64-v8a"
-    find "${'$'}OUTPUT_DIR" -type f -name '*.so' ! -name 'libterminal.so' -delete
+    find "${'$'}OUTPUT_DIR" -type f -name '*.so' ! -name 'libterminal.so' ! -name 'libhashcat.so' -delete
     install -m 755 ./out/arm64-v8a/libterminal.so "${'$'}OUTPUT_DIR/arm64-v8a/libterminal.so"
+    install -m 755 ./out/arm64-v8a/libhashcat.so "${'$'}OUTPUT_DIR/arm64-v8a/libhashcat.so"
 """.trimIndent()
 
 val buildTerminal = tasks.register<Exec>("buildTerminal") {
     group = "build"
-    description = "Builds the unified libterminal.so with the Linux Android NDK."
+    description =
+        "Builds libterminal.so and the executable JNI libhashcat.so from source with the Linux Android NDK."
     dependsOn(buildRootfs)
     inputs.files(rootProject.fileTree("app/src/main/cpp"))
     inputs.file(rootProject.file("rftoolbuilder/downloads.sh"))
     outputs.file(generatedJniDir.map { it.file("arm64-v8a/libterminal.so") })
+    outputs.file(generatedJniDir.map { it.file("arm64-v8a/libhashcat.so") })
 
     if (isWindowsHost) {
         commandLine(
@@ -317,21 +326,23 @@ androidComponents {
     onVariants { variant ->
         val variantName = variant.name.replaceFirstChar { it.uppercase() }
 
-        val stageTerminalLib = tasks.register<StageTerminalLibTask>("stage${variantName}TerminalLib") {
-            dependsOn(buildTerminal)
-            inputDir.set(generatedJniDir)
-            outputDir.set(layout.buildDirectory.dir("generated/terminal-jni/${variant.name}"))
-        }
+        val stageTerminalLib =
+            tasks.register<StageTerminalLibTask>("stage${variantName}TerminalLib") {
+                dependsOn(buildTerminal)
+                inputDir.set(generatedJniDir)
+                outputDir.set(layout.buildDirectory.dir("generated/terminal-jni/${variant.name}"))
+            }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(
             stageTerminalLib,
             StageTerminalLibTask::outputDir,
         )
 
-        val stageRootfsAssets = tasks.register<StageRootfsAssetsTask>("stage${variantName}RootfsAssets") {
-            dependsOn(buildRootfs)
-            inputArchive.set(generatedRootfsArchive)
-            outputDir.set(layout.buildDirectory.dir("generated/rootfs-assets/${variant.name}"))
-        }
+        val stageRootfsAssets =
+            tasks.register<StageRootfsAssetsTask>("stage${variantName}RootfsAssets") {
+                dependsOn(buildRootfs)
+                inputArchive.set(generatedRootfsArchive)
+                outputDir.set(layout.buildDirectory.dir("generated/rootfs-assets/${variant.name}"))
+            }
         variant.sources.assets?.addGeneratedSourceDirectory(
             stageRootfsAssets,
             StageRootfsAssetsTask::outputDir,

@@ -1101,6 +1101,9 @@ def build_hc22000(record, ssid_bytes):
     validation = record["validation"]
     if validation is None or not ssid_bytes or len(ssid_bytes) > 32:
         return None
+    # HC22000 stores the MIC separately; zero it only in the exported EAPOL copy.
+    eapol_frame = bytearray(validation["eapolFrame"])
+    eapol_frame[81:97] = b"\x00" * 16
     return "*".join(
         (
             "WPA",
@@ -1110,7 +1113,7 @@ def build_hc22000(record, ssid_bytes):
             record["deviceMac"].replace(":", ""),
             ssid_bytes.hex(),
             validation["anonce"].hex(),
-            validation["eapolFrame"].hex(),
+            eapol_frame.hex(),
             f"{validation['messagePair']:02x}",
         )
     )

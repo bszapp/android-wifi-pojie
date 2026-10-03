@@ -1,0 +1,6 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="scripta">
+    <output-path>$PROJECT_DIR$/scripta/build/libs</output-path>
+    <root id="archive" name="scripta.jar" />
+  </artifact>
+</component>

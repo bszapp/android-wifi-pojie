@@ -40,6 +40,10 @@ import io.github.bszapp.wifitoolbox.uidefault.screen.HomeScreen
 import io.github.bszapp.wifitoolbox.uidefault.screen.ListScreen
 import io.github.bszapp.wifitoolbox.uidefault.screen.LogScreen
 import io.github.bszapp.wifitoolbox.uidefault.screen.SettingsScreen
+import io.github.bszapp.wifitoolbox.uidefault.screen.ToolsScreen
+import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryScreen
+import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryEditorScreen
+import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryViewModel
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ColorPaletteScreen
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableFloatingBottomBar
@@ -62,8 +66,12 @@ private const val TAG = "DefaultUI"
 
 @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
 @Composable
-fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
+fun DefaultUI(
+    dictionaryViewModel: DictionaryViewModel,
+    viewModel: DefaultViewModel = viewModel(),
+) {
     val navigator = rememberNavigator(Route.Main)
+    val dictionaryState = dictionaryViewModel.state
     val sheetPresentation = remember { io.github.bszapp.wifitoolbox.uidefault.component.SheetPresentationManager() }
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
@@ -124,6 +132,15 @@ fun DefaultUI(viewModel: DefaultViewModel = viewModel()) {
                                 )
                             }
                             entry<Route.ColorPalette> { ColorPaletteScreen() }
+                            entry<Route.Resources> { DictionaryScreen(dictionaryState) }
+                            entry<Route.DictionaryEditor> { DictionaryEditorScreen(dictionaryState) }
+                            entry<Route.Log> {
+                                LogScreen(
+                                    viewModel = viewModel,
+                                    snackbarHostState = snackbarHostState,
+                                )
+                            }
+                            entry<Route.WpaHashcat> { io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(snackbarHostState = snackbarHostState) }
                         },
                     )
 
@@ -192,7 +209,7 @@ private fun MainPager(
                 when (page) {
                     0 -> HomeScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                     1 -> ListScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
-                    2 -> LogScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
+                    2 -> ToolsScreen(bottomInnerPadding = bottomInnerPadding)
                     3 -> SettingsScreen(viewModel = viewModel, bottomInnerPadding = bottomInnerPadding)
                 }
             }

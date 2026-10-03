@@ -1,0 +1,2701 @@
+/**
+ * Author......: See docs/credits.txt
+ * License.....: MIT
+ *
+ * Furthermore, since elliptic curve operations are highly researched and optimized,
+ * we've consulted a lot of online resources to implement this, including several papers and
+ * example code.
+ *
+ * Credits where credits are due: there are a lot of nice projects that explain and/or optimize
+ * elliptic curve operations (especially elliptic curve multiplications by a scalar).
+ *
+ * We want to shout out following projects, which were quite helpful when implementing this:
+ * - secp256k1 by Pieter Wuille (https://github.com/bitcoin-core/secp256k1/, MIT)
+ * - secp256k1-cl by hhanh00 (https://github.com/hhanh00/secp256k1-cl/, MIT)
+ * - ec_pure_c by masterzorag (https://github.com/masterzorag/ec_pure_c/)
+ * - ecc-gmp by leivaburto (https://github.com/leivaburto/ecc-gmp)
+ * - micro-ecc by Ken MacKay (https://github.com/kmackay/micro-ecc/, BSD)
+ * - curve_example by willem (https://gist.github.com/nlitsme/c9031c7b9bf6bb009e5a)
+ * - py_ecc by Vitalik Buterin (https://github.com/ethereum/py_ecc/, MIT)
+ *
+ *
+ * Some BigNum operations are implemented similar to micro-ecc which is licensed under these terms:
+ *  Copyright 2014 Ken MacKay, 2-Clause BSD License
+ *
+ *  Redistribution and use in source and binary forms, with or without modification, are permitted
+ *  provided that the following conditions are met:
+ *
+ *  1. Redistributions of source code must retain the above copyright notice, this list of
+ *     conditions and the following disclaimer.
+ *
+ *  2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ *     conditions and the following disclaimer in the documentation and/or other materials
+ *     provided with the distribution.
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ *  IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+ *  AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ *  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ *  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ *  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ *  POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/*
+ * ATTENTION: this code is NOT meant to be used in security critical environments that are at risk
+ * of side-channel or timing attacks etc, it's only purpose is to make it work fast for GPGPU
+ * (OpenCL/CUDA). Some attack vectors like side-channel and timing-attacks might be possible,
+ * because of some optimizations used within this code (non-constant time etc).
+ */
+
+/*
+ * Implementation considerations:
+ * point double and point add are implemented similar to algorithms mentioned in this 2011 paper:
+ * http://eprint.iacr.org/2011/338.pdf
+ * (Fast and Regular Algorithms for Scalar Multiplication over Elliptic Curves by Matthieu Rivain)
+ *
+ * In theory we could use the Jacobian Co-Z enhancement to get rid of the larger buffer caused by
+ * the z coordinates (and in this way reduce register pressure etc).
+ * For the Co-Z improvement there are a lot of fast algorithms, but we might still be faster
+ * with this implementation (b/c we allow non-constant time) without the Brier/Joye Montgomery-like
+ * ladder. Of course, this claim would need to be verified and tested to see which one is faster
+ * for our specific scenario at the end.
+ *
+ * We accomplish a "little" speedup by using scalars converted to w-NAF (non-adjacent form):
+ * The general idea of w-NAF is to pre-compute some zi coefficients like below to reduce the
+ * costly point additions by using a non-binary ("signed") number system (values other than just
+ * 0 and 1, but ranging from -2^(w-1)-1 to 2^(w-1)-1). This works best with the left-to-right
+ * binary algorithm such that we just add zi * P when adding point P (we pre-compute all the
+ * possible zi * P values because the x/y coordinates are known before the kernel starts):
+ *
+ *  // Example with window size w = 2 (i.e. mod 4 => & 3):
+ *  // 173 => 1 0 -1 0 -1 0 -1 0 1 = 2^8 - 2^6 - 2^4 - 2^2 + 1
+ *  int e = 0b10101101;   // 173
+ *  int z[8 + 1] = { 0 }; // our zi/di, we need one extra slot to make the subtraction work
+ *
+ *  int i = 0;
+ *
+ *  while (e)
+ *  {
+ *    if (e & 1)
+ *    {
+ *      // for window size w = 3 it would be:
+ *      // => 2^(w-0) = 2^3 = 8
+ *      // => 2^(w-1) = 2^2 = 4
+ *
+ *      int bit; // = 2 - (e & 3) for w = 2
+ *
+ *      if ((e & 3) >= 2) // e % 4 == e & 3, use (e & 7) >= 4 for w = 3
+ *        bit = (e & 3) - 4; // (e & 7) - 8 for w = 3
+ *      else
+ *        bit = e & 3; // e & 7 for w = 3
+ *
+ *      z[i] = bit;
+ *      e   -= bit;
+ *    }
+ *
+ *    e >>= 1; // e / 2
+ *    i++;
+ *  }
+*/
+
+#include "inc_ecc_secp256k1.h"
+
+DECLSPEC u32 sub (PRIVATE_AS u32 *r, PRIVATE_AS const u32 *a, PRIVATE_AS const u32 *b)
+{
+  u32 c = 0; // carry/borrow
+
+  #if defined IS_NV && HAS_SUB == 1 && HAS_SUBC == 1
+  asm volatile
+  (
+    "sub.cc.u32   %0,  %9, %17;"
+    "subc.cc.u32  %1, %10, %18;"
+    "subc.cc.u32  %2, %11, %19;"
+    "subc.cc.u32  %3, %12, %20;"
+    "subc.cc.u32  %4, %13, %21;"
+    "subc.cc.u32  %5, %14, %22;"
+    "subc.cc.u32  %6, %15, %23;"
+    "subc.cc.u32  %7, %16, %24;"
+    "subc.u32     %8,   0,   0;"
+    : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]),
+      "=r"(c)
+    :  "r"(a[0]),  "r"(a[1]),  "r"(a[2]),  "r"(a[3]),  "r"(a[4]),  "r"(a[5]),  "r"(a[6]),  "r"(a[7]),
+       "r"(b[0]),  "r"(b[1]),  "r"(b[2]),  "r"(b[3]),  "r"(b[4]),  "r"(b[5]),  "r"(b[6]),  "r"(b[7])
+  );
+  // HIP doesnt support these so we stick to OpenCL (aka IS_AMD) - is also faster without asm
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VSUB == 1 && HAS_VSUBB == 1
+  #elif 0
+  __asm__ __volatile__
+  (
+    "V_SUB_U32   %0,  %9, %17;"
+    "V_SUBB_U32  %1, %10, %18;"
+    "V_SUBB_U32  %2, %11, %19;"
+    "V_SUBB_U32  %3, %12, %20;"
+    "V_SUBB_U32  %4, %13, %21;"
+    "V_SUBB_U32  %5, %14, %22;"
+    "V_SUBB_U32  %6, %15, %23;"
+    "V_SUBB_U32  %7, %16, %24;"
+    "V_SUBB_U32  %8,   0,   0;"
+    : "=v"(r[0]), "=v"(r[1]), "=v"(r[2]), "=v"(r[3]), "=v"(r[4]), "=v"(r[5]), "=v"(r[6]), "=v"(r[7]),
+      "=v"(c)
+    :  "v"(a[0]),  "v"(a[1]),  "v"(a[2]),  "v"(a[3]),  "v"(a[4]),  "v"(a[5]),  "v"(a[6]),  "v"(a[7]),
+       "v"(b[0]),  "v"(b[1]),  "v"(b[2]),  "v"(b[3]),  "v"(b[4]),  "v"(b[5]),  "v"(b[6]),  "v"(b[7])
+  );
+  #else
+  for (u32 i = 0; i < 8; i++)
+  {
+    const u32 diff = a[i] - b[i] - c;
+
+    if (diff != a[i]) c = (diff > a[i]);
+
+    r[i] = diff;
+  }
+  #endif
+
+  return c;
+}
+
+DECLSPEC u32 add (PRIVATE_AS u32 *r, PRIVATE_AS const u32 *a, PRIVATE_AS const u32 *b)
+{
+  u32 c = 0; // carry/borrow
+
+  #if defined IS_NV && HAS_ADD == 1 && HAS_ADDC == 1
+  asm volatile
+  (
+    "add.cc.u32   %0,  %9, %17;"
+    "addc.cc.u32  %1, %10, %18;"
+    "addc.cc.u32  %2, %11, %19;"
+    "addc.cc.u32  %3, %12, %20;"
+    "addc.cc.u32  %4, %13, %21;"
+    "addc.cc.u32  %5, %14, %22;"
+    "addc.cc.u32  %6, %15, %23;"
+    "addc.cc.u32  %7, %16, %24;"
+    "addc.u32     %8,   0,   0;"
+    : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]),
+      "=r"(c)
+    :  "r"(a[0]),  "r"(a[1]),  "r"(a[2]),  "r"(a[3]),  "r"(a[4]),  "r"(a[5]),  "r"(a[6]),  "r"(a[7]),
+       "r"(b[0]),  "r"(b[1]),  "r"(b[2]),  "r"(b[3]),  "r"(b[4]),  "r"(b[5]),  "r"(b[6]),  "r"(b[7])
+  );
+  // HIP doesnt support these so we stick to OpenCL (aka IS_AMD) - is also faster without asm
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VSUB == 1 && HAS_VSUBB == 1
+  #elif 0
+  __asm__ __volatile__
+  (
+    "V_ADD_U32   %0,  %9, %17;"
+    "V_ADDC_U32  %1, %10, %18;"
+    "V_ADDC_U32  %2, %11, %19;"
+    "V_ADDC_U32  %3, %12, %20;"
+    "V_ADDC_U32  %4, %13, %21;"
+    "V_ADDC_U32  %5, %14, %22;"
+    "V_ADDC_U32  %6, %15, %23;"
+    "V_ADDC_U32  %7, %16, %24;"
+    "V_ADDC_U32  %8,   0,   0;"
+    : "=v"(r[0]), "=v"(r[1]), "=v"(r[2]), "=v"(r[3]), "=v"(r[4]), "=v"(r[5]), "=v"(r[6]), "=v"(r[7]),
+      "=v"(c)
+    :  "v"(a[0]),  "v"(a[1]),  "v"(a[2]),  "v"(a[3]),  "v"(a[4]),  "v"(a[5]),  "v"(a[6]),  "v"(a[7]),
+       "v"(b[0]),  "v"(b[1]),  "v"(b[2]),  "v"(b[3]),  "v"(b[4]),  "v"(b[5]),  "v"(b[6]),  "v"(b[7])
+  );
+  #else
+  for (u32 i = 0; i < 8; i++)
+  {
+    const u32 t = a[i] + b[i] + c;
+
+    if (t != a[i]) c = (t < a[i]);
+
+    r[i] = t;
+  }
+  #endif
+
+  return c;
+}
+
+DECLSPEC void sub_mod (PRIVATE_AS u32 *r, PRIVATE_AS const u32 *a, PRIVATE_AS const u32 *b)
+{
+  const u32 c = sub (r, a, b); // carry
+
+  if (c)
+  {
+    u32 t[8];
+
+    t[0] = SECP256K1_P0;
+    t[1] = SECP256K1_P1;
+    t[2] = SECP256K1_P2;
+    t[3] = SECP256K1_P3;
+    t[4] = SECP256K1_P4;
+    t[5] = SECP256K1_P5;
+    t[6] = SECP256K1_P6;
+    t[7] = SECP256K1_P7;
+
+    add (r, r, t);
+  }
+}
+
+DECLSPEC void add_mod (PRIVATE_AS u32 *r, PRIVATE_AS const u32 *a, PRIVATE_AS const u32 *b)
+{
+  const u32 c = add (r, a, b); // carry
+
+  /*
+   * Modulo operation:
+   */
+
+  // note: we could have an early exit in case of c == 1 => sub ()
+
+  u32 t[8];
+
+  t[0] = SECP256K1_P0;
+  t[1] = SECP256K1_P1;
+  t[2] = SECP256K1_P2;
+  t[3] = SECP256K1_P3;
+  t[4] = SECP256K1_P4;
+  t[5] = SECP256K1_P5;
+  t[6] = SECP256K1_P6;
+  t[7] = SECP256K1_P7;
+
+  // check if modulo operation is needed
+
+  u32 mod = 1;
+
+  if (c == 0)
+  {
+    for (int i = 7; i >= 0; i--)
+    {
+      if (r[i] < t[i])
+      {
+        mod = 0;
+
+        break; // or return ! (check if faster)
+      }
+
+      if (r[i] > t[i]) break;
+    }
+  }
+
+  if (mod == 1)
+  {
+    sub (r, r, t);
+  }
+}
+
+DECLSPEC void mod_512 (PRIVATE_AS u32 *n)
+{
+  // we need to perform a modulo operation with 512-bit % 256-bit (bignum modulo):
+  // the modulus is the secp256k1 group order
+
+  // ATTENTION: for this function the byte-order is reversed (most significant bytes
+  // at the left)
+
+  /*
+    the general modulo by shift and substract code (a = a % b):
+
+    x = b;
+
+    t = a >> 1;
+
+    while (x <= t) x <<= 1;
+
+    while (a >= b)
+    {
+      if (a >= x) a -= x;
+
+      x >>= 1;
+    }
+
+    return a; // remainder
+  */
+
+  u32 a[16];
+
+  a[ 0] = n[ 0];
+  a[ 1] = n[ 1];
+  a[ 2] = n[ 2];
+  a[ 3] = n[ 3];
+  a[ 4] = n[ 4];
+  a[ 5] = n[ 5];
+  a[ 6] = n[ 6];
+  a[ 7] = n[ 7];
+  a[ 8] = n[ 8];
+  a[ 9] = n[ 9];
+  a[10] = n[10];
+  a[11] = n[11];
+  a[12] = n[12];
+  a[13] = n[13];
+  a[14] = n[14];
+  a[15] = n[15];
+
+  u32 b[16];
+
+  b[ 0] = 0x00000000;
+  b[ 1] = 0x00000000;
+  b[ 2] = 0x00000000;
+  b[ 3] = 0x00000000;
+  b[ 4] = 0x00000000;
+  b[ 5] = 0x00000000;
+  b[ 6] = 0x00000000;
+  b[ 7] = 0x00000000;
+  b[ 8] = SECP256K1_N7;
+  b[ 9] = SECP256K1_N6;
+  b[10] = SECP256K1_N5;
+  b[11] = SECP256K1_N4;
+  b[12] = SECP256K1_N3;
+  b[13] = SECP256K1_N2;
+  b[14] = SECP256K1_N1;
+  b[15] = SECP256K1_N0;
+
+  /*
+   * Start:
+   */
+
+  // x = b (but with a fast "shift" trick to avoid the while loop)
+
+  u32 x[16];
+
+  x[ 0] = b[ 8]; // this is a trick: we just put the group order's most significant bit all the
+  x[ 1] = b[ 9]; // way to the top to avoid doing the initial: while (x <= t) x <<= 1
+  x[ 2] = b[10];
+  x[ 3] = b[11];
+  x[ 4] = b[12];
+  x[ 5] = b[13];
+  x[ 6] = b[14];
+  x[ 7] = b[15];
+  x[ 8] = 0x00000000;
+  x[ 9] = 0x00000000;
+  x[10] = 0x00000000;
+  x[11] = 0x00000000;
+  x[12] = 0x00000000;
+  x[13] = 0x00000000;
+  x[14] = 0x00000000;
+  x[15] = 0x00000000;
+
+  // a >= b
+
+  while (a[0] >= b[0])
+  {
+    u32 l00 = a[ 0] < b[ 0];
+    u32 l01 = a[ 1] < b[ 1];
+    u32 l02 = a[ 2] < b[ 2];
+    u32 l03 = a[ 3] < b[ 3];
+    u32 l04 = a[ 4] < b[ 4];
+    u32 l05 = a[ 5] < b[ 5];
+    u32 l06 = a[ 6] < b[ 6];
+    u32 l07 = a[ 7] < b[ 7];
+    u32 l08 = a[ 8] < b[ 8];
+    u32 l09 = a[ 9] < b[ 9];
+    u32 l10 = a[10] < b[10];
+    u32 l11 = a[11] < b[11];
+    u32 l12 = a[12] < b[12];
+    u32 l13 = a[13] < b[13];
+    u32 l14 = a[14] < b[14];
+    u32 l15 = a[15] < b[15];
+
+    u32 e00 = a[ 0] == b[ 0];
+    u32 e01 = a[ 1] == b[ 1];
+    u32 e02 = a[ 2] == b[ 2];
+    u32 e03 = a[ 3] == b[ 3];
+    u32 e04 = a[ 4] == b[ 4];
+    u32 e05 = a[ 5] == b[ 5];
+    u32 e06 = a[ 6] == b[ 6];
+    u32 e07 = a[ 7] == b[ 7];
+    u32 e08 = a[ 8] == b[ 8];
+    u32 e09 = a[ 9] == b[ 9];
+    u32 e10 = a[10] == b[10];
+    u32 e11 = a[11] == b[11];
+    u32 e12 = a[12] == b[12];
+    u32 e13 = a[13] == b[13];
+    u32 e14 = a[14] == b[14];
+
+    if (l00) break;
+    if (l01 && e00) break;
+    if (l02 && e00 && e01) break;
+    if (l03 && e00 && e01 && e02) break;
+    if (l04 && e00 && e01 && e02 && e03) break;
+    if (l05 && e00 && e01 && e02 && e03 && e04) break;
+    if (l06 && e00 && e01 && e02 && e03 && e04 && e05) break;
+    if (l07 && e00 && e01 && e02 && e03 && e04 && e05 && e06) break;
+    if (l08 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07) break;
+    if (l09 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08) break;
+    if (l10 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09) break;
+    if (l11 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10) break;
+    if (l12 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11) break;
+    if (l13 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11 && e12) break;
+    if (l14 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11 && e12 && e13) break;
+    if (l15 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11 && e12 && e13 && e14) break;
+
+    // r = x (copy it to have the original values for the subtraction)
+
+    u32 r[16];
+
+    r[ 0] = x[ 0];
+    r[ 1] = x[ 1];
+    r[ 2] = x[ 2];
+    r[ 3] = x[ 3];
+    r[ 4] = x[ 4];
+    r[ 5] = x[ 5];
+    r[ 6] = x[ 6];
+    r[ 7] = x[ 7];
+    r[ 8] = x[ 8];
+    r[ 9] = x[ 9];
+    r[10] = x[10];
+    r[11] = x[11];
+    r[12] = x[12];
+    r[13] = x[13];
+    r[14] = x[14];
+    r[15] = x[15];
+
+    // x <<= 1
+
+    x[15] = x[15] >> 1 | x[14] << 31;
+    x[14] = x[14] >> 1 | x[13] << 31;
+    x[13] = x[13] >> 1 | x[12] << 31;
+    x[12] = x[12] >> 1 | x[11] << 31;
+    x[11] = x[11] >> 1 | x[10] << 31;
+    x[10] = x[10] >> 1 | x[ 9] << 31;
+    x[ 9] = x[ 9] >> 1 | x[ 8] << 31;
+    x[ 8] = x[ 8] >> 1 | x[ 7] << 31;
+    x[ 7] = x[ 7] >> 1 | x[ 6] << 31;
+    x[ 6] = x[ 6] >> 1 | x[ 5] << 31;
+    x[ 5] = x[ 5] >> 1 | x[ 4] << 31;
+    x[ 4] = x[ 4] >> 1 | x[ 3] << 31;
+    x[ 3] = x[ 3] >> 1 | x[ 2] << 31;
+    x[ 2] = x[ 2] >> 1 | x[ 1] << 31;
+    x[ 1] = x[ 1] >> 1 | x[ 0] << 31;
+    x[ 0] = x[ 0] >> 1;
+
+    // if (a >= r) a -= r;
+
+    l00 = a[ 0] < r[ 0];
+    l01 = a[ 1] < r[ 1];
+    l02 = a[ 2] < r[ 2];
+    l03 = a[ 3] < r[ 3];
+    l04 = a[ 4] < r[ 4];
+    l05 = a[ 5] < r[ 5];
+    l06 = a[ 6] < r[ 6];
+    l07 = a[ 7] < r[ 7];
+    l08 = a[ 8] < r[ 8];
+    l09 = a[ 9] < r[ 9];
+    l10 = a[10] < r[10];
+    l11 = a[11] < r[11];
+    l12 = a[12] < r[12];
+    l13 = a[13] < r[13];
+    l14 = a[14] < r[14];
+    l15 = a[15] < r[15];
+
+    e00 = a[ 0] == r[ 0];
+    e01 = a[ 1] == r[ 1];
+    e02 = a[ 2] == r[ 2];
+    e03 = a[ 3] == r[ 3];
+    e04 = a[ 4] == r[ 4];
+    e05 = a[ 5] == r[ 5];
+    e06 = a[ 6] == r[ 6];
+    e07 = a[ 7] == r[ 7];
+    e08 = a[ 8] == r[ 8];
+    e09 = a[ 9] == r[ 9];
+    e10 = a[10] == r[10];
+    e11 = a[11] == r[11];
+    e12 = a[12] == r[12];
+    e13 = a[13] == r[13];
+    e14 = a[14] == r[14];
+
+    if (l00) continue;
+    if (l01 && e00) continue;
+    if (l02 && e00 && e01) continue;
+    if (l03 && e00 && e01 && e02) continue;
+    if (l04 && e00 && e01 && e02 && e03) continue;
+    if (l05 && e00 && e01 && e02 && e03 && e04) continue;
+    if (l06 && e00 && e01 && e02 && e03 && e04 && e05) continue;
+    if (l07 && e00 && e01 && e02 && e03 && e04 && e05 && e06) continue;
+    if (l08 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07) continue;
+    if (l09 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08) continue;
+    if (l10 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09) continue;
+    if (l11 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10) continue;
+    if (l12 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11) continue;
+    if (l13 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11 && e12) continue;
+    if (l14 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11 && e12 && e13) continue;
+    if (l15 && e00 && e01 && e02 && e03 && e04 && e05 && e06 && e07 && e08 && e09 && e10 && e11 && e12 && e13 && e14) continue;
+
+    // substract (a -= r):
+
+    if ((r[ 0] | r[ 1] | r[ 2] | r[ 3] | r[ 4] | r[ 5] | r[ 6] | r[ 7] |
+         r[ 8] | r[ 9] | r[10] | r[11] | r[12] | r[13] | r[14] | r[15]) == 0) break;
+
+    r[ 0] = a[ 0] - r[ 0];
+    r[ 1] = a[ 1] - r[ 1];
+    r[ 2] = a[ 2] - r[ 2];
+    r[ 3] = a[ 3] - r[ 3];
+    r[ 4] = a[ 4] - r[ 4];
+    r[ 5] = a[ 5] - r[ 5];
+    r[ 6] = a[ 6] - r[ 6];
+    r[ 7] = a[ 7] - r[ 7];
+    r[ 8] = a[ 8] - r[ 8];
+    r[ 9] = a[ 9] - r[ 9];
+    r[10] = a[10] - r[10];
+    r[11] = a[11] - r[11];
+    r[12] = a[12] - r[12];
+    r[13] = a[13] - r[13];
+    r[14] = a[14] - r[14];
+    r[15] = a[15] - r[15];
+
+    // take care of the "borrow" (we can't do it the other way around 15...1 because r[x] is changed!)
+
+    if (r[ 1] > a[ 1]) r[ 0]--;
+    if (r[ 2] > a[ 2]) r[ 1]--;
+    if (r[ 3] > a[ 3]) r[ 2]--;
+    if (r[ 4] > a[ 4]) r[ 3]--;
+    if (r[ 5] > a[ 5]) r[ 4]--;
+    if (r[ 6] > a[ 6]) r[ 5]--;
+    if (r[ 7] > a[ 7]) r[ 6]--;
+    if (r[ 8] > a[ 8]) r[ 7]--;
+    if (r[ 9] > a[ 9]) r[ 8]--;
+    if (r[10] > a[10]) r[ 9]--;
+    if (r[11] > a[11]) r[10]--;
+    if (r[12] > a[12]) r[11]--;
+    if (r[13] > a[13]) r[12]--;
+    if (r[14] > a[14]) r[13]--;
+    if (r[15] > a[15]) r[14]--;
+
+    a[ 0] = r[ 0];
+    a[ 1] = r[ 1];
+    a[ 2] = r[ 2];
+    a[ 3] = r[ 3];
+    a[ 4] = r[ 4];
+    a[ 5] = r[ 5];
+    a[ 6] = r[ 6];
+    a[ 7] = r[ 7];
+    a[ 8] = r[ 8];
+    a[ 9] = r[ 9];
+    a[10] = r[10];
+    a[11] = r[11];
+    a[12] = r[12];
+    a[13] = r[13];
+    a[14] = r[14];
+    a[15] = r[15];
+  }
+
+  n[ 0] = a[ 0];
+  n[ 1] = a[ 1];
+  n[ 2] = a[ 2];
+  n[ 3] = a[ 3];
+  n[ 4] = a[ 4];
+  n[ 5] = a[ 5];
+  n[ 6] = a[ 6];
+  n[ 7] = a[ 7];
+  n[ 8] = a[ 8];
+  n[ 9] = a[ 9];
+  n[10] = a[10];
+  n[11] = a[11];
+  n[12] = a[12];
+  n[13] = a[13];
+  n[14] = a[14];
+  n[15] = a[15];
+}
+
+DECLSPEC void mul_mod (PRIVATE_AS u32 *r, PRIVATE_AS const u32 *a, PRIVATE_AS const u32 *b) // TODO get rid of u64 ?
+{
+  u32 t[16] = { 0 }; // we need up to double the space (2 * 8)
+
+  /*
+   * First start with the basic a * b multiplication:
+   */
+
+  u32 t0 = 0;
+  u32 t1 = 0;
+  u32 c  = 0;
+
+  for (u32 i = 0; i < 8; i++)
+  {
+    for (u32 j = 0; j <= i; j++)
+    {
+      u64 p = ((u64) a[j]) * b[i - j];
+
+      u64 d = ((u64) t1) << 32 | t0;
+
+      d += p;
+
+      t0 = (u32) d;
+      t1 = d >> 32;
+
+      c += d < p; // carry
+    }
+
+    t[i] = t0;
+
+    t0 = t1;
+    t1 = c;
+
+    c = 0;
+  }
+
+  for (u32 i = 8; i < 15; i++)
+  {
+    for (u32 j = i - 7; j < 8; j++)
+    {
+      u64 p = ((u64) a[j]) * b[i - j];
+
+      u64 d = ((u64) t1) << 32 | t0;
+
+      d += p;
+
+      t0 = (u32) d;
+      t1 = d >> 32;
+
+      c += d < p;
+    }
+
+    t[i] = t0;
+
+    t0 = t1;
+    t1 = c;
+
+    c = 0;
+  }
+
+  t[15] = t0;
+
+
+
+  /*
+   * Now do the modulo operation:
+   * (r = t % p)
+   *
+   * http://www.isys.uni-klu.ac.at/PDF/2001-0126-MT.pdf (p.354 or p.9 in that document)
+   */
+
+  u32 tmp[16] = { 0 };
+
+  // c = 0;
+
+  // Note: SECP256K1_P = 2^256 - 2^32 - 977 (0x03d1 = 977)
+  // multiply t[8]...t[15] by omega:
+
+  for (u32 i = 0, j = 8; i < 8; i++, j++)
+  {
+    u64 p = ((u64) 0x03d1) * t[j] + c;
+
+    tmp[i] = (u32) p;
+
+    c = p >> 32;
+  }
+
+  tmp[8] = c;
+
+  c = add (tmp + 1, tmp + 1, t + 8); // modifies tmp[1]...tmp[8]
+
+  tmp[9] = c;
+
+
+  // r = t + tmp
+
+  c = add (r, t, tmp);
+
+  // multiply t[0]...t[7] by omega:
+
+  u32 c2 = 0;
+
+  // memset (t, 0, sizeof (t));
+
+  for (u32 i = 0, j = 8; i < 8; i++, j++)
+  {
+    u64 p = ((u64) 0x3d1) * tmp[j] + c2;
+
+    t[i] = (u32) p;
+
+    c2 = p >> 32;
+  }
+
+  t[8] = c2;
+
+  c2 = add (t + 1, t + 1, tmp + 8); // modifies t[1]...t[8]
+
+  t[9] = c2;
+
+
+  // r = r + t
+
+  c2 = add (r, r, t);
+
+  c += c2;
+
+  t[0] = SECP256K1_P0;
+  t[1] = SECP256K1_P1;
+  t[2] = SECP256K1_P2;
+  t[3] = SECP256K1_P3;
+  t[4] = SECP256K1_P4;
+  t[5] = SECP256K1_P5;
+  t[6] = SECP256K1_P6;
+  t[7] = SECP256K1_P7;
+
+  for (u32 i = c; i > 0; i--)
+  {
+    sub (r, r, t);
+  }
+
+  for (int i = 7; i >= 0; i--)
+  {
+    if (r[i] < t[i]) break;
+
+    if (r[i] > t[i])
+    {
+      sub (r, r, t);
+
+      break;
+    }
+  }
+}
+
+DECLSPEC void sqrt_mod (PRIVATE_AS u32 *r)
+{
+  // Fermat's Little Theorem
+  // secp256k1: y^2 = x^3 + 7 % p
+  // y ^ (p - 1) = 1
+  // y ^ (p - 1) = (y^2) ^ ((p - 1) / 2) = 1 => y^2 = (y^2) ^ (((p - 1) / 2) + 1)
+  // => y = (y^2) ^ ((((p - 1) / 2) + 1) / 2)
+  // y = (y^2) ^ (((p - 1 + 2) / 2) / 2) = (y^2) ^ ((p + 1) / 4)
+
+  // y1 = (x^3 + 7) ^ ((p + 1) / 4)
+  // y2 = p - y1 (or y2 = y1 * -1 % p)
+
+  u32 s[8];
+
+  s[0] = SECP256K1_P0 + 1; //  because of (p + 1) / 4 or use add (s, s, 1)
+  s[1] = SECP256K1_P1;
+  s[2] = SECP256K1_P2;
+  s[3] = SECP256K1_P3;
+  s[4] = SECP256K1_P4;
+  s[5] = SECP256K1_P5;
+  s[6] = SECP256K1_P6;
+  s[7] = SECP256K1_P7;
+
+  u32 t[8] = { 0 };
+
+  t[0] = 1;
+
+  for (u32 i = 255; i > 1; i--) // we just skip the last 2 multiplications (=> exp / 4)
+  {
+    mul_mod (t, t, t); // r * r
+
+    u32 idx  = i >> 5;
+    u32 mask = 1u << (i & 0x1f);
+
+    if (s[idx] & mask)
+    {
+      mul_mod (t, t, r); // t * r
+    }
+  }
+
+  r[0] = t[0];
+  r[1] = t[1];
+  r[2] = t[2];
+  r[3] = t[3];
+  r[4] = t[4];
+  r[5] = t[5];
+  r[6] = t[6];
+  r[7] = t[7];
+}
+
+// (inverse (a, p) * a) % p == 1 (or think of a * a^-1 = a / a = 1)
+
+DECLSPEC void inv_mod_binary_gcd (PRIVATE_AS u32 *a)
+{
+  // Guard against a == 0 (the z-coordinate of the point at infinity, produced by
+  // point_add of P + (-P) or by feeding point_mul_xy a zero scalar).
+  // Without this the loop below never terminates: t0 = 0 is always even, so shifting
+  // keeps it 0 and the exit condition (t0 == p) is never reached. On a CPU OpenCL
+  // device (pocl) the work-item then spins forever and clFinish hangs; GPUs happen to
+  // mask it. Cheap, branch-predictable early-out (7 ORs + 1 compare).
+
+  const u32 a_is_zero = (a[0] | a[1] | a[2] | a[3] | a[4] | a[5] | a[6] | a[7]) == 0;
+
+  if (a_is_zero) return;
+
+  u32 t0[8];
+
+  t0[0] = a[0];
+  t0[1] = a[1];
+  t0[2] = a[2];
+  t0[3] = a[3];
+  t0[4] = a[4];
+  t0[5] = a[5];
+  t0[6] = a[6];
+  t0[7] = a[7];
+
+  u32 p[8];
+
+  p[0] = SECP256K1_P0;
+  p[1] = SECP256K1_P1;
+  p[2] = SECP256K1_P2;
+  p[3] = SECP256K1_P3;
+  p[4] = SECP256K1_P4;
+  p[5] = SECP256K1_P5;
+  p[6] = SECP256K1_P6;
+  p[7] = SECP256K1_P7;
+
+  u32 t1[8];
+
+  t1[0] = SECP256K1_P0;
+  t1[1] = SECP256K1_P1;
+  t1[2] = SECP256K1_P2;
+  t1[3] = SECP256K1_P3;
+  t1[4] = SECP256K1_P4;
+  t1[5] = SECP256K1_P5;
+  t1[6] = SECP256K1_P6;
+  t1[7] = SECP256K1_P7;
+
+  u32 t2[8] = { 0 };
+
+  t2[0] = 0x00000001;
+
+  u32 t3[8] = { 0 };
+
+  u32 b = (t0[0] != t1[0])
+        | (t0[1] != t1[1])
+        | (t0[2] != t1[2])
+        | (t0[3] != t1[3])
+        | (t0[4] != t1[4])
+        | (t0[5] != t1[5])
+        | (t0[6] != t1[6])
+        | (t0[7] != t1[7]);
+
+  while (b)
+  {
+    if ((t0[0] & 1) == 0) // even
+    {
+      t0[0] = t0[0] >> 1 | t0[1] << 31;
+      t0[1] = t0[1] >> 1 | t0[2] << 31;
+      t0[2] = t0[2] >> 1 | t0[3] << 31;
+      t0[3] = t0[3] >> 1 | t0[4] << 31;
+      t0[4] = t0[4] >> 1 | t0[5] << 31;
+      t0[5] = t0[5] >> 1 | t0[6] << 31;
+      t0[6] = t0[6] >> 1 | t0[7] << 31;
+      t0[7] = t0[7] >> 1;
+
+      u32 c = 0;
+
+      if (t2[0] & 1) c = add (t2, t2, p);
+
+      t2[0] = t2[0] >> 1 | t2[1] << 31;
+      t2[1] = t2[1] >> 1 | t2[2] << 31;
+      t2[2] = t2[2] >> 1 | t2[3] << 31;
+      t2[3] = t2[3] >> 1 | t2[4] << 31;
+      t2[4] = t2[4] >> 1 | t2[5] << 31;
+      t2[5] = t2[5] >> 1 | t2[6] << 31;
+      t2[6] = t2[6] >> 1 | t2[7] << 31;
+      t2[7] = t2[7] >> 1 | c     << 31;
+    }
+    else if ((t1[0] & 1) == 0)
+    {
+      t1[0] = t1[0] >> 1 | t1[1] << 31;
+      t1[1] = t1[1] >> 1 | t1[2] << 31;
+      t1[2] = t1[2] >> 1 | t1[3] << 31;
+      t1[3] = t1[3] >> 1 | t1[4] << 31;
+      t1[4] = t1[4] >> 1 | t1[5] << 31;
+      t1[5] = t1[5] >> 1 | t1[6] << 31;
+      t1[6] = t1[6] >> 1 | t1[7] << 31;
+      t1[7] = t1[7] >> 1;
+
+      u32 c = 0;
+
+      if (t3[0] & 1) c = add (t3, t3, p);
+
+      t3[0] = t3[0] >> 1 | t3[1] << 31;
+      t3[1] = t3[1] >> 1 | t3[2] << 31;
+      t3[2] = t3[2] >> 1 | t3[3] << 31;
+      t3[3] = t3[3] >> 1 | t3[4] << 31;
+      t3[4] = t3[4] >> 1 | t3[5] << 31;
+      t3[5] = t3[5] >> 1 | t3[6] << 31;
+      t3[6] = t3[6] >> 1 | t3[7] << 31;
+      t3[7] = t3[7] >> 1 | c     << 31;
+    }
+    else
+    {
+      u32 gt = 0;
+
+      for (int i = 7; i >= 0; i--)
+      {
+        if (t0[i] > t1[i])
+        {
+          gt = 1;
+
+          break;
+        }
+
+        if (t0[i] < t1[i]) break;
+      }
+
+      if (gt)
+      {
+        sub (t0, t0, t1);
+
+        t0[0] = t0[0] >> 1 | t0[1] << 31;
+        t0[1] = t0[1] >> 1 | t0[2] << 31;
+        t0[2] = t0[2] >> 1 | t0[3] << 31;
+        t0[3] = t0[3] >> 1 | t0[4] << 31;
+        t0[4] = t0[4] >> 1 | t0[5] << 31;
+        t0[5] = t0[5] >> 1 | t0[6] << 31;
+        t0[6] = t0[6] >> 1 | t0[7] << 31;
+        t0[7] = t0[7] >> 1;
+
+        u32 lt = 0;
+
+        for (int i = 7; i >= 0; i--)
+        {
+          if (t2[i] < t3[i])
+          {
+            lt = 1;
+
+            break;
+          }
+
+          if (t2[i] > t3[i]) break;
+        }
+
+        if (lt) add (t2, t2, p);
+
+        sub (t2, t2, t3);
+
+        u32 c = 0;
+
+        if (t2[0] & 1) c = add (t2, t2, p);
+
+        t2[0] = t2[0] >> 1 | t2[1] << 31;
+        t2[1] = t2[1] >> 1 | t2[2] << 31;
+        t2[2] = t2[2] >> 1 | t2[3] << 31;
+        t2[3] = t2[3] >> 1 | t2[4] << 31;
+        t2[4] = t2[4] >> 1 | t2[5] << 31;
+        t2[5] = t2[5] >> 1 | t2[6] << 31;
+        t2[6] = t2[6] >> 1 | t2[7] << 31;
+        t2[7] = t2[7] >> 1 | c     << 31;
+      }
+      else
+      {
+        sub (t1, t1, t0);
+
+        t1[0] = t1[0] >> 1 | t1[1] << 31;
+        t1[1] = t1[1] >> 1 | t1[2] << 31;
+        t1[2] = t1[2] >> 1 | t1[3] << 31;
+        t1[3] = t1[3] >> 1 | t1[4] << 31;
+        t1[4] = t1[4] >> 1 | t1[5] << 31;
+        t1[5] = t1[5] >> 1 | t1[6] << 31;
+        t1[6] = t1[6] >> 1 | t1[7] << 31;
+        t1[7] = t1[7] >> 1;
+
+        u32 lt = 0;
+
+        for (int i = 7; i >= 0; i--)
+        {
+          if (t3[i] < t2[i])
+          {
+            lt = 1;
+
+            break;
+          }
+
+          if (t3[i] > t2[i]) break;
+        }
+
+        if (lt) add (t3, t3, p);
+
+        sub (t3, t3, t2);
+
+        u32 c = 0;
+
+        if (t3[0] & 1) c = add (t3, t3, p);
+
+        t3[0] = t3[0] >> 1 | t3[1] << 31;
+        t3[1] = t3[1] >> 1 | t3[2] << 31;
+        t3[2] = t3[2] >> 1 | t3[3] << 31;
+        t3[3] = t3[3] >> 1 | t3[4] << 31;
+        t3[4] = t3[4] >> 1 | t3[5] << 31;
+        t3[5] = t3[5] >> 1 | t3[6] << 31;
+        t3[6] = t3[6] >> 1 | t3[7] << 31;
+        t3[7] = t3[7] >> 1 | c     << 31;
+      }
+    }
+
+    // update b:
+
+    b = (t0[0] != t1[0])
+      | (t0[1] != t1[1])
+      | (t0[2] != t1[2])
+      | (t0[3] != t1[3])
+      | (t0[4] != t1[4])
+      | (t0[5] != t1[5])
+      | (t0[6] != t1[6])
+      | (t0[7] != t1[7]);
+  }
+
+  // set result:
+
+  a[0] = t2[0];
+  a[1] = t2[1];
+  a[2] = t2[2];
+  a[3] = t2[3];
+  a[4] = t2[4];
+  a[5] = t2[5];
+  a[6] = t2[6];
+  a[7] = t2[7];
+}
+
+/*
+ * safegcd modular inverse (Bernstein-Yang "divsteps"), a faithful port of libsecp256k1's
+ * CONSTANT-TIME modinv32 (bitcoin-core/secp256k1, src/modinv32_impl.h, MIT). Drop-in alternative to
+ * inv_mod_binary_gcd() above with the SAME signature (u32 a[8] little-endian, value in [0, p),
+ * replaced by its inverse mod p). Self-contained: depends only on the field prime p (encoded below)
+ * and 32/64-bit integer math already used by mul_mod, no other helpers.
+ *
+ * Why this exists: inv_mod_binary_gcd() above is a binary extended GCD whose iteration count DEPENDS
+ * ON THE INPUT. Under SIMT every lane in a warp runs to the slowest lane's count (warp divergence).
+ * safegcd runs a FIXED 20*30 = 600 divsteps for every input, so a warp finishes in lock-step.
+ *
+ * Representation: 9 signed 30-bit limbs (value = sum v[i]*2^(30*i)). 30-bit limbs keep every
+ * intermediate product inside a 64-bit accumulator (safegcd_i64), avoiding the 128-bit math the
+ * 62-bit variant needs.
+ *
+ * Shift note: like the reference, this relies on ARITHMETIC (sign-extending) right shift of signed
+ * `int`/safegcd_i64. Every backend hashcat targets implements that; a device that does not would
+ * need -D USE_LEGACY_BINARY_GCD_INV_MOD.
+ */
+
+// Signed 64-bit accumulator. hashcat has no signed counterpart to u64, and plain `long` is not
+// portable here: under CUDA `long` follows the host ABI and is 32-bit on Windows (the same reason
+// inc_types.h spells ullong as `unsigned long long`), and this file is additionally compiled on the
+// host by src/emu_inc_ecc_secp256k1.c. So pick the width per backend, keyed off the same macros
+// inc_vendor.h selects: OpenCL C guarantees a 64-bit `long`, CUDA and HIP need `long long`, and the
+// native/host build has stdint.
+
+#if defined IS_OPENCL || defined IS_METAL
+typedef long safegcd_i64;
+#elif defined IS_CUDA || defined IS_HIP
+typedef signed long long safegcd_i64;
+#else
+typedef int64_t safegcd_i64;
+#endif
+
+#define SAFEGCD_M30 0x3fffffff
+// secp256k1 field prime p = 2^256 - 2^32 - 977 in signed-30 limbs, and -p^-1 mod 2^30 helper.
+#define SAFEGCD_P_INIT { -0x3d1, -4, 0, 0, 0, 0, 0, 0, 65536 }
+#define SAFEGCD_P_INV30 0x2ddacacfu
+
+// 30 divsteps: builds the 2x2 transition matrix t[u,v,q,r] and returns the new zeta.
+DECLSPEC int modinv32_divsteps_30 (int zeta, u32 f0, u32 g0, PRIVATE_AS int *t)
+{
+  u32 u = 1, v = 0, q = 0, r = 1;
+  u32 c1, c2, mask1, mask2, f = f0, g = g0, x, y, z;
+
+  for (int i = 0; i < 30; i++)
+  {
+    c1 = (u32) (zeta >> 31);     // all-ones iff zeta < 0
+    mask1 = c1;
+    c2 = g & 1;
+    mask2 = -c2;                 // all-ones iff g odd
+    x = (f ^ mask1) - mask1;     // conditionally negate f,u,v
+    y = (u ^ mask1) - mask1;
+    z = (v ^ mask1) - mask1;
+    g += x & mask2;
+    q += y & mask2;
+    r += z & mask2;
+    mask1 &= mask2;              // (zeta < 0) AND (g odd)
+    zeta = (int) ((u32) zeta ^ mask1) - 1;
+    f += g & mask1;
+    u += q & mask1;
+    v += r & mask1;
+    g >>= 1;
+    u <<= 1;
+    v <<= 1;
+  }
+  t[0] = (int) u;
+  t[1] = (int) v;
+  t[2] = (int) q;
+  t[3] = (int) r;
+  return zeta;
+}
+
+// d,e <- (t*[d,e]) / 2^30 mod p (Bezout coefficients).
+DECLSPEC void modinv32_update_de_30 (PRIVATE_AS int *d, PRIVATE_AS int *e, PRIVATE_AS const int *t)
+{
+  const int modulus[9] = SAFEGCD_P_INIT;
+  const int u = t[0], v = t[1], q = t[2], r = t[3];
+  int di, ei, md, me, sd, se;
+  safegcd_i64 cd, ce;
+
+  sd = d[8] >> 31;
+  se = e[8] >> 31;
+  md = (u & sd) + (v & se);
+  me = (q & sd) + (r & se);
+  di = d[0];
+  ei = e[0];
+  cd = (safegcd_i64) u * di + (safegcd_i64) v * ei;
+  ce = (safegcd_i64) q * di + (safegcd_i64) r * ei;
+  // choose md,me so the low 30 bits of t*[d,e]+p*[md,me] vanish
+  md -= (int) ((SAFEGCD_P_INV30 * (u32) cd + (u32) md) & SAFEGCD_M30);
+  me -= (int) ((SAFEGCD_P_INV30 * (u32) ce + (u32) me) & SAFEGCD_M30);
+  cd += (safegcd_i64) modulus[0] * md;
+  ce += (safegcd_i64) modulus[0] * me;
+  cd >>= 30;
+  ce >>= 30;
+  for (int i = 1; i < 9; i++)
+  {
+    di = d[i];
+    ei = e[i];
+    cd += (safegcd_i64) u * di + (safegcd_i64) v * ei;
+    ce += (safegcd_i64) q * di + (safegcd_i64) r * ei;
+    cd += (safegcd_i64) modulus[i] * md;
+    ce += (safegcd_i64) modulus[i] * me;
+    d[i - 1] = (int) cd & SAFEGCD_M30; cd >>= 30;
+    e[i - 1] = (int) ce & SAFEGCD_M30; ce >>= 30;
+  }
+  d[8] = (int) cd;
+  e[8] = (int) ce;
+}
+
+// f,g <- (t*[f,g]) / 2^30.
+DECLSPEC void modinv32_update_fg_30 (PRIVATE_AS int *f, PRIVATE_AS int *g, PRIVATE_AS const int *t)
+{
+  const int u = t[0], v = t[1], q = t[2], r = t[3];
+  int fi, gi;
+  safegcd_i64 cf, cg;
+
+  fi = f[0];
+  gi = g[0];
+  cf = (safegcd_i64) u * fi + (safegcd_i64) v * gi;
+  cg = (safegcd_i64) q * fi + (safegcd_i64) r * gi;
+  cf >>= 30;
+  cg >>= 30;
+  for (int i = 1; i < 9; i++)
+  {
+    fi = f[i];
+    gi = g[i];
+    cf += (safegcd_i64) u * fi + (safegcd_i64) v * gi;
+    cg += (safegcd_i64) q * fi + (safegcd_i64) r * gi;
+    f[i - 1] = (int) cf & SAFEGCD_M30; cf >>= 30;
+    g[i - 1] = (int) cg & SAFEGCD_M30; cg >>= 30;
+  }
+  f[8] = (int) cf;
+  g[8] = (int) cg;
+}
+
+// Bring r from (-2p, p) to [0, p), optionally negating first (sign < 0 => negate).
+DECLSPEC void modinv32_normalize_30 (PRIVATE_AS int *r, int sign)
+{
+  const int modulus[9] = SAFEGCD_P_INIT;
+  const int M30 = SAFEGCD_M30;
+  int r0 = r[0], r1 = r[1], r2 = r[2], r3 = r[3], r4 = r[4], r5 = r[5], r6 = r[6], r7 = r[7], r8 = r[8];
+  int cond_add, cond_negate;
+
+  cond_add = r8 >> 31;
+  r0 += modulus[0] & cond_add;
+  r1 += modulus[1] & cond_add;
+  r2 += modulus[2] & cond_add;
+  r3 += modulus[3] & cond_add;
+  r4 += modulus[4] & cond_add;
+  r5 += modulus[5] & cond_add;
+  r6 += modulus[6] & cond_add;
+  r7 += modulus[7] & cond_add;
+  r8 += modulus[8] & cond_add;
+  cond_negate = sign >> 31;
+  r0 = (r0 ^ cond_negate) - cond_negate;
+  r1 = (r1 ^ cond_negate) - cond_negate;
+  r2 = (r2 ^ cond_negate) - cond_negate;
+  r3 = (r3 ^ cond_negate) - cond_negate;
+  r4 = (r4 ^ cond_negate) - cond_negate;
+  r5 = (r5 ^ cond_negate) - cond_negate;
+  r6 = (r6 ^ cond_negate) - cond_negate;
+  r7 = (r7 ^ cond_negate) - cond_negate;
+  r8 = (r8 ^ cond_negate) - cond_negate;
+  r1 += r0 >> 30; r0 &= M30;
+  r2 += r1 >> 30; r1 &= M30;
+  r3 += r2 >> 30; r2 &= M30;
+  r4 += r3 >> 30; r3 &= M30;
+  r5 += r4 >> 30; r4 &= M30;
+  r6 += r5 >> 30; r5 &= M30;
+  r7 += r6 >> 30; r6 &= M30;
+  r8 += r7 >> 30; r7 &= M30;
+
+  cond_add = r8 >> 31;
+  r0 += modulus[0] & cond_add;
+  r1 += modulus[1] & cond_add;
+  r2 += modulus[2] & cond_add;
+  r3 += modulus[3] & cond_add;
+  r4 += modulus[4] & cond_add;
+  r5 += modulus[5] & cond_add;
+  r6 += modulus[6] & cond_add;
+  r7 += modulus[7] & cond_add;
+  r8 += modulus[8] & cond_add;
+  r1 += r0 >> 30; r0 &= M30;
+  r2 += r1 >> 30; r1 &= M30;
+  r3 += r2 >> 30; r2 &= M30;
+  r4 += r3 >> 30; r3 &= M30;
+  r5 += r4 >> 30; r4 &= M30;
+  r6 += r5 >> 30; r5 &= M30;
+  r7 += r6 >> 30; r6 &= M30;
+  r8 += r7 >> 30; r7 &= M30;
+
+  r[0] = r0; r[1] = r1; r[2] = r2; r[3] = r3; r[4] = r4;
+  r[5] = r5; r[6] = r6; r[7] = r7; r[8] = r8;
+}
+
+// u32[8] little-endian (value in [0, 2^256)) -> 9 signed-30 limbs in [0, 2^30).
+DECLSPEC void modinv32_from_u32x8 (PRIVATE_AS int *g, PRIVATE_AS const u32 *a)
+{
+  for (int i = 0; i < 9; i++)
+  {
+    const int bit = 30 * i;
+    const int word = bit >> 5;
+    const int off = bit & 31;
+    u64 chunk = ((u64) a[word]) >> off;
+    if (off > 0 && (word + 1) < 8) chunk |= ((u64) a[word + 1]) << (32 - off);
+    g[i] = (int) ((u32) chunk & SAFEGCD_M30);
+  }
+}
+
+// 9 signed-30 limbs in [0, 2^30) (value in [0, p)) -> u32[8] little-endian. Limbs occupy disjoint
+// 30-bit ranges, so a plain OR (no carry) reconstructs the 256-bit value.
+DECLSPEC void modinv32_to_u32x8 (PRIVATE_AS u32 *a, PRIVATE_AS const int *d)
+{
+  for (int i = 0; i < 8; i++) a[i] = 0;
+  for (int i = 0; i < 9; i++)
+  {
+    const u64 v = (u64) ((u32) d[i] & SAFEGCD_M30);
+    const int bit = 30 * i;
+    const int word = bit >> 5;
+    const int off = bit & 31;
+    const u64 shifted = v << off;
+    a[word] |= (u32) (shifted & 0xffffffffu);
+    if ((word + 1) < 8) a[word + 1] |= (u32) (shifted >> 32);
+  }
+}
+
+// Drop-in modular inverse: a (u32[8], in [0, p)) <- a^-1 mod p. Maps 0 to 0, as the binary GCD does.
+DECLSPEC void inv_mod_safegcd (PRIVATE_AS u32 *a)
+{
+  int d[9] = { 0 };
+  int e[9] = { 0 };
+  int f[9] = SAFEGCD_P_INIT;
+  int g[9];
+  int t[4];
+
+  e[0] = 1;
+  modinv32_from_u32x8 (g, a);
+
+  int zeta = -1;
+  for (int it = 0; it < 20; it++)
+  {
+    zeta = modinv32_divsteps_30 (zeta, (u32) f[0], (u32) g[0], t);
+    modinv32_update_de_30 (d, e, t);
+    modinv32_update_fg_30 (f, g, t);
+  }
+  // g has reached 0; f == +/-1 (== gcd); d holds +/- the inverse. Normalize using sign of f.
+  modinv32_normalize_30 (d, f[8]);
+  modinv32_to_u32x8 (a, d);
+}
+
+// Both implementations above compute the same thing; this picks which one the EC code uses.
+//
+// safegcd is the default because its iteration count is fixed, while the binary GCD's depends on
+// the input: under SIMT that makes every lane in a warp wait for the slowest one. Build with
+// -D USE_LEGACY_BINARY_GCD_INV_MOD to go back to the binary GCD, either to A/B the two or for a
+// device whose signed right shift is not arithmetic (safegcd assumes it is, the binary GCD does not).
+
+DECLSPEC void inv_mod (PRIVATE_AS u32 *a)
+{
+  #ifdef USE_LEGACY_BINARY_GCD_INV_MOD
+  inv_mod_binary_gcd (a);
+  #else
+  inv_mod_safegcd (a);
+  #endif
+}
+
+// Jacobian (x, y, z) -> affine (x, y), in place: x_affine = x / z^2, y_affine = y / z^3.
+// z is used as scratch and is destroyed.
+
+DECLSPEC void point_to_affine (PRIVATE_AS u32 *x, PRIVATE_AS u32 *y, PRIVATE_AS u32 *z)
+{
+  inv_mod (z);
+
+  u32 z2[8];
+
+  mul_mod (z2, z, z); // z^2
+  mul_mod (x, x, z2); // x / z^2
+
+  mul_mod (z, z2, z); // z^3
+  mul_mod (y, y, z);  // y / z^3
+}
+
+/*
+  // everything from the formulas below of course MOD the prime:
+
+  // we use this formula:
+
+  X = (3/2 * x^2)^2 - 2 * x * y^2
+  Y = (3/2 * x^2) * (x * y^2 - X) - y^4
+  Z = y * z
+
+  this is identical to the more frequently used form:
+
+  X = (3 * x^2)^2 - 8 * x * y^2
+  Y =  3 * x^2 * (4 * x * y^2 - X) - 8 * y^4
+  Z =  2 * y * z
+*/
+
+DECLSPEC void point_double (PRIVATE_AS u32 *x, PRIVATE_AS u32 *y, PRIVATE_AS u32 *z)
+{
+  // How often does this really happen? it should "almost" never happen (but would be safer)
+
+  /*
+  if ((y[0] | y[1] | y[2] | y[3] | y[4] | y[5] | y[6] | y[7]) == 0)
+  {
+    x[0] = 0;
+    x[1] = 0;
+    x[2] = 0;
+    x[3] = 0;
+    x[4] = 0;
+    x[5] = 0;
+    x[6] = 0;
+    x[7] = 0;
+
+    y[0] = 0;
+    y[1] = 0;
+    y[2] = 0;
+    y[3] = 0;
+    y[4] = 0;
+    y[5] = 0;
+    y[6] = 0;
+    y[7] = 0;
+
+    z[0] = 0;
+    z[1] = 0;
+    z[2] = 0;
+    z[3] = 0;
+    z[4] = 0;
+    z[5] = 0;
+    z[6] = 0;
+    z[7] = 0;
+
+    return;
+  }
+  */
+
+  u32 t1[8];
+
+  t1[0] = x[0];
+  t1[1] = x[1];
+  t1[2] = x[2];
+  t1[3] = x[3];
+  t1[4] = x[4];
+  t1[5] = x[5];
+  t1[6] = x[6];
+  t1[7] = x[7];
+
+  u32 t2[8];
+
+  t2[0] = y[0];
+  t2[1] = y[1];
+  t2[2] = y[2];
+  t2[3] = y[3];
+  t2[4] = y[4];
+  t2[5] = y[5];
+  t2[6] = y[6];
+  t2[7] = y[7];
+
+  u32 t3[8];
+
+  t3[0] = z[0];
+  t3[1] = z[1];
+  t3[2] = z[2];
+  t3[3] = z[3];
+  t3[4] = z[4];
+  t3[5] = z[5];
+  t3[6] = z[6];
+  t3[7] = z[7];
+
+  u32 t4[8];
+  u32 t5[8];
+  u32 t6[8];
+
+  mul_mod (t4, t1, t1); // t4 = x^2
+
+  mul_mod (t5, t2, t2); // t5 = y^2
+
+  mul_mod (t1, t1, t5); // t1 = x*y^2
+
+  mul_mod (t5, t5, t5); // t5 = t5^2 = y^4
+
+  // here the z^2 and z^4 is not needed for a = 0
+
+  mul_mod (t3, t2, t3); // t3 = x * z
+
+  add_mod (t2, t4, t4); // t2 = 2 * t4 = 2 * x^2
+  add_mod (t4, t4, t2); // t4 = 3 * t4 = 3 * x^2
+
+  // a * z^4 = 0 * 1^4 = 0
+
+  // don't discard the least significant bit it's important too!
+
+  u32 c = 0;
+
+  if (t4[0] & 1)
+  {
+    u32 t[8];
+
+    t[0] = SECP256K1_P0;
+    t[1] = SECP256K1_P1;
+    t[2] = SECP256K1_P2;
+    t[3] = SECP256K1_P3;
+    t[4] = SECP256K1_P4;
+    t[5] = SECP256K1_P5;
+    t[6] = SECP256K1_P6;
+    t[7] = SECP256K1_P7;
+
+    c = add (t4, t4, t); // t4 + SECP256K1_P
+  }
+
+  // right shift (t4 / 2):
+
+  t4[0] = t4[0] >> 1 | t4[1] << 31;
+  t4[1] = t4[1] >> 1 | t4[2] << 31;
+  t4[2] = t4[2] >> 1 | t4[3] << 31;
+  t4[3] = t4[3] >> 1 | t4[4] << 31;
+  t4[4] = t4[4] >> 1 | t4[5] << 31;
+  t4[5] = t4[5] >> 1 | t4[6] << 31;
+  t4[6] = t4[6] >> 1 | t4[7] << 31;
+  t4[7] = t4[7] >> 1 | c     << 31;
+
+  mul_mod (t6, t4, t4); // t6 = t4^2 = (3/2 * x^2)^2
+
+  add_mod (t2, t1, t1); // t2 = 2 * t1
+
+  sub_mod (t6, t6, t2); // t6 = t6 - t2
+  sub_mod (t1, t1, t6); // t1 = t1 - t6
+
+  mul_mod (t4, t4, t1); // t4 = t4 * t1
+
+  sub_mod (t1, t4, t5); // t1 = t4 - t5
+
+  // => x = t6, y = t1, z = t3:
+
+  x[0] = t6[0];
+  x[1] = t6[1];
+  x[2] = t6[2];
+  x[3] = t6[3];
+  x[4] = t6[4];
+  x[5] = t6[5];
+  x[6] = t6[6];
+  x[7] = t6[7];
+
+  y[0] = t1[0];
+  y[1] = t1[1];
+  y[2] = t1[2];
+  y[3] = t1[3];
+  y[4] = t1[4];
+  y[5] = t1[5];
+  y[6] = t1[6];
+  y[7] = t1[7];
+
+  z[0] = t3[0];
+  z[1] = t3[1];
+  z[2] = t3[2];
+  z[3] = t3[3];
+  z[4] = t3[4];
+  z[5] = t3[5];
+  z[6] = t3[6];
+  z[7] = t3[7];
+}
+
+/*
+ * madd-2004-hmv:
+ * (from https://www.hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html)
+ * t1 = z1^2
+ * t2 = t1*z1
+ * t1 = t1*x2
+ * t2 = t2*y2
+ * t1 = t1-x1
+ * t2 = t2-y1
+ * z3 = z1*t1
+ * t3 = t1^2
+ * t4 = t3*t1
+ * t3 = t3*x1
+ * t1 = 2*t3
+ * x3 = t2^2
+ * x3 = x3-t1
+ * x3 = x3-t4
+ * t3 = t3-x3
+ * t3 = t3*t2
+ * t4 = t4*y1
+ * y3 = t3-t4
+ */
+
+DECLSPEC void point_add (PRIVATE_AS u32 *x1, PRIVATE_AS u32 *y1, PRIVATE_AS u32 *z1, PRIVATE_AS const u32 *x2, PRIVATE_AS const u32 *y2) // z2 = 1
+{
+  // How often does this really happen? it should "almost" never happen (but would be safer)
+
+  /*
+  if ((y2[0] | y2[1] | y2[2] | y2[3] | y2[4] | y2[5] | y2[6] | y2[7]) == 0) return;
+
+  if ((y1[0] | y1[1] | y1[2] | y1[3] | y1[4] | y1[5] | y1[6] | y1[7]) == 0)
+  {
+    x1[0] = x2[0];
+    x1[1] = x2[1];
+    x1[2] = x2[2];
+    x1[3] = x2[3];
+    x1[4] = x2[4];
+    x1[5] = x2[5];
+    x1[6] = x2[6];
+    x1[7] = x2[7];
+
+    y1[0] = y2[0];
+    y1[1] = y2[1];
+    y1[2] = y2[2];
+    y1[3] = y2[3];
+    y1[4] = y2[4];
+    y1[5] = y2[5];
+    y1[6] = y2[6];
+    y1[7] = y2[7];
+
+    z1[0] = z2[0];
+    z1[1] = z2[1];
+    z1[2] = z2[2];
+    z1[3] = z2[3];
+    z1[4] = z2[4];
+    z1[5] = z2[5];
+    z1[6] = z2[6];
+    z1[7] = z2[7];
+
+    return;
+  }
+  */
+
+  // if x1 == x2 and y2 == y2 and z2 == z2 we need to double instead?
+
+  // x1/y1/z1:
+
+  u32 t1[8];
+
+  t1[0] = x1[0];
+  t1[1] = x1[1];
+  t1[2] = x1[2];
+  t1[3] = x1[3];
+  t1[4] = x1[4];
+  t1[5] = x1[5];
+  t1[6] = x1[6];
+  t1[7] = x1[7];
+
+  u32 t2[8];
+
+  t2[0] = y1[0];
+  t2[1] = y1[1];
+  t2[2] = y1[2];
+  t2[3] = y1[3];
+  t2[4] = y1[4];
+  t2[5] = y1[5];
+  t2[6] = y1[6];
+  t2[7] = y1[7];
+
+  u32 t3[8];
+
+  t3[0] = z1[0];
+  t3[1] = z1[1];
+  t3[2] = z1[2];
+  t3[3] = z1[3];
+  t3[4] = z1[4];
+  t3[5] = z1[5];
+  t3[6] = z1[6];
+  t3[7] = z1[7];
+
+  // x2/y2:
+
+  u32 t4[8];
+
+  t4[0] = x2[0];
+  t4[1] = x2[1];
+  t4[2] = x2[2];
+  t4[3] = x2[3];
+  t4[4] = x2[4];
+  t4[5] = x2[5];
+  t4[6] = x2[6];
+  t4[7] = x2[7];
+
+  u32 t5[8];
+
+  t5[0] = y2[0];
+  t5[1] = y2[1];
+  t5[2] = y2[2];
+  t5[3] = y2[3];
+  t5[4] = y2[4];
+  t5[5] = y2[5];
+  t5[6] = y2[6];
+  t5[7] = y2[7];
+
+  u32 t6[8];
+  u32 t7[8];
+  u32 t8[8];
+  u32 t9[8];
+
+  mul_mod (t6, t3, t3); // t6 = t3^2
+
+  mul_mod (t7, t6, t3); // t7 = t6*t3
+  mul_mod (t6, t6, t4); // t6 = t6*t4
+  mul_mod (t7, t7, t5); // t7 = t7*t5
+
+  sub_mod (t6, t6, t1); // t6 = t6-t1
+  sub_mod (t7, t7, t2); // t7 = t7-t2
+
+  mul_mod (t8, t3, t6); // t8 = t3*t6
+  mul_mod (t4, t6, t6); // t4 = t6^2
+  mul_mod (t9, t4, t6); // t9 = t4*t6
+  mul_mod (t4, t4, t1); // t4 = t4*t1
+
+  // left shift (t4 * 2):
+
+  t6[7] = t4[7] << 1 | t4[6] >> 31;
+  t6[6] = t4[6] << 1 | t4[5] >> 31;
+  t6[5] = t4[5] << 1 | t4[4] >> 31;
+  t6[4] = t4[4] << 1 | t4[3] >> 31;
+  t6[3] = t4[3] << 1 | t4[2] >> 31;
+  t6[2] = t4[2] << 1 | t4[1] >> 31;
+  t6[1] = t4[1] << 1 | t4[0] >> 31;
+  t6[0] = t4[0] << 1;
+
+  // don't discard the most significant bit, it's important too!
+
+  if (t4[7] & 0x80000000)
+  {
+    // use most significant bit and perform mod P, since we have: t4 * 2 % P
+
+    u32 a[8] = { 0 };
+
+    a[1] = 1;
+    a[0] = 0x000003d1; // omega (see: mul_mod ())
+
+    add (t6, t6, a);
+  }
+
+  mul_mod (t5, t7, t7); // t5 = t7*t7
+
+  sub_mod (t5, t5, t6); // t5 = t5-t6
+  sub_mod (t5, t5, t9); // t5 = t5-t9
+  sub_mod (t4, t4, t5); // t4 = t4-t5
+
+  mul_mod (t4, t4, t7); // t4 = t4*t7
+  mul_mod (t9, t9, t2); // t9 = t9*t2
+
+  sub_mod (t9, t4, t9); // t9 = t4-t9
+
+  x1[0] = t5[0];
+  x1[1] = t5[1];
+  x1[2] = t5[2];
+  x1[3] = t5[3];
+  x1[4] = t5[4];
+  x1[5] = t5[5];
+  x1[6] = t5[6];
+  x1[7] = t5[7];
+
+  y1[0] = t9[0];
+  y1[1] = t9[1];
+  y1[2] = t9[2];
+  y1[3] = t9[3];
+  y1[4] = t9[4];
+  y1[5] = t9[5];
+  y1[6] = t9[6];
+  y1[7] = t9[7];
+
+  z1[0] = t8[0];
+  z1[1] = t8[1];
+  z1[2] = t8[2];
+  z1[3] = t8[3];
+  z1[4] = t8[4];
+  z1[5] = t8[5];
+  z1[6] = t8[6];
+  z1[7] = t8[7];
+}
+
+// The -a 3 kernels of the raw private key modes run candidates in their inner loop that differ only
+// in the first 4 hex digits of the key, its top 16 bits. Moving from one public key to the next
+// then takes one mixed addition for each digit that changed, rather than a full multiplication.
+// Entry [c][m - 1] is the affine point m * 2^(252 - 4c) * G.
+
+CONSTANT_VK u32a secp256k1_top16_g[4][15][16] =
+{
+  {
+    { 0x1faccae0, 0x48c4ba11, 0x5a4bb337, 0x3c8b350c, 0x4f071fd2, 0xc1dd94ce, 0x139527a8, 0x08ea9666,
+      0x0e62b945, 0x55af34a3, 0x9cf0f8e9, 0x35b783be, 0xfb95c5d7, 0xe24e7c0c, 0xc8ee2782, 0x620efabb },
+    { 0xa190b632, 0xa293131d, 0xa4ab5ab9, 0x63cf2a23, 0x15559d82, 0xf3a66df3, 0x76220cd9, 0xc25f6371,
+      0xfc9590cf, 0x6eebf3d6, 0x9e027a1d, 0x0a9f04ff, 0x3809d798, 0x98904990, 0xe94d2873, 0x53154fed },
+    { 0x66a06f5e, 0x21a40b59, 0x6ea08370, 0xa3419251, 0x1263b716, 0xc37b0d42, 0xea14253a, 0x383b24fb,
+      0xd3c6e772, 0x089f4786, 0xbb8c2b04, 0xe8f6ae74, 0x54ea5a19, 0x44cf566d, 0xc4edba20, 0x54cf706a },
+    { 0xd466d561, 0xe2ccb3b7, 0x31978b4d, 0x0c7b55dc, 0x5688544c, 0x3e82d82a, 0x3cce6bab, 0x2a9e8dfe,
+      0x52e76373, 0xf96ccf52, 0x17a02182, 0x5e01eaec, 0x608b96cf, 0xbac7b5ad, 0xc16e651f, 0x01dfeda5 },
+    { 0x4638a136, 0xc7975c1d, 0x36838195, 0x2b0d1ce3, 0xb60d790c, 0x789e59c6, 0x3e02ed6d, 0xe68432d0,
+      0x8c6c2584, 0xaafd1810, 0xdb357336, 0x2e09e3eb, 0x3a01e647, 0x24d2a730, 0x98e35a66, 0xca5be413 },
+    { 0xdbcf2dce, 0x2139b408, 0x5c1dc6c0, 0x68114a10, 0x92ff9980, 0xbd49e4c9, 0x92e46218, 0x95e62d42,
+      0x58c86594, 0x62bddfdf, 0x3704d20e, 0x5e7b3060, 0xb428d52e, 0x183a26e2, 0x296c2875, 0x06b68184 },
+    { 0x16e8c10c, 0x7ce87c44, 0x391bd680, 0xb472985f, 0xe7306e7f, 0x0eefbdec, 0xe2fe5c2a, 0x395dd559,
+      0x05fe638e, 0xbc3d6d93, 0xdc66922c, 0x4c909c04, 0xaffa4e27, 0xd0413e87, 0xb4592ac5, 0xfd62dcd4 },
+    { 0x3f8be384, 0xe8bd3204, 0xa31db6c3, 0x71ec0aad, 0x4fdef072, 0x251ad6c9, 0x2be63e1b, 0xb23790a4,
+      0xeb19880e, 0xd10a473d, 0x149ecb58, 0x17f004f4, 0xaa81f945, 0xe8d50f88, 0x19d55edb, 0xfc6b6949 },
+    { 0x0d6c14ef, 0x51664db2, 0x06f93c8f, 0x0858fc75, 0xeee26480, 0x9f6eed5b, 0x35525dcb, 0x7a514adc,
+      0x0b3fbd13, 0x7ad3e187, 0x2aa6e24f, 0x29beaef7, 0x4c8f5c37, 0xe897f0b9, 0xd152e4d8, 0x56edd1fe },
+    { 0x097ec94b, 0xff9f053d, 0xc8d59c2d, 0x27ed7091, 0x8ae68181, 0x1ee215aa, 0x7b4aefed, 0xb2113bcb,
+      0x687831ad, 0xbd5fbffc, 0x2357d0fd, 0x0943220b, 0x454cb4eb, 0x105a0b53, 0x99e8ee73, 0x93be9e73 },
+    { 0x4f6d65eb, 0x4a9463d0, 0x54402152, 0x5a991077, 0xf4908f23, 0x8ea8ef3b, 0x4325d90d, 0x1ee1fd58,
+      0x5d22941c, 0x1e036b92, 0x863582b1, 0xca32f4e9, 0x4f42fcfa, 0x1cfab9fc, 0xbdd6c73c, 0xbb692891 },
+    { 0x97a6257f, 0xb8052645, 0xa27a6c40, 0x1873c3b1, 0xab07e789, 0xa6424274, 0xe1f54f25, 0x71e935c8,
+      0xd1b1e582, 0x5b217461, 0x0cf70f7a, 0xef252354, 0x47ae2a52, 0x3ded86ba, 0xf47c2251, 0x78d93e59 },
+    { 0x0e36cb44, 0x1f1950ef, 0x8dca2019, 0x617e8b6c, 0xd883357d, 0xbc058fd0, 0xd38faaa8, 0x15515634,
+      0x1f495a68, 0x329af465, 0xf020c1e5, 0xa8c37175, 0xb463205d, 0xe370e3f0, 0x55575215, 0xab4fffc7 },
+    { 0x79ca950e, 0xbf084724, 0x2bb13bac, 0x39e01576, 0x9ee2c461, 0xc52f8be7, 0x4ee795ca, 0xabc451ca,
+      0x9a9490d2, 0x07ce7d8c, 0xcea553ec, 0x52684000, 0xc2c91456, 0xdb1dfb80, 0xfe820a59, 0xae2718be },
+    { 0x7427bacc, 0x51f94610, 0xdd2d62e1, 0x9e733164, 0x958dc4aa, 0x36358eb0, 0x46bf5201, 0x3bc6bc64,
+      0xead6fda6, 0x14c33fd5, 0x228beb47, 0xd71b75a5, 0x26d6c02b, 0xcdb62ee2, 0x7176c305, 0x8e305cc0 }
+  },
+  {
+    { 0xe5324caa, 0x954ab30f, 0x0a9472a3, 0x694b65e3, 0x9452a32e, 0xd23d8c74, 0xf8298bc0, 0x8c28a97b,
+      0xcbef9482, 0x9e71dc73, 0x451cb945, 0x7ae784f0, 0x1f7cc0eb, 0x378fedf3, 0xa3305193, 0x40a30463 },
+    { 0x7611d8e2, 0x5dfb201f, 0xde49fc4d, 0xc8130fe8, 0x047f0da2, 0x96bed5a6, 0x2a38a2f1, 0xab1ac187,
+      0xc429d15b, 0x01a581f3, 0x3e1e545f, 0xf7ef93d3, 0xdb6a42b6, 0xe9aa5f39, 0x324d17a1, 0x13f4a37a },
+    { 0x4754dd40, 0x863e8715, 0xfc3466cf, 0xa2422631, 0xcd72f6e9, 0x45b4841f, 0x32c0dfcf, 0x97292470,
+      0x2aa36143, 0x384b492f, 0x55acaf49, 0x90dae852, 0xcbd4df36, 0xcd15c75d, 0x265fea1d, 0x91d1a244 },
+    { 0x2651b3fa, 0x226aee64, 0x772df434, 0x8ea1b365, 0x253f31ef, 0x3703a607, 0x5beef82d, 0x2564fe9b,
+      0x01e5122d, 0xdb82e6a3, 0x6b79816e, 0x14f37dab, 0x1203925f, 0x95fa14ae, 0x06783890, 0x8ad9f7a6 },
+    { 0x8c2ca7ff, 0x3c2d82eb, 0x95df021a, 0x1803645d, 0x5a2f27af, 0x050791ad, 0x580a796e, 0x89637f97,
+      0x70493e68, 0xbed415e1, 0x8e42eab7, 0xf87bc6a3, 0x54357489, 0xd57b9cf1, 0x8c888424, 0x2d1fe124 },
+    { 0x0c7a89ee, 0x057c3533, 0x7ab6d4f8, 0x4bdbc59c, 0xfc98658a, 0x12860b88, 0x6a4179e1, 0x71efa4e2,
+      0xc1366a2e, 0x4f489329, 0x8e5e9a0b, 0x2aaafab8, 0xb17294a2, 0x9efb2c32, 0x8bb624ae, 0x145fa81f },
+    { 0x0ca8dd7f, 0x6186d63a, 0x56a1381a, 0x1bc72803, 0x3d535742, 0x2fdc9da0, 0x1be25e09, 0x308138e7,
+      0x8a92c7f2, 0xe415f247, 0x434ad915, 0xc8165646, 0xd1408e18, 0x5e39ec45, 0x8828fc92, 0x28d1e2d2 },
+    { 0xae180068, 0xb178e3d3, 0x20bd3103, 0x7ea3d56c, 0xc30dc01a, 0xbfc6c5c0, 0xffac5b0c, 0xff3d6136,
+      0x188c6077, 0x70a6bb6e, 0x4001f5e6, 0x547676f2, 0xdd96adc1, 0x40d0372c, 0x84e4000e, 0x133239be },
+    { 0x866a3fb1, 0xc0dcc568, 0x1992e206, 0x6ec00928, 0x85b6862f, 0xd1e5750c, 0x2a6deb65, 0x575fc4e8,
+      0x902655ad, 0x09b8e90a, 0xc6a3af2f, 0xed33b573, 0x978e87da, 0xd671dbc2, 0x42a6fca2, 0x6f6edb90 },
+    { 0xbd21250a, 0x954e7fdc, 0x83998ad4, 0xdf45e175, 0xa43555e7, 0x531e342b, 0x0bab8ad2, 0x3fa91548,
+      0xfaa76731, 0x91c86c02, 0x032b5fb7, 0x2e45e55a, 0x03bb127c, 0xcf5bdf96, 0x5499b030, 0xbf9b6690 },
+    { 0x790117df, 0x21b6a8a4, 0xce201029, 0xda253bbb, 0x1eea2a8f, 0x227f26f8, 0xb64eab7a, 0xa5ec9036,
+      0xf86462fe, 0xd8128133, 0x5614a363, 0x1c8461f0, 0xad1fa0f7, 0x0c597983, 0x5ec14040, 0xb79dc662 },
+    { 0x8de0545f, 0x5cb02349, 0x2106c74f, 0x80e625da, 0x4b3508ac, 0xa375ea00, 0x58e07124, 0x52045bcc,
+      0x506c3d91, 0x36ea34c0, 0x2a8fdaf2, 0x793b9d0f, 0x20ce312b, 0xd430ed9c, 0xebe3123a, 0x1b3f31fc },
+    { 0x172ad712, 0x0b0f975c, 0xde104729, 0x5a398cb0, 0x146349b9, 0x49de7976, 0x13310b09, 0xa153dfe9,
+      0x8d48fdd2, 0xc8a5f653, 0x5af0b329, 0xbd053f28, 0xf1f1b89a, 0xc48318d5, 0x3fb05b2f, 0xfd94d841 },
+    { 0x3220479f, 0x89f13d0c, 0xe5e5b38a, 0x5de47b95, 0x23760363, 0x80162c8d, 0xbe472fdb, 0x58b5436e,
+      0x567db17a, 0x44a7375e, 0x829bb341, 0x96af27c4, 0x52f6de83, 0x4e2913a2, 0x55cd672c, 0x85d7b6b0 },
+    { 0x11cf5b3a, 0x030c3701, 0xbdb5a781, 0xc4433a83, 0x88edc824, 0x935c34d0, 0xaf794615, 0x9a541ac6,
+      0x36a44ae4, 0x63f5575f, 0x521ea52d, 0x5548fee2, 0x688f475f, 0xcafe1af3, 0xcb106ab7, 0xb66148c1 }
+  },
+  {
+    { 0x2d83f366, 0xcada3a0d, 0xe2f28588, 0x0cd9cced, 0xcc1dc97a, 0x9aef430b, 0xb713fe2e, 0xbc4a9df5,
+      0x581f33c1, 0xd758d666, 0xfa547b16, 0xa6e8a9fb, 0xf4b798ca, 0x383937ad, 0x6e785c06, 0x0d3a81ca },
+    { 0xf3fceb19, 0x282de545, 0xf785c409, 0x2e89b221, 0x6ce7bab4, 0xabc5c762, 0x11ceccc0, 0xda433d5e,
+      0xa6f5cc64, 0x684e7120, 0x9227b277, 0x8e77fc2d, 0xaf95e521, 0x1debbdc4, 0x21a81030, 0xe498dbd3 },
+    { 0xf712be3c, 0xb06a2e32, 0xda146a66, 0x7295f18e, 0xab001534, 0xd3c725db, 0x9331b378, 0x39d7349d,
+      0x1c6ff65c, 0xcc3019f4, 0xeca41644, 0xef5ef7a5, 0xc66812e8, 0xfb127554, 0x56ef3bf7, 0x8f929b4f },
+    { 0x5acf692a, 0x54de275c, 0x72207e06, 0xbcc4838a, 0x81c16efd, 0x1c1c1169, 0xe9e8c7ec, 0x031e8e1e,
+      0xb16f667a, 0x9cc2a84e, 0xc5bf73b0, 0x70649827, 0x90d6743b, 0xd9d09702, 0x465b353d, 0xad7e7f5b },
+    { 0xdf77f22b, 0x5aae4fbc, 0x94f82e03, 0xc6997239, 0x2995af26, 0x9e51cd6c, 0xf7dc1dd0, 0xf0cba617,
+      0x5909a03c, 0x1fc8e2c7, 0x90a09566, 0x04f18c7e, 0x6516d040, 0x9ef326c3, 0x13f9df98, 0x1a25ab43 },
+    { 0x77829372, 0xdec0aa4a, 0x88ba4553, 0xc49b300c, 0x5385796b, 0x313626ae, 0x0f3e0d3b, 0xb4319cc9,
+      0x0add5427, 0x7729ccc0, 0xca3e11bb, 0x707b1215, 0x9c21c5a2, 0xffb7afe0, 0x9a6f502b, 0x4707d449 },
+    { 0xc6509c12, 0x58acdcd4, 0x5bd1f476, 0x8d6bfe23, 0xd87268ed, 0x21d170e8, 0xdb2154d3, 0x381d7ab9,
+      0x2eb46102, 0x54642a8e, 0x6ce6eaf7, 0x20582858, 0x3a6581e7, 0xeb5d2457, 0x7fda3da9, 0xa47aab5b },
+    { 0x81f488b6, 0x92bbd7ff, 0x3fc7a915, 0xe9c9bf36, 0x62657f73, 0x5d3e00d8, 0xa88d6115, 0xa9878607,
+      0x031dab1d, 0x495a7bbb, 0x64ad5c6d, 0x39d0f019, 0x82157c22, 0x1c063e7c, 0xd58895d6, 0xd181a1ab },
+    { 0x384fe955, 0x8db3b4d6, 0xa063bce4, 0xf69956a5, 0x694c8a53, 0x4793b73e, 0x67ab87e6, 0xa703f054,
+      0xd61344bd, 0xa26b2efb, 0xc597277f, 0x539e1629, 0x6b19199b, 0xc0ea792d, 0xa2b047ad, 0xd500f935 },
+    { 0xc38a8cc6, 0xe64093b6, 0x9f69f8fb, 0xba2e121e, 0x6ed7f3dc, 0x48e279ff, 0x50b3417e, 0x331924c7,
+      0x46587810, 0xc4e8e0fb, 0xce9e9b54, 0x7fb99e9a, 0xbe2ffb31, 0x2ba5b601, 0x1b33f018, 0xca8f7941 },
+    { 0x06eace58, 0x3499656c, 0xa2f3211d, 0x1b7e4563, 0x7053a03f, 0x46c6ad0d, 0xaad550d7, 0x73c6b3c5,
+      0x2af8654e, 0x7170a917, 0xbbb8d291, 0xaa6a878d, 0x366d91c6, 0x1ba90991, 0x733a4f74, 0x3a2fb4a4 },
+    { 0xcdcbcb9e, 0xf4bf1126, 0xdcd83c3d, 0xd6fa5689, 0x7fd43761, 0x9ecc3244, 0x119d337a, 0xcdcb12d7,
+      0xc961cfd1, 0xa08a585a, 0x358df340, 0xa199af24, 0x96de9949, 0xbfefbea0, 0x7bb9f11f, 0xe699e2e1 },
+    { 0x00181d5e, 0x54b388bf, 0xb95aaf20, 0xde71b3a9, 0x1c0eddb8, 0xa1d00d3a, 0x506d47fd, 0xc627f3e7,
+      0x369f886d, 0x927900a6, 0x49cbe2c3, 0x8ef6b005, 0x38a1f7d6, 0xb2d69601, 0x1e442a63, 0xd78f9dd7 },
+    { 0x325fe9cc, 0x1d747cf7, 0x349d88db, 0xfbb883bb, 0x42d4ac23, 0x37041108, 0x28ec31b1, 0xc6ed5e63,
+      0x4a8fd94b, 0x0c0bce1c, 0x60f22cf1, 0x844f972b, 0x5c7f7b2a, 0x2932ee12, 0x49d7f830, 0xde47405b },
+    { 0xb7828b16, 0x34e28d9f, 0x28a4847f, 0xa047958f, 0x6f06de53, 0xfa25f40a, 0x0edfd233, 0xbb88fabe,
+      0x0aea5df7, 0xc51473a2, 0xe3a1e969, 0xec4a8174, 0x01159163, 0x345dc596, 0x04f5e8dd, 0xb73676b3 }
+  },
+  {
+    { 0x6caf666b, 0xbcd6303f, 0xc4b1ce30, 0x7ffcfed3, 0xe817f463, 0x62b6979a, 0xa78102aa, 0x13464a57,
+      0x7f6ecc27, 0x3f495a90, 0x1d0942e1, 0x48f300a8, 0x53ccb0ca, 0xef7e4334, 0x04614580, 0x69be1590 },
+    { 0x065084ae, 0xc75849c6, 0xceabe577, 0x9182be7d, 0x85fe12d1, 0xec05c88c, 0x32245362, 0xeb3cf8f5,
+      0xf96b9480, 0x6f67c1ff, 0xe7dbd2a6, 0xf52b45c5, 0xefdca4a1, 0x43fe63dc, 0x22d9d700, 0xc833c782 },
+    { 0x8eca5f51, 0xf216b209, 0x94fc9aeb, 0xddea171b, 0xbf05b5cf, 0x2c6ed6b2, 0xdd9ee696, 0xdde9d514,
+      0xd0c638f7, 0x9ad69a73, 0xde89571f, 0x50feebe8, 0x0a7f8f09, 0xd891f34b, 0x3ce28111, 0xb84e6913 },
+    { 0xc2e9a5d0, 0xf8e5bcbc, 0x84a201d9, 0xa576fcf9, 0x184519b2, 0x4f7a60f2, 0x092d9997, 0xbdf1a67d,
+      0x8562ff7b, 0xcdb4f701, 0xe5626461, 0xa6280b61, 0x86bf7baa, 0xa80be54a, 0xab65a1aa, 0x4095902b },
+    { 0x999c88e4, 0x2f906b05, 0x20ad46ec, 0x9aed513e, 0xb1204b17, 0x6e9f406e, 0x23699373, 0xfd1a6210,
+      0x595bc8df, 0x99c8c916, 0x95cc00f2, 0xdc6b71d4, 0x54977782, 0xfb13c069, 0xb9c8c20b, 0x1ac97b54 },
+    { 0xa09b0cca, 0x1ccc6a55, 0x24a4d6f0, 0xa3457589, 0x8a28da59, 0xd5c454f6, 0xdbb0f4c8, 0x0d538cb1,
+      0x0c929e05, 0x731b147e, 0xd89134c9, 0x8534cd99, 0x40eed7cf, 0xcb0a8d5c, 0x7a3ec110, 0xc8196bac },
+    { 0x5f8018ce, 0xbd515b5b, 0x8d892d68, 0xcf2da573, 0xf2c86dc7, 0xf13ffce4, 0xd8c296b9, 0x4ee48531,
+      0x1e48381f, 0x3c35a61b, 0xb4e80601, 0x71074971, 0xd0c7c5e6, 0xfc7b4408, 0x810bf8b5, 0xb68f9ed4 },
+    { 0x3b27e771, 0xbde5fc17, 0x477da62a, 0x8c3b4196, 0xb64483b4, 0xcd5be267, 0xddc4ec29, 0x68856a6e,
+      0x07bbdab6, 0x6118d62a, 0x93b0733a, 0x331d22f2, 0xc19f7b4a, 0x13b6fd49, 0x4f79a1fb, 0x77a33df1 },
+    { 0xf1473678, 0x02852e91, 0x094392f7, 0xcba05795, 0x55b8c070, 0xff5e314c, 0x34c400db, 0xfd76cc9c,
+      0x8d144f4f, 0x7e164eea, 0x1401c843, 0x60628eee, 0x3d032cd6, 0xe0fee0a7, 0x787143da, 0xf2046543 },
+    { 0xcee66b24, 0xb5f00532, 0xed7b8366, 0xe8b9c60f, 0xbf1aded2, 0x80e44d99, 0xb9e9c7b8, 0x4cd5d8cf,
+      0xf40932fd, 0x221efdba, 0x12d2faed, 0xca61e45e, 0x9cd6d103, 0x9fe4e8c3, 0xdeb94b55, 0x576eae82 },
+    { 0x8d7a2193, 0xdf00b714, 0xf197546e, 0x2c691e44, 0x74b4ea21, 0x19e6ce82, 0x3123b402, 0x85a2aba3,
+      0xb0cdcf3a, 0x7f0c83d4, 0x9c3b1242, 0xe1c6dadf, 0xd1cc029f, 0xd82c6082, 0xeb2b0516, 0x9c129857 },
+    { 0xedd7e577, 0x6ae303ce, 0x8536c4d5, 0xd3a0f256, 0x70ea2107, 0x5ac60472, 0x8828f7b2, 0xc352d50f,
+      0xf8d9b570, 0x3ca4ff88, 0xb6121706, 0x00a8abb2, 0x5bce79fb, 0x6abd5314, 0xba76b9b9, 0xbe772838 },
+    { 0x377568b0, 0x35b0305b, 0x19e03b05, 0x35ae8dd0, 0x5783650f, 0x440b6d6c, 0x73cffe74, 0xd25ddbfc,
+      0xdf39929c, 0x60a13926, 0x1e3c3f00, 0x83227388, 0xcde7d92b, 0x8beaef74, 0x93f84893, 0x7a3aff75 },
+    { 0x1e712536, 0xa33563e8, 0x6ff5fe71, 0xa85051f5, 0xab635e9e, 0xe086de71, 0xb0a43a9f, 0x06914e86,
+      0x801128f1, 0x2a247713, 0x0af7a9da, 0x896c226b, 0xe5ac28c0, 0x27d8acea, 0x52d9bd05, 0x2b7e7928 },
+    { 0xa71d7c13, 0x55fe5118, 0xfa0ffa38, 0x641ab5f7, 0x97aac805, 0x55f07e9a, 0x43e94a72, 0x45813531,
+      0x3aff63cf, 0x9638bc55, 0x42bd96b9, 0x70200655, 0x77dd69c9, 0xb57f50f1, 0x14979ad8, 0x9f5858ec }
+  }
+};
+
+// Moves the Jacobian point (x, y, z) from k * G to k' * G, where k and k' differ only in their top
+// 16 bits, top_old and top_new. A mixed addition cannot add a point to itself or to its negation,
+// and both end with z = 0. The function returns 0 there so the caller multiplies that key in full.
+// The caller also keeps keys whose lower 240 bits are all zero away from it, since the walk would
+// start from 0 * G for those.
+
+DECLSPEC u32 point_move_top16 (PRIVATE_AS u32 *x, PRIVATE_AS u32 *y, PRIVATE_AS u32 *z, const u32 top_old, const u32 top_new)
+{
+  for (u32 c = 0; c < 4; c++)
+  {
+    const u32 shift = 12 - (c * 4);
+
+    const u32 nib_old = (top_old >> shift) & 15;
+    const u32 nib_new = (top_new >> shift) & 15;
+
+    if (nib_new == nib_old) continue;
+
+    const u32 m = (nib_new > nib_old) ? (nib_new - nib_old) : (nib_old - nib_new);
+
+    u32 px[8];
+    u32 py[8];
+
+    for (u32 i = 0; i < 8; i++)
+    {
+      px[i] = secp256k1_top16_g[c][m - 1][i + 0];
+      py[i] = secp256k1_top16_g[c][m - 1][i + 8];
+    }
+
+    // a digit that went down adds the negated point, (x, p - y)
+
+    if (nib_new < nib_old)
+    {
+      u32 zero[8] = { 0 };
+
+      u32 ny[8];
+
+      sub_mod (ny, zero, py);
+
+      for (u32 i = 0; i < 8; i++) py[i] = ny[i];
+    }
+
+    point_add (x, y, z, px, py);
+
+    if ((z[0] | z[1] | z[2] | z[3] | z[4] | z[5] | z[6] | z[7]) == 0) return 0;
+  }
+
+  return 1;
+}
+
+DECLSPEC void point_get_coords (PRIVATE_AS secp256k1_t *r, PRIVATE_AS const u32 *x, PRIVATE_AS const u32 *y)
+{
+  /*
+    pre-compute 1/-1, 3/-3, 5/-5, 7/-7 times P (x, y)
+    for wNAF with window size 4 (max/min: +/- 2^3-1): -7, -5, -3, -1, 1, 3, 5, 7
+
+    +x1 ( 0)
+    +y1 ( 8)
+    -y1 (16)
+
+    +x3 (24)
+    +y3 (32)
+    -y3 (40)
+
+    +x5 (48)
+    +y5 (56)
+    -y5 (64)
+
+    +x7 (72)
+    +y7 (80)
+    -y7 (88)
+   */
+
+  // note: we use jacobian forms with (x, y, z) for computation, but affine
+  // (or just converted to z = 1) for storage
+
+  // 1:
+
+  r->xy[ 0] = x[0];
+  r->xy[ 1] = x[1];
+  r->xy[ 2] = x[2];
+  r->xy[ 3] = x[3];
+  r->xy[ 4] = x[4];
+  r->xy[ 5] = x[5];
+  r->xy[ 6] = x[6];
+  r->xy[ 7] = x[7];
+
+  r->xy[ 8] = y[0];
+  r->xy[ 9] = y[1];
+  r->xy[10] = y[2];
+  r->xy[11] = y[3];
+  r->xy[12] = y[4];
+  r->xy[13] = y[5];
+  r->xy[14] = y[6];
+  r->xy[15] = y[7];
+
+  // -1:
+
+  u32 p[8];
+
+  p[0] = SECP256K1_P0;
+  p[1] = SECP256K1_P1;
+  p[2] = SECP256K1_P2;
+  p[3] = SECP256K1_P3;
+  p[4] = SECP256K1_P4;
+  p[5] = SECP256K1_P5;
+  p[6] = SECP256K1_P6;
+  p[7] = SECP256K1_P7;
+
+  u32 neg[8];
+
+  neg[0] = y[0];
+  neg[1] = y[1];
+  neg[2] = y[2];
+  neg[3] = y[3];
+  neg[4] = y[4];
+  neg[5] = y[5];
+  neg[6] = y[6];
+  neg[7] = y[7];
+
+  sub_mod (neg, p, neg); // -y = p - y
+
+  r->xy[16] = neg[0];
+  r->xy[17] = neg[1];
+  r->xy[18] = neg[2];
+  r->xy[19] = neg[3];
+  r->xy[20] = neg[4];
+  r->xy[21] = neg[5];
+  r->xy[22] = neg[6];
+  r->xy[23] = neg[7];
+
+
+  // copy of 1:
+
+  u32 tx[8];
+
+  tx[0] = x[0];
+  tx[1] = x[1];
+  tx[2] = x[2];
+  tx[3] = x[3];
+  tx[4] = x[4];
+  tx[5] = x[5];
+  tx[6] = x[6];
+  tx[7] = x[7];
+
+  u32 ty[8];
+
+  ty[0] = y[0];
+  ty[1] = y[1];
+  ty[2] = y[2];
+  ty[3] = y[3];
+  ty[4] = y[4];
+  ty[5] = y[5];
+  ty[6] = y[6];
+  ty[7] = y[7];
+
+  u32 rx[8];
+
+  rx[0] = x[0];
+  rx[1] = x[1];
+  rx[2] = x[2];
+  rx[3] = x[3];
+  rx[4] = x[4];
+  rx[5] = x[5];
+  rx[6] = x[6];
+  rx[7] = x[7];
+
+  u32 ry[8];
+
+  ry[0] = y[0];
+  ry[1] = y[1];
+  ry[2] = y[2];
+  ry[3] = y[3];
+  ry[4] = y[4];
+  ry[5] = y[5];
+  ry[6] = y[6];
+  ry[7] = y[7];
+
+  u32 rz[8] = { 0 };
+
+  rz[0] = 1;
+
+
+  // 3:
+
+  point_double (rx, ry, rz);          // 2
+  point_add    (rx, ry, rz, tx, ty);  // 3
+
+  // to affine:
+
+  point_to_affine (rx, ry, rz);
+
+  r->xy[24] = rx[0];
+  r->xy[25] = rx[1];
+  r->xy[26] = rx[2];
+  r->xy[27] = rx[3];
+  r->xy[28] = rx[4];
+  r->xy[29] = rx[5];
+  r->xy[30] = rx[6];
+  r->xy[31] = rx[7];
+
+  r->xy[32] = ry[0];
+  r->xy[33] = ry[1];
+  r->xy[34] = ry[2];
+  r->xy[35] = ry[3];
+  r->xy[36] = ry[4];
+  r->xy[37] = ry[5];
+  r->xy[38] = ry[6];
+  r->xy[39] = ry[7];
+
+  // -3:
+
+  neg[0] = ry[0];
+  neg[1] = ry[1];
+  neg[2] = ry[2];
+  neg[3] = ry[3];
+  neg[4] = ry[4];
+  neg[5] = ry[5];
+  neg[6] = ry[6];
+  neg[7] = ry[7];
+
+  sub_mod (neg, p, neg);
+
+  r->xy[40] = neg[0];
+  r->xy[41] = neg[1];
+  r->xy[42] = neg[2];
+  r->xy[43] = neg[3];
+  r->xy[44] = neg[4];
+  r->xy[45] = neg[5];
+  r->xy[46] = neg[6];
+  r->xy[47] = neg[7];
+
+
+  // 5:
+
+  rz[0] = 1; // actually we could take advantage of rz being 1 too (alternative point_add ()),
+  rz[1] = 0; // but it is not important because this is performed only once per "hash"
+  rz[2] = 0;
+  rz[3] = 0;
+  rz[4] = 0;
+  rz[5] = 0;
+  rz[6] = 0;
+  rz[7] = 0;
+
+  point_add (rx, ry, rz, tx, ty); // 4
+  point_add (rx, ry, rz, tx, ty); // 5
+
+  // to affine:
+
+  point_to_affine (rx, ry, rz);
+
+  r->xy[48] = rx[0];
+  r->xy[49] = rx[1];
+  r->xy[50] = rx[2];
+  r->xy[51] = rx[3];
+  r->xy[52] = rx[4];
+  r->xy[53] = rx[5];
+  r->xy[54] = rx[6];
+  r->xy[55] = rx[7];
+
+  r->xy[56] = ry[0];
+  r->xy[57] = ry[1];
+  r->xy[58] = ry[2];
+  r->xy[59] = ry[3];
+  r->xy[60] = ry[4];
+  r->xy[61] = ry[5];
+  r->xy[62] = ry[6];
+  r->xy[63] = ry[7];
+
+  // -5:
+
+  neg[0] = ry[0];
+  neg[1] = ry[1];
+  neg[2] = ry[2];
+  neg[3] = ry[3];
+  neg[4] = ry[4];
+  neg[5] = ry[5];
+  neg[6] = ry[6];
+  neg[7] = ry[7];
+
+  sub_mod (neg, p, neg);
+
+  r->xy[64] = neg[0];
+  r->xy[65] = neg[1];
+  r->xy[66] = neg[2];
+  r->xy[67] = neg[3];
+  r->xy[68] = neg[4];
+  r->xy[69] = neg[5];
+  r->xy[70] = neg[6];
+  r->xy[71] = neg[7];
+
+
+  // 7:
+
+  rz[0] = 1;
+  rz[1] = 0;
+  rz[2] = 0;
+  rz[3] = 0;
+  rz[4] = 0;
+  rz[5] = 0;
+  rz[6] = 0;
+  rz[7] = 0;
+
+  point_add (rx, ry, rz, tx, ty); // 6
+  point_add (rx, ry, rz, tx, ty); // 7
+
+  // to affine:
+
+  point_to_affine (rx, ry, rz);
+
+  r->xy[72] = rx[0];
+  r->xy[73] = rx[1];
+  r->xy[74] = rx[2];
+  r->xy[75] = rx[3];
+  r->xy[76] = rx[4];
+  r->xy[77] = rx[5];
+  r->xy[78] = rx[6];
+  r->xy[79] = rx[7];
+
+  r->xy[80] = ry[0];
+  r->xy[81] = ry[1];
+  r->xy[82] = ry[2];
+  r->xy[83] = ry[3];
+  r->xy[84] = ry[4];
+  r->xy[85] = ry[5];
+  r->xy[86] = ry[6];
+  r->xy[87] = ry[7];
+
+  // -7:
+
+  neg[0] = ry[0];
+  neg[1] = ry[1];
+  neg[2] = ry[2];
+  neg[3] = ry[3];
+  neg[4] = ry[4];
+  neg[5] = ry[5];
+  neg[6] = ry[6];
+  neg[7] = ry[7];
+
+  sub_mod (neg, p, neg);
+
+  r->xy[88] = neg[0];
+  r->xy[89] = neg[1];
+  r->xy[90] = neg[2];
+  r->xy[91] = neg[3];
+  r->xy[92] = neg[4];
+  r->xy[93] = neg[5];
+  r->xy[94] = neg[6];
+  r->xy[95] = neg[7];
+}
+
+/*
+ * Convert the tweak/scalar k to w-NAF (window size is 4).
+ * @param naf out: w-NAF form of the tweak/scalar, a pointer to an u32 array with a size of 33.
+ * @param k in: tweak/scalar which should be converted, a pointer to an u32 array with a size of 8.
+ * @return Returns the loop start index.
+ */
+DECLSPEC int convert_to_window_naf (PRIVATE_AS u32 *naf, PRIVATE_AS const u32 *k)
+{
+  int loop_start = 0;
+
+  u32 n[9];
+
+  n[0] =    0; // we need this extra slot sometimes for the subtraction to work
+  n[1] = k[7];
+  n[2] = k[6];
+  n[3] = k[5];
+  n[4] = k[4];
+  n[5] = k[3];
+  n[6] = k[2];
+  n[7] = k[1];
+  n[8] = k[0];
+
+  for (int i = 0; i <= 256; i++)
+  {
+    if (n[8] & 1)
+    {
+      // for window size w = 4:
+      // => 2^(w-0) = 2^4 = 16 (0x10)
+      // => 2^(w-1) = 2^3 =  8 (0x08)
+
+      int diff = n[8] & 0x0f; // n % 2^w == n & (2^w - 1)
+
+      // convert diff to val according to this table:
+      //  1 -> +1 -> 1
+      //  3 -> +3 -> 3
+      //  5 -> +5 -> 5
+      //  7 -> +7 -> 7
+      //  9 -> -7 -> 8
+      // 11 -> -5 -> 6
+      // 13 -> -3 -> 4
+      // 15 -> -1 -> 2
+
+      int val = diff;
+
+      if (diff >= 0x08)
+      {
+        diff -= 0x10;
+
+        val = 0x11 - val;
+      }
+
+      naf[i >> 3] |= val << ((i & 7) << 2);
+
+      u32 t = n[8]; // t is the (temporary) old/unmodified value
+
+      n[8] -= diff;
+
+      // we need to take care of the carry/borrow:
+
+      u32 k = 8;
+
+      if (diff > 0)
+      {
+        while (n[k] > t) // overflow propagation
+        {
+          if (k == 0) break; // needed ?
+
+          k--;
+
+          t = n[k];
+
+          n[k]--;
+        }
+      }
+      else // if (diff < 0)
+      {
+        while (t > n[k]) // overflow propagation
+        {
+          if (k == 0) break;
+
+          k--;
+
+          t = n[k];
+
+          n[k]++;
+        }
+      }
+
+      // update start:
+
+      loop_start = i;
+    }
+
+    // n = n / 2:
+
+    n[8] = n[8] >> 1 | n[7] << 31;
+    n[7] = n[7] >> 1 | n[6] << 31;
+    n[6] = n[6] >> 1 | n[5] << 31;
+    n[5] = n[5] >> 1 | n[4] << 31;
+    n[4] = n[4] >> 1 | n[3] << 31;
+    n[3] = n[3] >> 1 | n[2] << 31;
+    n[2] = n[2] >> 1 | n[1] << 31;
+    n[1] = n[1] >> 1 | n[0] << 31;
+    n[0] = n[0] >> 1;
+  }
+
+  return loop_start;
+}
+
+/*
+ * @param x1 out: x coordinate, a pointer to an u32 array with a size of 8.
+ * @param y1 out: y coordinate, a pointer to an u32 array with a size of 8.
+ * @param k in: tweak/scalar which should be converted, a pointer to an u32 array with a size of 8.
+ * @param tmps in: a basepoint for the multiplication.
+ * @return Returns the x coordinate with a leading parity/sign (for odd/even y), it is named a compressed coordinate.
+ */
+DECLSPEC void point_mul_xy (PRIVATE_AS u32 *x1, PRIVATE_AS u32 *y1, PRIVATE_AS const u32 *k, SECP256K1_TMPS_TYPE const secp256k1_t *tmps)
+{
+  u32 naf[SECP256K1_NAF_SIZE] = { 0 };
+
+  int loop_start = convert_to_window_naf (naf, k);
+
+  // first set:
+
+  const u32 multiplier_raw = (naf[loop_start >> 3] >> ((loop_start & 7) << 2)) & 0x0f; // or use u8 ?
+
+  // Guard the first-window read against a zero digit (happens when the scalar k reduces to 0).
+  // Without this, (multiplier - 1) underflows and x_pos below indexes ~3.2e9 words past tmps->xy[]
+  // that is an out-of-bounds read (CPU OpenCL devices fault with SIGSEGV; GPUs read garbage).
+  // k == 0 is not a valid private key, so clamping to 1 (the base point G) just keeps it in bounds.
+  const u32 multiplier = (multiplier_raw == 0) ? 1 : multiplier_raw;
+
+  const u32 odd = multiplier & 1;
+
+  const u32 x_pos = ((multiplier - 1 + odd) >> 1) * 24;
+  const u32 y_pos = odd ? (x_pos + 8) : (x_pos + 16);
+
+
+  x1[0] = tmps->xy[x_pos + 0];
+  x1[1] = tmps->xy[x_pos + 1];
+  x1[2] = tmps->xy[x_pos + 2];
+  x1[3] = tmps->xy[x_pos + 3];
+  x1[4] = tmps->xy[x_pos + 4];
+  x1[5] = tmps->xy[x_pos + 5];
+  x1[6] = tmps->xy[x_pos + 6];
+  x1[7] = tmps->xy[x_pos + 7];
+
+  y1[0] = tmps->xy[y_pos + 0];
+  y1[1] = tmps->xy[y_pos + 1];
+  y1[2] = tmps->xy[y_pos + 2];
+  y1[3] = tmps->xy[y_pos + 3];
+  y1[4] = tmps->xy[y_pos + 4];
+  y1[5] = tmps->xy[y_pos + 5];
+  y1[6] = tmps->xy[y_pos + 6];
+  y1[7] = tmps->xy[y_pos + 7];
+
+  u32 z1[8] = { 0 };
+
+  z1[0] = 1;
+
+  /*
+   * Start:
+   */
+
+  // main loop (left-to-right binary algorithm):
+
+  for (int pos = loop_start - 1; pos >= 0; pos--) // -1 because we've set/add the point already
+  {
+    // always double:
+
+    point_double (x1, y1, z1);
+
+    // add only if needed:
+
+    const u32 multiplier = (naf[pos >> 3] >> ((pos & 7) << 2)) & 0x0f;
+
+    if (multiplier)
+    {
+      /*
+        m ->  y | y = ((m - (m & 1)) / 2) * 24
+        ----------------------------------
+        1 ->  0 | 1/2 * 24 = 0
+        2 -> 16
+        3 -> 24 | 3/2 * 24 = 24
+        4 -> 40
+        5 -> 48 | 5/2 * 24 = 2*24
+        6 -> 64
+        7 -> 72 | 7/2 * 24 = 3*24
+        8 -> 88
+       */
+
+      const u32 odd = multiplier & 1;
+
+      const u32 x_pos = ((multiplier - 1 + odd) >> 1) * 24;
+      const u32 y_pos = odd ? (x_pos + 8) : (x_pos + 16);
+
+      u32 x2[8];
+
+      x2[0] = tmps->xy[x_pos + 0];
+      x2[1] = tmps->xy[x_pos + 1];
+      x2[2] = tmps->xy[x_pos + 2];
+      x2[3] = tmps->xy[x_pos + 3];
+      x2[4] = tmps->xy[x_pos + 4];
+      x2[5] = tmps->xy[x_pos + 5];
+      x2[6] = tmps->xy[x_pos + 6];
+      x2[7] = tmps->xy[x_pos + 7];
+
+      u32 y2[8];
+
+      y2[0] = tmps->xy[y_pos + 0];
+      y2[1] = tmps->xy[y_pos + 1];
+      y2[2] = tmps->xy[y_pos + 2];
+      y2[3] = tmps->xy[y_pos + 3];
+      y2[4] = tmps->xy[y_pos + 4];
+      y2[5] = tmps->xy[y_pos + 5];
+      y2[6] = tmps->xy[y_pos + 6];
+      y2[7] = tmps->xy[y_pos + 7];
+
+      // (x1, y1, z1) + multiplier * (x, y, z) = (x1, y1, z1) + (x2, y2, z2)
+
+      point_add (x1, y1, z1, x2, y2);
+
+      // optimization (there can't be any adds after an add for w-1 times):
+      // (but it seems to be faster without this manipulation of "pos")
+
+      //for (u32 i = 0; i < 3; i++)
+      //{
+      //  if (pos == 0) break;
+      //  point_double (x1, y1, z1);
+      //  pos--;
+      //}
+    }
+  }
+
+
+  /*
+   * Get the corresponding affine coordinates x/y:
+   *
+   * Note:
+   * x1_affine = x1_jacobian / z1^2 = x1_jacobian * z1_inv^2
+   * y1_affine = y1_jacobian / z1^2 = y1_jacobian * z1_inv^2
+   *
+   */
+
+  point_to_affine (x1, y1, z1);
+
+  // return values are already in x1 and y1
+}
+
+/*
+ * @param r out: x coordinate with leading parity/sign (for odd/even y), a pointer to an u32 array with a size of 9.
+ * @param k in: tweak/scalar which should be converted, a pointer to an u32 array with a size of 8.
+ * @param tmps in: a basepoint for the multiplication.
+ * @return Returns the x coordinate with a leading parity/sign (for odd/even y), it is named a compressed coordinate.
+ */
+DECLSPEC void point_mul (PRIVATE_AS u32 *r, PRIVATE_AS const u32 *k, SECP256K1_TMPS_TYPE const secp256k1_t *tmps)
+{
+  u32 x[8];
+  u32 y[8];
+
+  point_mul_xy (x, y, k, tmps);
+
+  /*
+   * output:
+   */
+
+  // shift by 1 byte (8 bits) to make room and add the parity/sign (for odd/even y):
+
+  r[8] =               (x[0] << 24);
+  r[7] = (x[0] >> 8) | (x[1] << 24);
+  r[6] = (x[1] >> 8) | (x[2] << 24);
+  r[5] = (x[2] >> 8) | (x[3] << 24);
+  r[4] = (x[3] >> 8) | (x[4] << 24);
+  r[3] = (x[4] >> 8) | (x[5] << 24);
+  r[2] = (x[5] >> 8) | (x[6] << 24);
+  r[1] = (x[6] >> 8) | (x[7] << 24);
+  r[0] = (x[7] >> 8);
+
+  const u32 type = 0x02 | (y[0] & 1); // (note: 0b10 | 0b01 = 0x03)
+
+  r[0] = r[0] | type << 24; // 0x02 or 0x03
+}
+
+/*
+ * Transform a x coordinate and separate parity to secp256k1_t.
+ * @param r out: x and y coordinates.
+ * @param x in: x coordinate which should be converted, a pointer to an u32 array with a size of 8.
+ * @param first_byte in: The parity of the y coordinate, a u32.
+ * @return Returns 0 if successful, returns 1 if x is greater than the basepoint.
+ */
+DECLSPEC u32 transform_public (PRIVATE_AS secp256k1_t *r, PRIVATE_AS const u32 *x, const u32 first_byte)
+{
+  u32 p[8];
+
+  p[0] = SECP256K1_P0;
+  p[1] = SECP256K1_P1;
+  p[2] = SECP256K1_P2;
+  p[3] = SECP256K1_P3;
+  p[4] = SECP256K1_P4;
+  p[5] = SECP256K1_P5;
+  p[6] = SECP256K1_P6;
+  p[7] = SECP256K1_P7;
+
+  // x must be smaller than p (because of y ^ 2 = x ^ 3 % p)
+
+  for (int i = 7; i >= 0; i--)
+  {
+    if (x[i] < p[i]) break;
+    if (x[i] > p[i]) return 1;
+  }
+
+
+  // get y^2 = x^3 + 7:
+
+  u32 b[8] = { 0 };
+
+  b[0] = SECP256K1_B;
+
+  u32 y[8];
+
+  mul_mod (y, x, x);
+  mul_mod (y, y, x);
+  add_mod (y, y, b);
+
+  // get y = sqrt (y^2):
+
+  sqrt_mod (y);
+
+  // check if it's of the correct parity that we want (odd/even):
+
+  if ((first_byte & 1) != (y[0] & 1))
+  {
+    // y2 = p - y1 (or y2 = y1 * -1)
+
+    sub_mod (y, p, y);
+  }
+
+  // get xy:
+
+  point_get_coords (r, x, y);
+
+  return 0;
+}
+
+/*
+ * Parse a x coordinate with leading parity to secp256k1_t.
+ * @param r out: x and y coordinates.
+ * @param k in: x coordinate which should be converted with leading parity, a pointer to an u32 array with a size of 9.
+ * @return Returns 0 if successful, returns 1 if x is greater than the basepoint or the parity has an unexpected value.
+ */
+DECLSPEC u32 parse_public (PRIVATE_AS secp256k1_t *r, PRIVATE_AS const u32 *k)
+{
+  // verify:
+
+  const u32 first_byte = k[0] & 0xff;
+
+  if ((first_byte != '\x02') && (first_byte != '\x03'))
+  {
+    return 1;
+  }
+
+  // load k into x without the first byte:
+
+  u32 x[8];
+
+  x[0] = (k[7] & 0xff00) << 16 | (k[7] & 0xff0000) | (k[7] & 0xff000000) >> 16 | (k[8] & 0xff);
+  x[1] = (k[6] & 0xff00) << 16 | (k[6] & 0xff0000) | (k[6] & 0xff000000) >> 16 | (k[7] & 0xff);
+  x[2] = (k[5] & 0xff00) << 16 | (k[5] & 0xff0000) | (k[5] & 0xff000000) >> 16 | (k[6] & 0xff);
+  x[3] = (k[4] & 0xff00) << 16 | (k[4] & 0xff0000) | (k[4] & 0xff000000) >> 16 | (k[5] & 0xff);
+  x[4] = (k[3] & 0xff00) << 16 | (k[3] & 0xff0000) | (k[3] & 0xff000000) >> 16 | (k[4] & 0xff);
+  x[5] = (k[2] & 0xff00) << 16 | (k[2] & 0xff0000) | (k[2] & 0xff000000) >> 16 | (k[3] & 0xff);
+  x[6] = (k[1] & 0xff00) << 16 | (k[1] & 0xff0000) | (k[1] & 0xff000000) >> 16 | (k[2] & 0xff);
+  x[7] = (k[0] & 0xff00) << 16 | (k[0] & 0xff0000) | (k[0] & 0xff000000) >> 16 | (k[1] & 0xff);
+
+  return transform_public (r, x, first_byte);
+}
+
+
+/*
+ * Set precomputed values of the basepoint g to a secp256k1 structure.
+ * @param r out: x and y coordinates. pre-computed points: (x1,y1,-y1),(x3,y3,-y3),(x5,y5,-y5),(x7,y7,-y7)
+ */
+DECLSPEC void set_precomputed_basepoint_g (PRIVATE_AS secp256k1_t *r)
+{
+  // x1
+  r->xy[ 0] = SECP256K1_G_PRE_COMPUTED_00;
+  r->xy[ 1] = SECP256K1_G_PRE_COMPUTED_01;
+  r->xy[ 2] = SECP256K1_G_PRE_COMPUTED_02;
+  r->xy[ 3] = SECP256K1_G_PRE_COMPUTED_03;
+  r->xy[ 4] = SECP256K1_G_PRE_COMPUTED_04;
+  r->xy[ 5] = SECP256K1_G_PRE_COMPUTED_05;
+  r->xy[ 6] = SECP256K1_G_PRE_COMPUTED_06;
+  r->xy[ 7] = SECP256K1_G_PRE_COMPUTED_07;
+
+  // y1
+  r->xy[ 8] = SECP256K1_G_PRE_COMPUTED_08;
+  r->xy[ 9] = SECP256K1_G_PRE_COMPUTED_09;
+  r->xy[10] = SECP256K1_G_PRE_COMPUTED_10;
+  r->xy[11] = SECP256K1_G_PRE_COMPUTED_11;
+  r->xy[12] = SECP256K1_G_PRE_COMPUTED_12;
+  r->xy[13] = SECP256K1_G_PRE_COMPUTED_13;
+  r->xy[14] = SECP256K1_G_PRE_COMPUTED_14;
+  r->xy[15] = SECP256K1_G_PRE_COMPUTED_15;
+
+  // -y1
+  r->xy[16] = SECP256K1_G_PRE_COMPUTED_16;
+  r->xy[17] = SECP256K1_G_PRE_COMPUTED_17;
+  r->xy[18] = SECP256K1_G_PRE_COMPUTED_18;
+  r->xy[19] = SECP256K1_G_PRE_COMPUTED_19;
+  r->xy[20] = SECP256K1_G_PRE_COMPUTED_20;
+  r->xy[21] = SECP256K1_G_PRE_COMPUTED_21;
+  r->xy[22] = SECP256K1_G_PRE_COMPUTED_22;
+  r->xy[23] = SECP256K1_G_PRE_COMPUTED_23;
+
+  // x3
+  r->xy[24] = SECP256K1_G_PRE_COMPUTED_24;
+  r->xy[25] = SECP256K1_G_PRE_COMPUTED_25;
+  r->xy[26] = SECP256K1_G_PRE_COMPUTED_26;
+  r->xy[27] = SECP256K1_G_PRE_COMPUTED_27;
+  r->xy[28] = SECP256K1_G_PRE_COMPUTED_28;
+  r->xy[29] = SECP256K1_G_PRE_COMPUTED_29;
+  r->xy[30] = SECP256K1_G_PRE_COMPUTED_30;
+  r->xy[31] = SECP256K1_G_PRE_COMPUTED_31;
+
+  // y3
+  r->xy[32] = SECP256K1_G_PRE_COMPUTED_32;
+  r->xy[33] = SECP256K1_G_PRE_COMPUTED_33;
+  r->xy[34] = SECP256K1_G_PRE_COMPUTED_34;
+  r->xy[35] = SECP256K1_G_PRE_COMPUTED_35;
+  r->xy[36] = SECP256K1_G_PRE_COMPUTED_36;
+  r->xy[37] = SECP256K1_G_PRE_COMPUTED_37;
+  r->xy[38] = SECP256K1_G_PRE_COMPUTED_38;
+  r->xy[39] = SECP256K1_G_PRE_COMPUTED_39;
+
+  // -y3
+  r->xy[40] = SECP256K1_G_PRE_COMPUTED_40;
+  r->xy[41] = SECP256K1_G_PRE_COMPUTED_41;
+  r->xy[42] = SECP256K1_G_PRE_COMPUTED_42;
+  r->xy[43] = SECP256K1_G_PRE_COMPUTED_43;
+  r->xy[44] = SECP256K1_G_PRE_COMPUTED_44;
+  r->xy[45] = SECP256K1_G_PRE_COMPUTED_45;
+  r->xy[46] = SECP256K1_G_PRE_COMPUTED_46;
+  r->xy[47] = SECP256K1_G_PRE_COMPUTED_47;
+
+  // x5
+  r->xy[48] = SECP256K1_G_PRE_COMPUTED_48;
+  r->xy[49] = SECP256K1_G_PRE_COMPUTED_49;
+  r->xy[50] = SECP256K1_G_PRE_COMPUTED_50;
+  r->xy[51] = SECP256K1_G_PRE_COMPUTED_51;
+  r->xy[52] = SECP256K1_G_PRE_COMPUTED_52;
+  r->xy[53] = SECP256K1_G_PRE_COMPUTED_53;
+  r->xy[54] = SECP256K1_G_PRE_COMPUTED_54;
+  r->xy[55] = SECP256K1_G_PRE_COMPUTED_55;
+
+  // y5
+  r->xy[56] = SECP256K1_G_PRE_COMPUTED_56;
+  r->xy[57] = SECP256K1_G_PRE_COMPUTED_57;
+  r->xy[58] = SECP256K1_G_PRE_COMPUTED_58;
+  r->xy[59] = SECP256K1_G_PRE_COMPUTED_59;
+  r->xy[60] = SECP256K1_G_PRE_COMPUTED_60;
+  r->xy[61] = SECP256K1_G_PRE_COMPUTED_61;
+  r->xy[62] = SECP256K1_G_PRE_COMPUTED_62;
+  r->xy[63] = SECP256K1_G_PRE_COMPUTED_63;
+
+  // -y5
+  r->xy[64] = SECP256K1_G_PRE_COMPUTED_64;
+  r->xy[65] = SECP256K1_G_PRE_COMPUTED_65;
+  r->xy[66] = SECP256K1_G_PRE_COMPUTED_66;
+  r->xy[67] = SECP256K1_G_PRE_COMPUTED_67;
+  r->xy[68] = SECP256K1_G_PRE_COMPUTED_68;
+  r->xy[69] = SECP256K1_G_PRE_COMPUTED_69;
+  r->xy[70] = SECP256K1_G_PRE_COMPUTED_70;
+  r->xy[71] = SECP256K1_G_PRE_COMPUTED_71;
+
+  // x7
+  r->xy[72] = SECP256K1_G_PRE_COMPUTED_72;
+  r->xy[73] = SECP256K1_G_PRE_COMPUTED_73;
+  r->xy[74] = SECP256K1_G_PRE_COMPUTED_74;
+  r->xy[75] = SECP256K1_G_PRE_COMPUTED_75;
+  r->xy[76] = SECP256K1_G_PRE_COMPUTED_76;
+  r->xy[77] = SECP256K1_G_PRE_COMPUTED_77;
+  r->xy[78] = SECP256K1_G_PRE_COMPUTED_78;
+  r->xy[79] = SECP256K1_G_PRE_COMPUTED_79;
+
+  // y7
+  r->xy[80] = SECP256K1_G_PRE_COMPUTED_80;
+  r->xy[81] = SECP256K1_G_PRE_COMPUTED_81;
+  r->xy[82] = SECP256K1_G_PRE_COMPUTED_82;
+  r->xy[83] = SECP256K1_G_PRE_COMPUTED_83;
+  r->xy[84] = SECP256K1_G_PRE_COMPUTED_84;
+  r->xy[85] = SECP256K1_G_PRE_COMPUTED_85;
+  r->xy[86] = SECP256K1_G_PRE_COMPUTED_86;
+  r->xy[87] = SECP256K1_G_PRE_COMPUTED_87;
+
+  // -y7
+  r->xy[88] = SECP256K1_G_PRE_COMPUTED_88;
+  r->xy[89] = SECP256K1_G_PRE_COMPUTED_89;
+  r->xy[90] = SECP256K1_G_PRE_COMPUTED_90;
+  r->xy[91] = SECP256K1_G_PRE_COMPUTED_91;
+  r->xy[92] = SECP256K1_G_PRE_COMPUTED_92;
+  r->xy[93] = SECP256K1_G_PRE_COMPUTED_93;
+  r->xy[94] = SECP256K1_G_PRE_COMPUTED_94;
+  r->xy[95] = SECP256K1_G_PRE_COMPUTED_95;
+}

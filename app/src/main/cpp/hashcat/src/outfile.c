@@ -1,0 +1,991 @@
+/**
+ * Author......: See docs/credits.txt
+ * License.....: MIT
+ */
+
+#include "common.h"
+#include "types.h"
+#include "memory.h"
+#include "event.h"
+#include "convert.h"
+#include "mpsp.h"
+#include "rp.h"
+#include "emu_inc_rp.h"
+#include "emu_inc_rp_optimized.h"
+#include "backend.h"
+#include "shared.h"
+#include "filehandling.h"
+#include "path.h"
+#include "locking.h"
+#include "thread.h"
+#include "outfile.h"
+
+#include <stdarg.h>
+
+u32 outfile_format_parse (const char *format_string)
+{
+  if (format_string == NULL) return 0;
+
+  char *format = hcstrdup (format_string);
+
+  if (format == NULL) return 0;
+
+  char *saveptr = NULL;
+
+  char *next = strtok_r (format, ",", &saveptr);
+
+  if (next == NULL)
+  {
+    hcfree (format);
+
+    return 0;
+  }
+
+  u32 outfile_format = 0;
+
+  do
+  {
+    const int tok_len = strlen (next);
+
+    // reject non-numbers:
+
+    if (is_valid_digit_string ((const u8 *) next, tok_len) == false)
+    {
+      outfile_format = 0;
+      break;
+    }
+
+    // string to number conversion:
+
+    const u32 num = hc_strtoul (next, NULL, 10);
+
+    if (num == 0)
+    {
+      outfile_format = 0;
+      break;
+    }
+
+    if (num > 31)
+    {
+      outfile_format = 0;
+      break;
+    }
+
+    // to bitmask:
+
+    const u32 bit = 1 << (num - 1);
+
+    bool accepted = false;
+
+    switch (bit)
+    {
+      // allowed formats:
+      case OUTFILE_FMT_HASH:
+      case OUTFILE_FMT_PLAIN:
+      case OUTFILE_FMT_HEXPLAIN:
+      case OUTFILE_FMT_CRACKPOS:
+      case OUTFILE_FMT_TIME_ABS:
+      case OUTFILE_FMT_TIME_REL:
+        accepted = true;
+        break;
+      // NOT acceptable formats:
+      default:
+        accepted = false;
+        break;
+    }
+
+    if (accepted == false)
+    {
+      outfile_format = 0;
+      break;
+    }
+
+    // the user should specify any format at most once:
+
+    if (outfile_format & bit)
+    {
+      outfile_format = 0;
+      break;
+    }
+
+    outfile_format |= bit;
+
+  } while ((next = strtok_r ((char *) NULL, ",", &saveptr)) != NULL);
+
+  hcfree (format);
+
+  return outfile_format;
+}
+
+int build_plain (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, plain_t *plain, u32 *plain_buf, int *out_len)
+{
+  const hashconfig_t         *hashconfig         = hashcat_ctx->hashconfig;
+  const hashes_t             *hashes             = hashcat_ctx->hashes;
+  const mask_ctx_t           *mask_ctx           = hashcat_ctx->mask_ctx;
+  const straight_ctx_t       *straight_ctx       = hashcat_ctx->straight_ctx;
+  const user_options_t       *user_options       = hashcat_ctx->user_options;
+  const user_options_extra_t *user_options_extra = hashcat_ctx->user_options_extra;
+
+  const u64 gidvid = plain->gidvid;
+  const u32 il_pos = plain->il_pos;
+
+  // The device engine names its candidate with two numbers once the rules run inside it: il_pos is the
+  // rule, as it is for the straight kernel, and the step inside the cell rides in the spare word of the
+  // crack record. Without them the cell is all there is and il_pos is still the step.
+
+  const u32 cell_pos = (hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE].global_ctx.dev_rules == true) ? plain->extra1 : il_pos;
+
+  int plain_len = 0;
+
+  u8 *plain_ptr = (u8 *) plain_buf;
+
+  if (user_options->slow_candidates == true)
+  {
+    pw_t pw;
+
+    const int rc = gidd_to_pw_t (hashcat_ctx, device_param, gidvid, &pw);
+
+    if (rc == -1) return -1;
+
+    memcpy (plain_buf, pw.i, pw.pw_len);
+
+    plain_len = pw.pw_len;
+  }
+  else
+  {
+    if ((user_options_extra->attack_kern == ATTACK_KERN_STRAIGHT) || (user_options_extra->attack_kern == ATTACK_KERN_PCFG))
+    {
+      pw_t pw;
+
+      const int rc = gidd_to_pw_t (hashcat_ctx, device_param, gidvid, &pw);
+
+      if (rc == -1) return -1;
+
+      const u64 off = device_param->innerloop_pos + il_pos;
+
+      if (hashconfig->opti_type & OPTI_TYPE_OPTIMIZED_KERNEL)
+      {
+        // The device engine reaches the optimized kernels too, and the candidate is still the base word
+        // with the cell stepped to il_pos rather than the base word itself. Reporting the base word
+        // names a password that does not hash to the digest that was cracked, whichever kernel found
+        // it, so this has to happen on both sides of the optimized test rather than only the pure one.
+
+        if (user_options_extra->attack_kern == ATTACK_KERN_PCFG)
+        {
+          const generic_ctx_t *generic_ctx = &hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE];
+
+          for (int i = 0; i < 14; i++)
+          {
+            plain_buf[i] = pw.i[i];
+          }
+
+          plain_len = pw.pw_len;
+
+          // The candidate's own length, which is not the base word's on a ruleset whose buckets hold
+          // entries of more than one byte length. Reporting the base word's names a password that does
+          // not hash to the digest that was cracked, exactly as reporting the base word itself would.
+
+          const int amp_len = pcfg_expand (&device_param->pcfg_cells_buf[gidvid], generic_ctx->dev_pool, pw.i, cell_pos, plain_buf, (int) pw.pw_len);
+
+          if (amp_len >= 0) plain_len = amp_len;
+
+          // And then the rule that made it, because on the device the cell is only half of the candidate.
+          //
+          // apply_rules () and not the optimized form, on this side as on the other: the device engine has
+          // one kernel for both, inc_pcfg_kernel.cl, and that kernel calls apply_rules (). The optimized
+          // form works on two halves of four words and would read a candidate pcfg_expand () wrote as one.
+
+          if (generic_ctx->global_ctx.dev_rules == true)
+          {
+            // Zeroed above the candidate first, because apply_rules () appends with an OR:
+            // append_block () reads the destination word and writes it back with the source ORed into
+            // it, so a rule that duplicates or reflects needs the bytes it lands on to be zero. The
+            // kernel hands it an array that is, and this buffer still holds the base word that
+            // pcfg_expand () wrote over the front of. Without this the potfile takes a password that
+            // does not produce the digest that was cracked: "abcd" under d came out "abcdgoot".
+
+            if (plain_len < RP_PASSWORD_SIZE)
+            {
+              memset ((u8 *) plain_buf + plain_len, 0, (size_t) (RP_PASSWORD_SIZE - plain_len));
+            }
+
+            plain_len = apply_rules (straight_ctx->kernel_rules_buf[off].cmds, plain_buf, plain_len);
+          }
+        }
+        else if ((user_options->rp_files_cnt == 0) && (user_options->rp_gen == 0))
+        {
+          for (int i = 0; i < 14; i++)
+          {
+            plain_buf[i] = pw.i[i];
+          }
+
+          plain_len = pw.pw_len;
+        }
+        else
+        {
+          for (int i = 0; i < 8; i++)
+          {
+            plain_buf[i] = pw.i[i];
+          }
+
+          plain_len = apply_rules_optimized (straight_ctx->kernel_rules_buf[off].cmds, &plain_buf[0], &plain_buf[4], pw.pw_len);
+        }
+      }
+      else
+      {
+        for (int i = 0; i < 64; i++)
+        {
+          plain_buf[i] = pw.i[i];
+        }
+
+        // The device engine's candidate is the base word with the cell's trailing slots stepped to il_pos,
+        // and no rule was ever applied to it. Reporting the base word instead names a password that
+        // does not hash to the digest that was cracked.
+
+        if (user_options_extra->attack_kern == ATTACK_KERN_PCFG)
+        {
+          const generic_ctx_t *generic_ctx = &hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE];
+
+          plain_len = pw.pw_len;
+
+          // The candidate's own length, which is not the base word's on a ruleset whose buckets hold
+          // entries of more than one byte length. Reporting the base word's names a password that does
+          // not hash to the digest that was cracked, exactly as reporting the base word itself would.
+
+          const int amp_len = pcfg_expand (&device_param->pcfg_cells_buf[gidvid], generic_ctx->dev_pool, pw.i, cell_pos, plain_buf, (int) pw.pw_len);
+
+          if (amp_len >= 0) plain_len = amp_len;
+
+          // And then the rule that made it, because on the device the cell is only half of the candidate.
+
+          if (generic_ctx->global_ctx.dev_rules == true)
+          {
+            // Zeroed above the candidate for the reason given at the optimized branch above: a rule
+            // appends with an OR and needs the bytes it lands on to be zero.
+
+            if (plain_len < RP_PASSWORD_SIZE)
+            {
+              memset ((u8 *) plain_buf + plain_len, 0, (size_t) (RP_PASSWORD_SIZE - plain_len));
+            }
+
+            plain_len = apply_rules (straight_ctx->kernel_rules_buf[off].cmds, plain_buf, plain_len);
+          }
+        }
+        else
+        {
+          plain_len = apply_rules (straight_ctx->kernel_rules_buf[off].cmds, plain_buf, pw.pw_len);
+        }
+      }
+    }
+    else if (user_options_extra->attack_kern == ATTACK_KERN_BF)
+    {
+      u64 l_off = device_param->kernel_params_mp_l_buf64[3] + gidvid;
+      u64 r_off = device_param->kernel_params_mp_r_buf64[3] + il_pos;
+
+      u32 l_start = device_param->kernel_params_mp_l_buf32[5];
+      u32 r_start = device_param->kernel_params_mp_r_buf32[5];
+
+      u32 l_stop = device_param->kernel_params_mp_l_buf32[4];
+      u32 r_stop = device_param->kernel_params_mp_r_buf32[4];
+
+      sp_exec (l_off, (char *) plain_ptr + l_start, mask_ctx->root_css_buf, mask_ctx->markov_css_buf, l_start, l_start + l_stop);
+      sp_exec (r_off, (char *) plain_ptr + r_start, mask_ctx->root_css_buf, mask_ctx->markov_css_buf, r_start, r_start + r_stop);
+
+      plain_len = (int) mask_ctx->css_cnt;
+    }
+    else if ((user_options_extra->attack_kern == ATTACK_KERN_COMBI) && (user_options_extra->base_source == BASE_SOURCE_MASK))
+    {
+      // The mask is the base word and the wordlist amplifies it, so the candidate is put back together
+      // the way -a 7 puts it together under a pure kernel: the mask from the outer loop position, then
+      // the amplifier word behind it.
+
+      const u64 off = device_param->kernel_params_mp_buf64[3] + gidvid;
+
+      const u32 start = 0;
+      const u32 stop  = device_param->kernel_params_mp_buf32[4];
+
+      sp_exec (off, (char *) plain_ptr, mask_ctx->root_css_buf, mask_ctx->markov_css_buf, start, start + stop);
+
+      plain_len = (int) stop;
+
+      const char *comb_buf = (const char *) device_param->combs_buf[il_pos].i;
+      const u32   comb_len =                device_param->combs_buf[il_pos].pw_len;
+
+      memcpy (plain_ptr + plain_len, comb_buf, comb_len);
+
+      plain_len += (int) comb_len;
+    }
+    else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
+    {
+      pw_t pw;
+
+      const int rc = gidd_to_pw_t (hashcat_ctx, device_param, gidvid, &pw);
+
+      if (rc == -1) return -1;
+
+      // Taken back out of the amplifier the host built, which is the record of what the kernel was
+      // actually given. The one shape whose mask the mask processor produces on the device has no host
+      // copy to read, and it is also the one shape whose item is always at its own position, so there
+      // the mask is produced again from that position instead.
+
+      if (device_param->combs_on_host == true)
+      {
+        plain_len = (int) hybrid_amp_rebuild (hashcat_ctx, device_param, il_pos, plain_ptr, (const u8 *) pw.i, pw.pw_len);
+      }
+      else
+      {
+        const u64 off = device_param->kernel_params_mp_buf64[3] + il_pos;
+
+        char mask_buf[256];
+
+        hybrid_amp_mask (hashcat_ctx, off, mask_buf);
+
+        plain_len = (int) hybrid_assemble (hashcat_ctx, plain_ptr, mask_buf, (const u8 *) pw.i, pw.pw_len, NULL, 0);
+      }
+    }
+    if (user_options->attack_mode == ATTACK_MODE_BF)
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_BRUTE_FORCE) // lots of optimizations can happen here
+      {
+        if (hashconfig->opti_type & OPTI_TYPE_SINGLE_HASH)
+        {
+          if (hashconfig->opti_type & OPTI_TYPE_APPENDED_SALT)
+          {
+            plain_len = plain_len - hashes->salts_buf[0].salt_len;
+          }
+        }
+
+        if (hashconfig->opts_type & OPTS_TYPE_PT_UTF16LE)
+        {
+          for (int i = 0, j = 0; i < plain_len; i += 2, j += 1)
+          {
+            plain_ptr[j] = plain_ptr[i];
+          }
+
+          plain_len = plain_len / 2;
+        }
+        else if (hashconfig->opts_type & OPTS_TYPE_PT_UTF16BE)
+        {
+          for (int i = 1, j = 0; i < plain_len; i += 2, j += 1)
+          {
+            plain_ptr[j] = plain_ptr[i];
+          }
+
+          plain_len = plain_len / 2;
+        }
+      }
+    }
+  }
+
+  int pw_max = (const int) hashconfig->pw_max;
+
+  // pw_max is per pw_t element but in combinator we have two pw_t elements.
+  // therefore we can support up to 64 in combinator in optimized mode (but limited by general hash limit 55)
+  // or the full 2 * PW_MAX in pure mode.
+  // some algorithms do not support general default pw_max = 31,
+  // therefore we need to use pw_max as a base and not hardcode it.
+  //
+  // The pure branch used to cap at 256 for "hashcat buffer size limit 256",
+  // which no longer holds: every consumer of plain_ptr is sized for the full
+  // combinator length. status.c uses u32[(64 * 2) + 2], which is exactly
+  // 2 * PW_MAX plus room for the terminator, and hashes.c uses HCBUFSIZ_TINY
+  // before handing off to HCBUFSIZ_LARGE writers. Capping below the real
+  // maximum silently reported a truncated password that does not hash to the
+  // digest it was reported against.
+
+  if (plain_len > pw_max)
+  {
+    if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
+    {
+      if (hashconfig->opti_type & OPTI_TYPE_OPTIMIZED_KERNEL)
+      {
+        pw_max = MIN ((pw_max * 2), 55);
+      }
+      else
+      {
+        pw_max = MIN ((pw_max * 2), PW_MAX * 2);
+      }
+    }
+  }
+
+  if (plain_len > pw_max) plain_len = MIN (plain_len, pw_max);
+
+  plain_ptr[plain_len] = 0;
+
+  *out_len = plain_len;
+
+  return 0;
+}
+
+int build_crackpos (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, plain_t *plain, u64 *out_pos)
+{
+  const combinator_ctx_t      *combinator_ctx     = hashcat_ctx->combinator_ctx;
+  const mask_ctx_t            *mask_ctx           = hashcat_ctx->mask_ctx;
+  const straight_ctx_t        *straight_ctx       = hashcat_ctx->straight_ctx;
+  const user_options_t        *user_options       = hashcat_ctx->user_options;
+  const user_options_extra_t  *user_options_extra = hashcat_ctx->user_options_extra;
+
+  // A length sort renumbers the work items of a launch, and a crack position counts words in the feed,
+  // so this is the position the work item's word came in at.
+
+  const u64 feed_pos = gidvid_to_feed_pos (device_param, plain->gidvid);
+  const u32 il_pos = plain->il_pos;
+
+  // The batch being launched, and not the one the producer has moved on to filling.
+
+  u64 crackpos = device_param->words_off_launch;
+
+  if (user_options->slow_candidates == true)
+  {
+    // The host already applied the amplifier, so the work item is a candidate and nothing multiplies
+    // it. It still needs the launch's own offset, which is what every other branch here adds.
+
+    crackpos += feed_pos;
+  }
+  else
+  {
+    if (user_options_extra->attack_kern == ATTACK_KERN_STRAIGHT)
+    {
+      crackpos += feed_pos;
+      crackpos *= straight_ctx->kernel_rules_cnt;
+      crackpos += device_param->innerloop_pos + il_pos;
+    }
+    else if (user_options_extra->attack_kern == ATTACK_KERN_COMBI)
+    {
+      crackpos += feed_pos;
+      crackpos *= combinator_ctx->combs_cnt;
+      crackpos += device_param->innerloop_pos + il_pos;
+    }
+    else if (user_options_extra->attack_kern == ATTACK_KERN_BF)
+    {
+      crackpos += feed_pos;
+      crackpos *= mask_ctx->bfs_cnt;
+      crackpos += device_param->innerloop_pos + il_pos;
+    }
+  }
+
+  *out_pos = crackpos;
+
+  return 0;
+}
+
+// What the feed did, rather than what a rule did. The feed is handed the same four things
+// pcfg_expand () rebuilds the candidate from, so it can name the choices it made. A feed that
+// cannot answer leaves the field empty rather than making one up.
+//
+// A feed that does not amplify has no cell and no pool, so it is handed its own position instead and
+// answers from that. -a 9 is that case: it decides what to make from where it is in its keyspace, so
+// the position is the whole of what it needs to say which word and which rule made this candidate.
+
+static int debug_rule_from_feed (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u64 gidvid, const u32 il_pos, const u8 *base, const int base_len, u8 *debug_rule_buf)
+{
+  const generic_ctx_t        *generic_ctx        = &hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE];
+  const user_options_extra_t *user_options_extra = hashcat_ctx->user_options_extra;
+
+  if (generic_ctx->explain_enable == false) return 0;
+  if (generic_ctx->global_explain == NULL) return 0;
+
+  const bool amp = (user_options_extra->attack_kern == ATTACK_KERN_PCFG);
+
+  // The cell belongs to the work item, so it is read at the raw gidvid, while the position below is
+  // the feed's. The two can only be handed to the same call because a length sort and an amplifying
+  // feed never happen together. See length_sort_enabled ().
+
+  const pcfg_cell_t *cell = (amp == true) ? &device_param->pcfg_cells_buf[gidvid] : NULL;
+
+  const u32 *pool = (amp == true) ? generic_ctx->dev_pool : NULL;
+
+  // Where this candidate's base word sat in the feed's own keyspace. The batch being launched, plus
+  // the work item inside it, which is the same arithmetic build_crackpos () makes before it multiplies
+  // by whatever amplifies.
+
+  const u64 pos = device_param->words_off_launch + gidvid_to_feed_pos (device_param, gidvid);
+
+  const int len = generic_ctx->global_explain (&((generic_ctx_t *) generic_ctx)->global_ctx, cell, pool, base, base_len, (amp == true) ? il_pos : 0, pos, (char *) debug_rule_buf, RP_PASSWORD_SIZE - 1);
+
+  if (len <= 0) return 0;
+
+  debug_rule_buf[len] = 0;
+
+  return len;
+}
+
+int build_debugdata (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, plain_t *plain, u8 *debug_rule_buf, int *debug_rule_len, u8 *debug_plain_ptr, int *debug_plain_len)
+{
+  const debugfile_ctx_t      *debugfile_ctx      = hashcat_ctx->debugfile_ctx;
+  const straight_ctx_t       *straight_ctx       = hashcat_ctx->straight_ctx;
+  const user_options_t       *user_options       = hashcat_ctx->user_options;
+  const user_options_extra_t *user_options_extra = hashcat_ctx->user_options_extra;
+
+  const u64 gidvid = plain->gidvid;
+  const u32 il_pos = plain->il_pos;
+
+  // Same two numbers as build_plain (): with the rules inside the engine il_pos is the rule and the step
+  // inside the cell is the spare word, and the feed's own explanation is about the step.
+
+  const u32 cell_pos = (hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE].global_ctx.dev_rules == true) ? plain->extra1 : il_pos;
+
+  // The straight kernel is the one that applies a rule, so it is the one that has a rule to report.
+  // That is attack mode 0, 8 and 9 as it always was, and now also the mask attacks, which reach it
+  // through a feed once they are given rules.
+
+  if ((user_options_extra->attack_kern != ATTACK_KERN_STRAIGHT) && (user_options_extra->attack_kern != ATTACK_KERN_PCFG)) return 0;
+
+  const u32 debug_mode = debugfile_ctx->mode;
+
+  if (debug_mode == 0) return 0;
+
+  if (user_options->slow_candidates == true)
+  {
+    pw_pre_t *pw_base = device_param->pws_base_buf + gidvid_to_feed_pos (device_param, gidvid);
+
+    // save rule
+    if ((debug_mode == 1) || (debug_mode == 3) || (debug_mode == 4) || (debug_mode == 5))
+    {
+      const int len = kernel_rule_to_cpu_rule ((char *) debug_rule_buf, &straight_ctx->kernel_rules_buf[pw_base->rule_idx]);
+
+      debug_rule_buf[len] = 0;
+
+      *debug_rule_len = len;
+    }
+
+    // save plain
+    if ((debug_mode == 2) || (debug_mode == 3) || (debug_mode == 4) || (debug_mode == 5))
+    {
+      memcpy (debug_plain_ptr, pw_base->base_buf, pw_base->base_len);
+
+      debug_plain_ptr[pw_base->base_len] = 0;
+
+      *debug_plain_len = pw_base->base_len;
+    }
+  }
+  else
+  {
+    pw_t pw;
+
+    const int rc = gidd_to_pw_t (hashcat_ctx, device_param, gidvid, &pw);
+
+    if (rc == -1) return -1;
+
+    int plain_len = (int) pw.pw_len;
+
+    const u64 off = device_param->innerloop_pos + il_pos;
+
+    if (debug_mode == DEBUG_MODE_FEED)
+    {
+      *debug_rule_len = debug_rule_from_feed (hashcat_ctx, device_param, gidvid, cell_pos, (const u8 *) pw.i, plain_len, debug_rule_buf);
+
+      memcpy (debug_plain_ptr, (char *) pw.i, (size_t) plain_len);
+
+      debug_plain_ptr[plain_len] = 0;
+
+      *debug_plain_len = plain_len;
+
+      return 0;
+    }
+
+    // save rule
+    if ((debug_mode == 1) || (debug_mode == 3) || (debug_mode == 4) || (debug_mode == 5))
+    {
+      // An attack with a feed and no rules has no rule to name, so the feed says what it did instead.
+      // With rules the rule is what was asked for, and mode 6 is there to ask the feed anyway.
+
+      if ((user_options->rp_files_cnt == 0) && (user_options->rp_gen == 0))
+      {
+        *debug_rule_len = debug_rule_from_feed (hashcat_ctx, device_param, gidvid, cell_pos, (const u8 *) pw.i, plain_len, debug_rule_buf);
+      }
+      else
+      {
+        const int len = kernel_rule_to_cpu_rule ((char *) debug_rule_buf, &straight_ctx->kernel_rules_buf[off]);
+
+        debug_rule_buf[len] = 0;
+
+        *debug_rule_len = len;
+      }
+    }
+
+    // save plain
+    if ((debug_mode == 2) || (debug_mode == 3) || (debug_mode == 4) || (debug_mode == 5))
+    {
+      // What the rule was applied to, which for every other attack is the base word and inside the
+      // device engine is the candidate the cell made out of it. The rule consumed the entry the cell
+      // stepped to, not the word the feed handed over, and naming the second one leaves a debug line
+      // that does not reconstruct: "srbie6:d:vbnmqwvbnmqw", where the plain is the password that was
+      // cracked and the word beside it is a different entry of the same cell. It shows only where the
+      // two differ, so a base word the grammar emits whole reads correctly and hides it.
+
+      const generic_ctx_t *generic_ctx = &hashcat_ctx->generic_ctx[GENERIC_ROLE_BASE];
+
+      if ((user_options_extra->attack_kern == ATTACK_KERN_PCFG) && (generic_ctx->global_ctx.dev_rules == true))
+      {
+        u32 cand_buf[64] = { 0 };
+
+        for (int i = 0; i < 64; i++)
+        {
+          cand_buf[i] = pw.i[i];
+        }
+
+        const int amp_len = pcfg_expand (&device_param->pcfg_cells_buf[gidvid], generic_ctx->dev_pool, pw.i, cell_pos, cand_buf, (int) pw.pw_len);
+
+        if (amp_len >= 0) plain_len = amp_len;
+
+        memcpy (debug_plain_ptr, (char *) cand_buf, (size_t) plain_len);
+      }
+      else
+      {
+        memcpy (debug_plain_ptr, (char *) pw.i, (size_t) plain_len);
+      }
+
+      debug_plain_ptr[plain_len] = 0;
+
+      *debug_plain_len = plain_len;
+    }
+  }
+
+  return 0;
+}
+
+int outfile_init (hashcat_ctx_t *hashcat_ctx)
+{
+  outfile_ctx_t  *outfile_ctx  = hashcat_ctx->outfile_ctx;
+  user_options_t *user_options = hashcat_ctx->user_options;
+
+  outfile_ctx->fp.pfp          = NULL;
+  outfile_ctx->filename        = user_options->outfile;
+  outfile_ctx->outfile_format  = user_options->outfile_format;
+  outfile_ctx->outfile_autohex = user_options->outfile_autohex;
+  outfile_ctx->outfile_json    = user_options->outfile_json;
+  outfile_ctx->is_fifo         = hc_path_is_fifo (outfile_ctx->filename);
+
+  hc_thread_mutex_init (outfile_ctx->mux_outfile);
+
+  return 0;
+}
+
+void outfile_destroy (hashcat_ctx_t *hashcat_ctx)
+{
+  outfile_ctx_t *outfile_ctx = hashcat_ctx->outfile_ctx;
+
+  hc_thread_mutex_delete (outfile_ctx->mux_outfile);
+
+  if (outfile_ctx->is_fifo == true && outfile_ctx->fp.pfp != NULL)
+  {
+    hc_unlockfile_warn (hashcat_ctx, &outfile_ctx->fp, outfile_ctx->filename, &outfile_ctx->lock_warned);
+
+    hc_fclose (&outfile_ctx->fp);
+  }
+
+  memset (outfile_ctx, 0, sizeof (outfile_ctx_t));
+}
+
+// The file is opened and closed around every cracked hash so that a user can move the outfile while
+// hashcat runs. That costs an open, a lock, a close and an unlock per result, and a launch against a
+// large list can return tens of thousands of them, all inside the display mutex. A batch holds the
+// file open across one launch's worth of results and closes it when the launch is done, so the
+// outfile is still a live stream and can still be moved between launches rather than between hashes.
+
+void outfile_batch_begin (hashcat_ctx_t *hashcat_ctx)
+{
+  outfile_ctx_t *outfile_ctx = hashcat_ctx->outfile_ctx;
+
+  if (outfile_ctx->batch_depth == 0)
+  {
+    if (outfile_write_open (hashcat_ctx) == -1) return;
+  }
+
+  outfile_ctx->batch_depth++;
+}
+
+void outfile_batch_end (hashcat_ctx_t *hashcat_ctx)
+{
+  outfile_ctx_t *outfile_ctx = hashcat_ctx->outfile_ctx;
+
+  if (outfile_ctx->batch_depth == 0) return;
+
+  outfile_ctx->batch_depth--;
+
+  if (outfile_ctx->batch_depth == 0) outfile_write_close (hashcat_ctx);
+}
+
+int outfile_write_open (hashcat_ctx_t *hashcat_ctx)
+{
+  outfile_ctx_t *outfile_ctx = hashcat_ctx->outfile_ctx;
+
+  if (outfile_ctx->filename == NULL) return 0;
+
+  // already held open by a batch
+
+  if ((outfile_ctx->batch_depth > 0) && (outfile_ctx->fp.pfp != NULL)) return 0;
+
+  if (outfile_ctx->is_fifo == false || outfile_ctx->fp.pfp == NULL)
+  {
+    if (hc_fopen (&outfile_ctx->fp, outfile_ctx->filename, "ab") == false)
+    {
+      event_log_error (hashcat_ctx, "%s: %s", outfile_ctx->filename, hc_fopen_strerror ());
+
+      return -1;
+    }
+
+    if (hc_lockfile (&outfile_ctx->fp) == -1)
+    {
+      hc_fclose (&outfile_ctx->fp);
+
+      event_log_error (hashcat_ctx, "%s: %s", outfile_ctx->filename, strerror (errno));
+
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+void outfile_write_close (hashcat_ctx_t *hashcat_ctx)
+{
+  outfile_ctx_t *outfile_ctx = hashcat_ctx->outfile_ctx;
+
+  if (outfile_ctx->fp.pfp == NULL) return;
+
+  // a batch closes it, not the write inside one
+
+  if (outfile_ctx->batch_depth > 0)
+  {
+    hc_fflush (&outfile_ctx->fp);
+
+    return;
+  }
+
+  if (outfile_ctx->is_fifo == true)
+  {
+    hc_fflush (&outfile_ctx->fp);
+    return;
+  }
+
+  hc_unlockfile_warn (hashcat_ctx, &outfile_ctx->fp, outfile_ctx->filename, &outfile_ctx->lock_warned);
+
+  hc_fclose (&outfile_ctx->fp);
+}
+
+// The bounded appenders these used to define now live in src/shared.c, because potfile.c builds the
+// same kind of line into the same size of buffer and needs the same clamping. outfile_append_fmt ()
+// stays here: it is this file's JSON formatter, it carries a printf format attribute, and vsnprintf
+// bounds it already.
+
+static int outfile_append_fmt (char *buf, const int len, const char *fmt, ...)
+{
+  const int room = (int) HCBUFSIZ_LARGE - len;
+
+  va_list ap;
+
+  va_start (ap, fmt);
+
+  const int n = vsnprintf (buf + len, (size_t) room, fmt, ap);
+
+  va_end (ap);
+
+  if (n >= room) return len + room - 1;
+
+  return len + n;
+}
+
+int outfile_write (hashcat_ctx_t *hashcat_ctx, const char *out_buf, const int out_len, const unsigned char *plain_ptr, const u32 plain_len, const u64 crackpos, const unsigned char *username, const u32 user_len, const bool print_eol, char *tmp_buf)
+{
+  const hashconfig_t   *hashconfig   = hashcat_ctx->hashconfig;
+  const hashes_t       *hashes       = hashcat_ctx->hashes;
+  const user_options_t *user_options = hashcat_ctx->user_options;
+  outfile_ctx_t        *outfile_ctx  = hashcat_ctx->outfile_ctx;
+  status_ctx_t         *status_ctx   = hashcat_ctx->status_ctx;
+
+  int tmp_len = 0;
+
+  if (outfile_ctx->outfile_json == true)
+  {
+    tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '{');
+
+    if (user_len > 0)
+    {
+      if (username != NULL)
+      {
+        tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "\"username_hex\": ");
+
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+        tmp_len = hc_append_hex (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) username, (int) user_len);
+
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ',');
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ' ');
+      }
+    }
+
+    if (hashes->hashlist_mode == HL_MODE_FILE_BINARY)
+    {
+      tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "\"filename_hex\": ");
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+      tmp_len = hc_append_hex (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) hashes->hashfile, (int) strlen (hashes->hashfile));
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ',');
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ' ');
+    }
+    else
+    {
+      tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "\"hash_hex\": ");
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+      tmp_len = hc_append_hex (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) out_buf, (int) out_len);
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ',');
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ' ');
+    }
+
+    if (1) // plain
+    {
+      tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "\"password_hex\": ");
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+
+      tmp_len = hc_append_hex (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) plain_ptr, (int) plain_len);
+
+      tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '"');
+    }
+
+    tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '}');
+  }
+  else
+  {
+    const u32 outfile_format = (hashconfig->opts_type & OPTS_TYPE_PT_ALWAYS_HEXIFY) ? 5 : outfile_ctx->outfile_format;
+
+    if (user_len > 0)
+    {
+      if (username != NULL)
+      {
+        tmp_len = hc_append_raw (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) username, (int) user_len);
+
+        if (outfile_format & (OUTFILE_FMT_TIME_ABS | OUTFILE_FMT_TIME_REL | OUTFILE_FMT_HASH | OUTFILE_FMT_PLAIN | OUTFILE_FMT_HEXPLAIN | OUTFILE_FMT_CRACKPOS))
+        {
+          tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, hashconfig->separator);
+        }
+      }
+    }
+
+    if (outfile_format & OUTFILE_FMT_TIME_ABS)
+    {
+      time_t now;
+
+      time (&now);
+
+      tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "%" PRIu64, (u64) now);
+
+      if (outfile_format & (OUTFILE_FMT_TIME_REL | OUTFILE_FMT_HASH | OUTFILE_FMT_PLAIN | OUTFILE_FMT_HEXPLAIN | OUTFILE_FMT_CRACKPOS))
+      {
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, hashconfig->separator);
+      }
+    }
+
+    if (outfile_format & OUTFILE_FMT_TIME_REL)
+    {
+      time_t time_now;
+
+      time (&time_now);
+
+      time_t time_started = status_ctx->runtime_start;
+
+      u64 diff = 0;
+
+      if (time_now > time_started) // should always be true, but you never know
+      {
+        diff = (u64) time_now - (u64) time_started;
+      }
+
+      tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "%" PRIu64, diff);
+
+      if (outfile_format & (OUTFILE_FMT_HASH | OUTFILE_FMT_PLAIN | OUTFILE_FMT_HEXPLAIN | OUTFILE_FMT_CRACKPOS))
+      {
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, hashconfig->separator);
+      }
+    }
+
+    if (outfile_format & OUTFILE_FMT_HASH)
+    {
+      tmp_len = hc_append_raw (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) out_buf, (int) out_len);
+
+      if (outfile_format & (OUTFILE_FMT_PLAIN | OUTFILE_FMT_HEXPLAIN | OUTFILE_FMT_CRACKPOS))
+      {
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, hashconfig->separator);
+      }
+    }
+
+    if (outfile_format & OUTFILE_FMT_PLAIN)
+    {
+      bool convert_to_hex = false;
+
+      if (user_options->show == false)
+      {
+        if (user_options->outfile_autohex == true)
+        {
+          const bool always_ascii = (hashconfig->opts_type & OPTS_TYPE_PT_ALWAYS_ASCII) ? true : false;
+
+          convert_to_hex = need_hexify (plain_ptr, plain_len, hashconfig->separator, always_ascii);
+        }
+      }
+
+      if (convert_to_hex)
+      {
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '$');
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, 'H');
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, 'E');
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, 'X');
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, '[');
+
+        tmp_len = hc_append_hexify (tmp_buf, tmp_len, HCBUFSIZ_LARGE, plain_ptr, (int) plain_len);
+
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, ']');
+      }
+      else
+      {
+        tmp_len = hc_append_raw (tmp_buf, tmp_len, HCBUFSIZ_LARGE, (const u8 *) plain_ptr, (int) plain_len);
+      }
+
+      if (outfile_format & (OUTFILE_FMT_HEXPLAIN | OUTFILE_FMT_CRACKPOS))
+      {
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, hashconfig->separator);
+      }
+    }
+
+    if (outfile_format & OUTFILE_FMT_HEXPLAIN)
+    {
+      tmp_len = hc_append_hexify (tmp_buf, tmp_len, HCBUFSIZ_LARGE, plain_ptr, (int) plain_len);
+
+      if (outfile_format & (OUTFILE_FMT_CRACKPOS))
+      {
+        tmp_len = hc_append_chr (tmp_buf, tmp_len, HCBUFSIZ_LARGE, hashconfig->separator);
+      }
+    }
+
+    if (outfile_format & OUTFILE_FMT_CRACKPOS)
+    {
+      tmp_len = outfile_append_fmt (tmp_buf, tmp_len, "%" PRIu64, crackpos);
+    }
+  }
+
+  tmp_buf[tmp_len] = 0;
+
+  if (outfile_ctx->fp.pfp != NULL)
+  {
+    hc_fwrite (tmp_buf, tmp_len, 1, &outfile_ctx->fp);
+
+    if (print_eol == true)
+    {
+      hc_fwrite (EOL, strlen (EOL), 1, &outfile_ctx->fp);
+    }
+  }
+
+  return tmp_len;
+}

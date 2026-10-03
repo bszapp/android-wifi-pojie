@@ -19,12 +19,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.add
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.captionBar
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -62,6 +66,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,6 +77,7 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskLogEntry
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
+import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
 import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
@@ -94,6 +100,8 @@ import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.SnackbarHost
+import top.yukonga.miuix.kmp.basic.SnackbarHostState
 import top.yukonga.miuix.kmp.basic.ScrollBehavior
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TabRow
@@ -104,6 +112,7 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
+import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Download
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.icon.extended.Send
@@ -118,8 +127,11 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 @Composable
 fun LogScreen(
     viewModel: DefaultViewModel = viewModel(),
-    bottomInnerPadding: Dp = 0.dp,
+    snackbarHostState: SnackbarHostState? = null,
 ) {
+    val navigator = LocalNavigator.current
+    val bottomInnerPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
+        WindowInsets.captionBar.asPaddingValues().calculateBottomPadding()
     //TODO:加个终端关闭、主动新建终端、清空终端、直接发送快捷键或命令？
     val context = LocalContext.current
     val entries by viewModel.serviceLogs.entries.collectAsStateWithLifecycle()
@@ -249,6 +261,7 @@ fun LogScreen(
                     LogTopBar(
                         color = barColor,
                         scrollBehavior = scrollBehavior,
+                        onBack = { navigator.pop() },
                         showMenu = showMenu,
                         showCreateTerminalMenu = showCreateTerminalMenu,
                         rawViewEnabled = selectedRawViewEnabled,
@@ -405,6 +418,9 @@ fun LogScreen(
             }
         },
         popupHost = { },
+        snackbarHost = {
+            snackbarHostState?.let { SnackbarHost(state = it) }
+        },
         contentWindowInsets = WindowInsets.systemBars
             .add(WindowInsets.displayCutout)
             .only(WindowInsetsSides.Horizontal),
@@ -679,6 +695,7 @@ private fun TerminalSendDialog(
 private fun LogTopBar(
     color: Color,
     scrollBehavior: ScrollBehavior,
+    onBack: () -> Unit,
     showMenu: Boolean,
     showCreateTerminalMenu: Boolean,
     rawViewEnabled: Boolean,
@@ -751,6 +768,19 @@ private fun LogTopBar(
     TopAppBar(
         color = color,
         title = "日志",
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                val layoutDirection = LocalLayoutDirection.current
+                Icon(
+                    modifier = Modifier.graphicsLayer {
+                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                    },
+                    imageVector = MiuixIcons.Back,
+                    contentDescription = "返回",
+                    tint = colorScheme.onBackground,
+                )
+            }
+        },
         actions = {
             IconButton(onClick = onSave) {
                 Icon(

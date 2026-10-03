@@ -21,6 +21,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import kotlin.time.Duration.Companion.seconds
 
 class ProcessLauncher(
@@ -28,6 +29,7 @@ class ProcessLauncher(
     private val onAndroidApiError: (operation: String, error: Throwable) -> Unit,
     private val onServiceConnected: (IMainService, AndroidApiClient) -> Unit,
     private val onServiceDisconnected: () -> Unit,
+    private val onBeforeServiceStop: suspend (IMainService) -> Unit,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -294,12 +296,14 @@ class ProcessLauncher(
         launchJob?.cancel()
         launchJob = null
 
-        cleanupDeathRecipientOnly()
-        ToolboxServiceProvider.clearBinder()
-        activeLauncher = null
-        _state.value = StartupState()
-
-        Thread {
+        scope.launch {
+            try { if (service != null) withContext(Dispatchers.IO) { onBeforeServiceStop(service) } }
+            catch (error: Throwable) { onAndroidApiError("保存任务并退出服务", error); return@launch }
+            cleanupDeathRecipientOnly()
+            ToolboxServiceProvider.clearBinder()
+            activeLauncher = null
+            _state.value = StartupState()
+            withContext(Dispatchers.IO) {
             runCatching { service?.shutdown() }
             runCatching {
                 when (launcher) {
@@ -318,29 +322,31 @@ class ProcessLauncher(
                     }
                 }
             }
-        }.start()
+            }
+        }
     }
 
-    fun stop() {
+    fun stop(onStopped: () -> Unit = {}) {
         launchJob?.cancel()
         launchJob = null
 
         val service = mainService
         val toClose = activeLauncher
 
-        cleanupDeathRecipientOnly()
-        ToolboxServiceProvider.clearBinder()
-        activeLauncher = null
-
-        runCatching { service?.shutdown() }
-
-        _state.value = StartupState()
-
-        Log.d(TAG, "停止服务")
-
-        Thread {
-            toClose?.closeQuietly()
-        }.start()
+        scope.launch {
+            try { if (service != null) withContext(Dispatchers.IO) { onBeforeServiceStop(service) } }
+            catch (error: Throwable) { onAndroidApiError("保存任务并退出服务", error); return@launch }
+            cleanupDeathRecipientOnly()
+            ToolboxServiceProvider.clearBinder()
+            activeLauncher = null
+            withContext(Dispatchers.IO) {
+                runCatching { service?.shutdown() }
+                toClose?.closeQuietly()
+            }
+            _state.value = StartupState()
+            Log.d(TAG, "停止服务")
+            onStopped()
+        }
     }
 
     private suspend fun createLauncherAndBinder(mode: StartupMode): Pair<AutoCloseable, IBinder> =

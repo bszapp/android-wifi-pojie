@@ -3,9 +3,11 @@ package io.github.bszapp.wifitoolbox
 import android.app.Application
 import android.os.Process
 import android.util.Log
+import io.github.bszapp.wifitoolbox.hashcat.HashcatStartupCheck
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.IAppController
-import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiException
+import io.github.bszapp.wifitoolbox.error.AppErrorFormatter
+import io.github.bszapp.wifitoolbox.error.ErrorReportManager
 import io.github.bszapp.wifitoolbox.container.ContainerController
 import io.github.bszapp.wifitoolbox.contract.container.IContainerController
 import io.github.bszapp.wifitoolbox.contract.error.AppError
@@ -21,9 +23,6 @@ import io.github.bszapp.wifitoolbox.task.TaskController
 import io.github.bszapp.wifitoolbox.navigation.PredictiveBackController
 import io.github.bszapp.wifitoolbox.settings.SettingsManager
 import io.github.bszapp.wifitoolbox.wifilist.WifiListController
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,12 +38,19 @@ import kotlin.time.Duration.Companion.milliseconds
 
 class ToolboxApp : Application(), IAppController {
 
+    lateinit var errorReports: ErrorReportManager
+        private set
+    private var normalStartupStarted = false
+    internal val hasStartedRuntime: Boolean
+        get() = normalStartupStarted
+
     private lateinit var processLauncher: ProcessLauncher
     private lateinit var wifiListController: WifiListController
     private lateinit var serviceLogController: ServiceLogController
     private lateinit var appLogController: AppLogController
     private lateinit var terminalController: TerminalController
     private lateinit var taskController: TaskController
+    private lateinit var hashcatController: io.github.bszapp.wifitoolbox.hashcat.HashcatTaskController
     private lateinit var containerController: ContainerController
     override lateinit var settings: SettingsManager
         private set
@@ -74,13 +80,14 @@ class ToolboxApp : Application(), IAppController {
         override fun launch(mode: StartupMode) = processLauncher.launch(mode)
         override fun cancel() = processLauncher.cancel()
         override fun stop(exit: Boolean) {
-            processLauncher.stop()
-            if (exit) {
-                appScope.launch {
-                    delay(200.milliseconds)
-                    Process.killProcess(Process.myPid())
+            processLauncher.stop {
+                if (exit) {
+                    appScope.launch {
+                        delay(200.milliseconds)
+                        Process.killProcess(Process.myPid())
+                    }
+                    _exitRequests.tryEmit(Unit)
                 }
-                _exitRequests.tryEmit(Unit)
             }
         }
     }
@@ -100,12 +107,41 @@ class ToolboxApp : Application(), IAppController {
     override val tasks: TaskController
         get() = taskController
 
+    override val hashcat: io.github.bszapp.wifitoolbox.contract.hashcat.IHashcatController
+        get() = hashcatController
+
     override val containers: IContainerController
         get() = containerController
 
     override fun onCreate() {
         super.onCreate()
-        appLogController = AppLogController(scope = appScope).also { it.start() }
+        errorReports = ErrorReportManager(this)
+        errorReports.install(
+            captureLogs = { file ->
+                if (::appLogController.isInitialized) appLogController.saveCapturedLogs(file)
+            },
+            onFatalError = {
+                // Only App-owned work is cancelled. No service shutdown request is sent.
+                appScope.cancel()
+            },
+        )
+        // MainActivity selects report-only or normal startup from its launch Intent.
+        // Cached reports alone never put a newly opened App into report mode.
+    }
+
+    internal fun startNormalRuntime() {
+        errorReports.cancelScheduledRestart()
+        initializeRuntime()
+    }
+
+    /** Start a fresh App process through normal onCreate; leave the service untouched. */
+    fun restartFromErrorReport() = errorReports.restartApplication()
+
+    private fun initializeRuntime() {
+        if (normalStartupStarted) return
+        normalStartupStarted = true
+        appLogController = AppLogController(scope = appScope)
+        appLogController.start()
         settings = SettingsManager(this)
         predictiveBackController = PredictiveBackController(
             application = this,
@@ -125,6 +161,7 @@ class ToolboxApp : Application(), IAppController {
             scope = appScope,
             reportError = ::publishError,
         )
+        hashcatController = io.github.bszapp.wifitoolbox.hashcat.HashcatTaskController(this, appScope, ::publishError)
         containerController = ContainerController(
             context = this,
             scope = appScope,
@@ -132,6 +169,7 @@ class ToolboxApp : Application(), IAppController {
         )
         processLauncher = ProcessLauncher(
             context = this,
+            onBeforeServiceStop = hashcatController::prepareServiceShutdown,
             onAndroidApiError = { operation, error ->
                 publishError(
                     source = "App.AndroidApiClient",
@@ -146,6 +184,7 @@ class ToolboxApp : Application(), IAppController {
                 terminalController.connect(service)
                 taskController.connect(service)
                 containerController.connect(service)
+                hashcatController.connect(service)
             },
             onServiceDisconnected = {
                 wifiListController.disconnect()
@@ -153,10 +192,14 @@ class ToolboxApp : Application(), IAppController {
                 terminalController.disconnect()
                 taskController.disconnect()
                 containerController.disconnect()
+                hashcatController.disconnect()
             },
         )
         AppControllerProvider.register(this)
         processLauncher.tryAutoReconnect()
+        appScope.launch(Dispatchers.IO) {
+            HashcatStartupCheck.run(this@ToolboxApp)
+        }
     }
 
     /** App 内唯一错误发布入口。UI 只监听 [errors]。 */
@@ -172,35 +215,13 @@ class ToolboxApp : Application(), IAppController {
             ?.takeIf { it.isNotBlank() }
             ?: error.javaClass.name
 
-        val details = buildString {
-            appendLine("时间：${formatTimestamp(now)}")
-            appendLine("来源：$source")
-            appendLine("操作：$operation")
-            appendLine(
-                "线程：${Thread.currentThread().name} " +
-                    "(id=${Thread.currentThread().id})",
-            )
-            appendLine("异常类型：${error.javaClass.name}")
-            appendLine("异常消息：${error.message ?: "<无>"}")
-
-            val androidApiRemoteStack =
-                (error as? AndroidApiException)?.remoteStackTrace
-            if (!androidApiRemoteStack.isNullOrBlank()) {
-                appendLine()
-                appendLine("Service AndroidApi 调用栈：")
-                appendLine(androidApiRemoteStack)
-            }
-
-            if (!remoteDetails.isNullOrBlank()) {
-                appendLine()
-                appendLine("Service 远端调用栈：")
-                appendLine(remoteDetails)
-            }
-
-            appendLine()
-            appendLine("App 调用栈：")
-            append(error.stackTraceToString())
-        }
+        val details = AppErrorFormatter.format(
+            source = source,
+            operation = operation,
+            error = error,
+            remoteDetails = remoteDetails,
+            timestampMillis = now,
+        ).fullText
 
         val appError = AppError(
             source = source,
@@ -216,15 +237,11 @@ class ToolboxApp : Application(), IAppController {
         }
     }
 
-    private fun formatTimestamp(timestampMillis: Long): String =
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
-            .format(Date(timestampMillis))
-
     override fun onTerminate() {
         super.onTerminate()
-        predictiveBackController.stop()
-        terminalController.close()
-        appLogController.close()
+        if (::predictiveBackController.isInitialized) predictiveBackController.stop()
+        if (::terminalController.isInitialized) terminalController.close()
+        if (::appLogController.isInitialized) appLogController.close()
         appScope.cancel()
     }
 

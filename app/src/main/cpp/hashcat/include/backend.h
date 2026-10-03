@@ -1,0 +1,117 @@
+/**
+ * Author......: See docs/credits.txt
+ * License.....: MIT
+ */
+
+#ifndef HC_BACKEND_H
+#define HC_BACKEND_H
+
+#include <stdio.h>
+#include <errno.h>
+
+static const char CL_VENDOR_AMD1[]              = "Advanced Micro Devices, Inc.";
+static const char CL_VENDOR_AMD2[]              = "AuthenticAMD";
+static const char CL_VENDOR_AMD_USE_INTEL[]     = "GenuineIntel";
+static const char CL_VENDOR_APPLE[]             = "Apple";
+static const char CL_VENDOR_APPLE_USE_AMD[]     = "AMD";
+static const char CL_VENDOR_APPLE_USE_NV[]      = "NVIDIA";
+static const char CL_VENDOR_APPLE_USE_INTEL[]   = "Intel";
+static const char CL_VENDOR_APPLE_USE_INTEL2[]  = "Intel Inc.";
+static const char CL_VENDOR_INTEL_BEIGNET[]     = "Intel";
+static const char CL_VENDOR_INTEL_SDK[]         = "Intel(R) Corporation";
+static const char CL_VENDOR_MESA[]              = "Mesa/X.org";
+static const char CL_VENDOR_NV[]                = "NVIDIA Corporation";
+static const char CL_VENDOR_POCL[]              = "The pocl project";
+static const char CL_VENDOR_MICROSOFT[]         = "Microsoft";
+
+int  backend_ctx_init                       (hashcat_ctx_t *hashcat_ctx);
+void backend_ctx_destroy                    (hashcat_ctx_t *hashcat_ctx);
+
+int  backend_ctx_devices_init               (hashcat_ctx_t *hashcat_ctx, const int comptime);
+void backend_ctx_devices_destroy            (hashcat_ctx_t *hashcat_ctx);
+void backend_ctx_devices_sync_tuning        (hashcat_ctx_t *hashcat_ctx);
+bool backend_ctx_devices_tuning_restore     (hashcat_ctx_t *hashcat_ctx);
+
+// Presentation groups. A group is devices that are the same kind of thing, reported as one line. It
+// exists for the status view only: work is fed, tuned and failed per DEVICE. See the comment on
+// backend_ctx_devices_group.
+
+void backend_ctx_devices_group              (hashcat_ctx_t *hashcat_ctx);
+bool backend_ctx_device_is_group_leader     (const hashcat_ctx_t *hashcat_ctx, const int backend_devices_idx);
+int  backend_ctx_device_group_size          (const hashcat_ctx_t *hashcat_ctx, const int backend_devices_idx, int *last_idx);
+void backend_ctx_devices_update_power       (hashcat_ctx_t *hashcat_ctx);
+void backend_ctx_devices_kernel_loops       (hashcat_ctx_t *hashcat_ctx);
+
+// What one device will hold of the pcfg pool, and in part_max the largest piece it takes at a time.
+// The feed is told this before it packs, the backend checks against it when it allocates, and both
+// get the answer the first call worked out.
+
+u64  backend_pcfg_pool_budget               (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, u64 *part_max);
+
+void backend_session_context_reset          (hashcat_ctx_t *hashcat_ctx);
+int  backend_session_begin                  (hashcat_ctx_t *hashcat_ctx);
+void backend_session_pin_cells              (hashcat_ctx_t *hashcat_ctx);
+void backend_session_destroy                (hashcat_ctx_t *hashcat_ctx);
+void backend_session_reset                  (hashcat_ctx_t *hashcat_ctx);
+int  backend_session_update_combinator      (hashcat_ctx_t *hashcat_ctx);
+int  backend_session_update_mp              (hashcat_ctx_t *hashcat_ctx);
+int  backend_session_update_mp_rl           (hashcat_ctx_t *hashcat_ctx, const u32 css_cnt_l, const u32 css_cnt_r);
+
+void generate_source_kernel_filename        (const bool slow_candidates, const u32 attack_exec, const u32 attack_kern, const u32 kern_type, const u32 opti_type, char *shared_dir, char *source_file);
+void generate_cached_kernel_filename        (const bool slow_candidates, const u32 attack_exec, const u32 attack_kern, const u32 kern_type, const u32 opti_type, char *cache_dir, const char *device_name_chksum, char *cached_file, bool is_metal);
+void generate_source_kernel_shared_filename (char *shared_dir, char *source_file);
+void generate_cached_kernel_shared_filename (char *cache_dir, const char *device_name_chksum, char *cached_file, bool is_metal);
+void generate_source_kernel_mp_filename     (const u32 opti_type, const u64 opts_type, char *shared_dir, char *source_file);
+void generate_cached_kernel_mp_filename     (const u32 opti_type, const u64 opts_type, char *cache_dir, const char *device_name_chksum, char *cached_file, bool is_metal);
+void generate_source_kernel_amp_filename    (const u32 attack_kern, char *shared_dir, char *source_file);
+void generate_cached_kernel_amp_filename    (const u32 attack_kern, char *cache_dir, const char *device_name_chksum, char *cached_file, bool is_metal);
+
+bool read_kernel_binary (hashcat_ctx_t *hashcat_ctx, const char *kernel_file, size_t *kernel_lengths, char **kernel_sources);
+
+void pipe_enable                            (const bool enabled, const bool json);
+void pipe_mark                              (hc_timer_t *timer);
+void pipe_acc                               (hc_device_param_t *device_param, const pipe_slot_t slot, hc_timer_t *timer);
+void pipe_launch_done                       (hc_device_param_t *device_param, const u64 cands);
+
+int gidd_to_pw_t                            (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u64 gidd, pw_t *pw);
+
+u64 gidvid_to_feed_pos                      (const hc_device_param_t *device_param, const u64 gidvid);
+
+bool is_opti_kernel_no_pcfg                 (const hashcat_ctx_t *hashcat_ctx);
+
+int choose_kernel                           (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u32 highest_pw_len, const u64 pws_pos, const u64 pws_cnt, const u32 fast_iteration, const u32 salt_pos, const bool is_autotune);
+
+// The device primitives. Each of these is the one place a backend is chosen for the operation it
+// names, so code above them works in slots and sizes rather than in four runtimes.
+
+void *hc_dev_kern_arg                       (hc_device_param_t *device_param, const hc_dev_buf_t slot);
+void *hc_dev_kern_arg_pool                  (hc_device_param_t *device_param, const u32 i);
+
+int hc_dev_bind                             (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param);
+int hc_dev_unbind                           (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param);
+int hc_dev_synchronize                      (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param);
+int hc_dev_queue_flush                      (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param);
+
+int hc_dev_memcpy_h2d                       (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_dev_mem_t mem, const u64 offset, const void *src, const u64 size);
+int hc_dev_memcpy_d2h                       (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, void *dst, hc_dev_mem_t mem, const u64 offset, const u64 size);
+int hc_dev_memcpy_d2d                       (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_dev_mem_t dst, const u64 dst_offset, hc_dev_mem_t src, const u64 src_offset, const u64 size);
+
+int run_kernel_atinit                       (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_dev_mem_t mem, const u64 num);
+int run_kernel_utf8toutf16le                (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_dev_mem_t mem, const u64 num);
+int run_kernel_bzero                        (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_dev_mem_t mem, const u64 size);
+int run_kernel_memset32                     (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, hc_dev_mem_t mem, const u64 offset, const u32 value, const u64 size);
+
+int run_kernel                              (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u32 kern_run, const u64 pws_pos, const u64 num, const u32 event_update, const u32 iteration, const bool is_autotune);
+int run_bridge_loop                         (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u32 salt_pos, const u64 pws_cnt, const u32 loop_pos, const u32 loop_cnt, const u32 event_update);
+int run_kernel_mp                           (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u32 kern_run, const u64 num);
+int run_kernel_tm                           (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param);
+int run_kernel_amp                          (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u64 num);
+int run_kernel_decompress                   (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u64 num);
+int run_copy                                (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u64 pws_cnt);
+int pcfg_seed_cells                         (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param);
+int run_cracker                             (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const u64 pws_pos, const u64 pws_cnt);
+
+HC_THREAD_FUNC hook12_thread (void *p);
+HC_THREAD_FUNC hook23_thread (void *p);
+
+#endif // HC_BACKEND_H

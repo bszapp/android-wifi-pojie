@@ -7,7 +7,9 @@ plugins {
 android {
     namespace = "io.github.bszapp.wifitoolbox.uidefault"
     compileSdk {
-        version = release(37)
+        version = release(37) {
+            minorApiLevel = 2
+        }
     }
 
     defaultConfig {
@@ -34,6 +36,7 @@ android {
 
 dependencies {
     implementation(project(":contract"))
+    implementation(project(":scripta"))
 
     implementation(platform(libs.androidx.compose.bom))
 

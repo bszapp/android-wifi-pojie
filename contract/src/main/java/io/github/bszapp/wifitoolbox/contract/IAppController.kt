@@ -20,6 +20,7 @@ interface IAppController {
     val appLogs: ILogController
     val terminals: ITerminalController
     val tasks: ITaskController
+    val hashcat: io.github.bszapp.wifitoolbox.contract.hashcat.IHashcatController
     val settings: ISettingsManager
     val containers: IContainerController
     val errors: SharedFlow<AppError>

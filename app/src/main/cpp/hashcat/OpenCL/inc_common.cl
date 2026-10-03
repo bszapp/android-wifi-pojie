@@ -1,0 +1,5675 @@
+/**
+ * Author......: See docs/credits.txt
+ * License.....: MIT
+ */
+
+#include "inc_vendor.h"
+#include "inc_types.h"
+#include "inc_platform.h"
+#include "inc_common.h"
+
+/**
+ * vendor specific (or generic) functions
+ */
+
+// Every converter below has an OpenCL arm that does not go through vconv32_t or vconv64_t. The
+// union is a type pun, and Mesa does not promote one to registers: each use becomes a store to
+// scratch memory and a load back. whirlpool_transform() takes a byte out of a 64 bit word 1280
+// times per block, which is 2370 scratch operations in mode 6100 where shifting and casting costs
+// 2. Every other backend keeps the union.
+
+// One word of a message block, bounded by how many of its bytes are really inside len. A word the
+// caller never supplied is not read at all. That is what lets a caller pass a buffer sized to its
+// own data rather than to the block, and stop zero padding the remainder.
+//
+// The mask follows the byte order of the words the caller handed over. A caller that supplies
+// little endian words keeps the low avail bytes, and one that supplies big endian words keeps the
+// high avail bytes, because there the first character of a word sits in its top byte. The shift is
+// written over (4 - avail) rather than over avail so that it stays inside 0 to 24 for every avail
+// that reaches it.
+
+DECLSPEC u32 hc_bounded_word_le_S (PRIVATE_AS const u32 *w, const int idx, const int avail)
+{
+  if (avail <= 0) return 0;
+
+  const u32 v = w[idx];
+
+  if (avail >= 4) return v;
+
+  const u32 r = v & (0xffffffffU >> ((4 - avail) * 8));
+
+  return r;
+}
+
+DECLSPEC u32 hc_bounded_word_be_S (PRIVATE_AS const u32 *w, const int idx, const int avail)
+{
+  if (avail <= 0) return 0;
+
+  const u32 v = w[idx];
+
+  if (avail >= 4) return v;
+
+  const u32 r = v & (0xffffffffU << ((4 - avail) * 8));
+
+  return r;
+}
+
+DECLSPEC u32 hc_bounded_word_global_le_S (GLOBAL_AS const u32 *w, const int idx, const int avail)
+{
+  if (avail <= 0) return 0;
+
+  const u32 v = w[idx];
+
+  if (avail >= 4) return v;
+
+  const u32 r = v & (0xffffffffU >> ((4 - avail) * 8));
+
+  return r;
+}
+
+DECLSPEC u32 hc_bounded_word_global_be_S (GLOBAL_AS const u32 *w, const int idx, const int avail)
+{
+  if (avail <= 0) return 0;
+
+  const u32 v = w[idx];
+
+  if (avail >= 4) return v;
+
+  const u32 r = v & (0xffffffffU << ((4 - avail) * 8));
+
+  return r;
+}
+
+// avail comes from len, which is scalar, so every lane of the vector is bounded the same way and
+// the mask stays a scalar.
+
+DECLSPEC u32x hc_bounded_word_le (PRIVATE_AS const u32x *w, const int idx, const int avail)
+{
+  if (avail <= 0) return 0;
+
+  const u32x v = w[idx];
+
+  if (avail >= 4) return v;
+
+  const u32x r = v & (0xffffffffU >> ((4 - avail) * 8));
+
+  return r;
+}
+
+DECLSPEC u32x hc_bounded_word_be (PRIVATE_AS const u32x *w, const int idx, const int avail)
+{
+  if (avail <= 0) return 0;
+
+  const u32x v = w[idx];
+
+  if (avail >= 4) return v;
+
+  const u32x r = v & (0xffffffffU << ((4 - avail) * 8));
+
+  return r;
+}
+
+DECLSPEC u8 v8a_from_v32_S (const u32 v32)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v32 >>  0);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v32 = v32;
+
+  return v.v8.a;
+  #endif
+}
+
+DECLSPEC u8 v8b_from_v32_S (const u32 v32)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v32 >>  8);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v32 = v32;
+
+  return v.v8.b;
+  #endif
+}
+
+DECLSPEC u8 v8c_from_v32_S (const u32 v32)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v32 >> 16);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v32 = v32;
+
+  return v.v8.c;
+  #endif
+}
+
+DECLSPEC u8 v8d_from_v32_S (const u32 v32)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v32 >> 24);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v32 = v32;
+
+  return v.v8.d;
+  #endif
+}
+
+DECLSPEC u8 v8a_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v64 >>  0);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.a;
+  #endif
+}
+
+DECLSPEC u8 v8b_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v64 >>  8);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.b;
+  #endif
+}
+
+DECLSPEC u8 v8c_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v64 >> 16);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.c;
+  #endif
+}
+
+DECLSPEC u8 v8d_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u8 r = (u8) (v64 >> 24);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.d;
+  #endif
+}
+
+DECLSPEC u8 v8e_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u32 hi = (u32) (v64 >> 32);
+
+  const u8 r = (u8) (hi >> 0);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.e;
+  #endif
+}
+
+DECLSPEC u8 v8f_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u32 hi = (u32) (v64 >> 32);
+
+  const u8 r = (u8) (hi >> 8);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.f;
+  #endif
+}
+
+DECLSPEC u8 v8g_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u32 hi = (u32) (v64 >> 32);
+
+  const u8 r = (u8) (hi >> 16);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.g;
+  #endif
+}
+
+DECLSPEC u8 v8h_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u32 hi = (u32) (v64 >> 32);
+
+  const u8 r = (u8) (hi >> 24);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v8.h;
+  #endif
+}
+
+DECLSPEC u8x v8a_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8a_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8a_from_v64_S (a.s0);
+  r.s1 = v8a_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8a_from_v64_S (a.s2);
+  r.s3 = v8a_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8a_from_v64_S (a.s4);
+  r.s5 = v8a_from_v64_S (a.s5);
+  r.s6 = v8a_from_v64_S (a.s6);
+  r.s7 = v8a_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8a_from_v64_S (a.s8);
+  r.s9 = v8a_from_v64_S (a.s9);
+  r.sa = v8a_from_v64_S (a.sa);
+  r.sb = v8a_from_v64_S (a.sb);
+  r.sc = v8a_from_v64_S (a.sc);
+  r.sd = v8a_from_v64_S (a.sd);
+  r.se = v8a_from_v64_S (a.se);
+  r.sf = v8a_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8b_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8b_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8b_from_v64_S (a.s0);
+  r.s1 = v8b_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8b_from_v64_S (a.s2);
+  r.s3 = v8b_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8b_from_v64_S (a.s4);
+  r.s5 = v8b_from_v64_S (a.s5);
+  r.s6 = v8b_from_v64_S (a.s6);
+  r.s7 = v8b_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8b_from_v64_S (a.s8);
+  r.s9 = v8b_from_v64_S (a.s9);
+  r.sa = v8b_from_v64_S (a.sa);
+  r.sb = v8b_from_v64_S (a.sb);
+  r.sc = v8b_from_v64_S (a.sc);
+  r.sd = v8b_from_v64_S (a.sd);
+  r.se = v8b_from_v64_S (a.se);
+  r.sf = v8b_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8c_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8c_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8c_from_v64_S (a.s0);
+  r.s1 = v8c_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8c_from_v64_S (a.s2);
+  r.s3 = v8c_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8c_from_v64_S (a.s4);
+  r.s5 = v8c_from_v64_S (a.s5);
+  r.s6 = v8c_from_v64_S (a.s6);
+  r.s7 = v8c_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8c_from_v64_S (a.s8);
+  r.s9 = v8c_from_v64_S (a.s9);
+  r.sa = v8c_from_v64_S (a.sa);
+  r.sb = v8c_from_v64_S (a.sb);
+  r.sc = v8c_from_v64_S (a.sc);
+  r.sd = v8c_from_v64_S (a.sd);
+  r.se = v8c_from_v64_S (a.se);
+  r.sf = v8c_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8d_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8d_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8d_from_v64_S (a.s0);
+  r.s1 = v8d_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8d_from_v64_S (a.s2);
+  r.s3 = v8d_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8d_from_v64_S (a.s4);
+  r.s5 = v8d_from_v64_S (a.s5);
+  r.s6 = v8d_from_v64_S (a.s6);
+  r.s7 = v8d_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8d_from_v64_S (a.s8);
+  r.s9 = v8d_from_v64_S (a.s9);
+  r.sa = v8d_from_v64_S (a.sa);
+  r.sb = v8d_from_v64_S (a.sb);
+  r.sc = v8d_from_v64_S (a.sc);
+  r.sd = v8d_from_v64_S (a.sd);
+  r.se = v8d_from_v64_S (a.se);
+  r.sf = v8d_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8e_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8e_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8e_from_v64_S (a.s0);
+  r.s1 = v8e_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8e_from_v64_S (a.s2);
+  r.s3 = v8e_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8e_from_v64_S (a.s4);
+  r.s5 = v8e_from_v64_S (a.s5);
+  r.s6 = v8e_from_v64_S (a.s6);
+  r.s7 = v8e_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8e_from_v64_S (a.s8);
+  r.s9 = v8e_from_v64_S (a.s9);
+  r.sa = v8e_from_v64_S (a.sa);
+  r.sb = v8e_from_v64_S (a.sb);
+  r.sc = v8e_from_v64_S (a.sc);
+  r.sd = v8e_from_v64_S (a.sd);
+  r.se = v8e_from_v64_S (a.se);
+  r.sf = v8e_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8f_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8f_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8f_from_v64_S (a.s0);
+  r.s1 = v8f_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8f_from_v64_S (a.s2);
+  r.s3 = v8f_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8f_from_v64_S (a.s4);
+  r.s5 = v8f_from_v64_S (a.s5);
+  r.s6 = v8f_from_v64_S (a.s6);
+  r.s7 = v8f_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8f_from_v64_S (a.s8);
+  r.s9 = v8f_from_v64_S (a.s9);
+  r.sa = v8f_from_v64_S (a.sa);
+  r.sb = v8f_from_v64_S (a.sb);
+  r.sc = v8f_from_v64_S (a.sc);
+  r.sd = v8f_from_v64_S (a.sd);
+  r.se = v8f_from_v64_S (a.se);
+  r.sf = v8f_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8g_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8g_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8g_from_v64_S (a.s0);
+  r.s1 = v8g_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8g_from_v64_S (a.s2);
+  r.s3 = v8g_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8g_from_v64_S (a.s4);
+  r.s5 = v8g_from_v64_S (a.s5);
+  r.s6 = v8g_from_v64_S (a.s6);
+  r.s7 = v8g_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8g_from_v64_S (a.s8);
+  r.s9 = v8g_from_v64_S (a.s9);
+  r.sa = v8g_from_v64_S (a.sa);
+  r.sb = v8g_from_v64_S (a.sb);
+  r.sc = v8g_from_v64_S (a.sc);
+  r.sd = v8g_from_v64_S (a.sd);
+  r.se = v8g_from_v64_S (a.se);
+  r.sf = v8g_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u8x v8h_from_v64 (u64x a)
+{
+  u8x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = v8h_from_v64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v8h_from_v64_S (a.s0);
+  r.s1 = v8h_from_v64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v8h_from_v64_S (a.s2);
+  r.s3 = v8h_from_v64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v8h_from_v64_S (a.s4);
+  r.s5 = v8h_from_v64_S (a.s5);
+  r.s6 = v8h_from_v64_S (a.s6);
+  r.s7 = v8h_from_v64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v8h_from_v64_S (a.s8);
+  r.s9 = v8h_from_v64_S (a.s9);
+  r.sa = v8h_from_v64_S (a.sa);
+  r.sb = v8h_from_v64_S (a.sb);
+  r.sc = v8h_from_v64_S (a.sc);
+  r.sd = v8h_from_v64_S (a.sd);
+  r.se = v8h_from_v64_S (a.se);
+  r.sf = v8h_from_v64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u16 v16a_from_v32_S (const u32 v32)
+{
+  #ifdef IS_OPENCL
+  const u16 r = (u16) (v32 >>  0);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v32 = v32;
+
+  return v.v16.a;
+  #endif
+}
+
+DECLSPEC u16 v16b_from_v32_S (const u32 v32)
+{
+  #ifdef IS_OPENCL
+  const u16 r = (u16) (v32 >> 16);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v32 = v32;
+
+  return v.v16.b;
+  #endif
+}
+
+DECLSPEC u32 v32_from_v16ab_S (const u16 v16a, const u16 v16b)
+{
+  #ifdef IS_OPENCL
+  const u32 r = ((u32) v16b << 16) | ((u32) v16a >> 0);
+
+  return r;
+  #else
+  vconv32_t v;
+
+  v.v16.a = v16a;
+  v.v16.b = v16b;
+
+  return v.v32;
+  #endif
+}
+
+DECLSPEC u32 v32a_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u32 r = (u32) (v64 >>  0);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v32.a;
+  #endif
+}
+
+DECLSPEC u32 v32b_from_v64_S (const u64 v64)
+{
+  #ifdef IS_OPENCL
+  const u32 r = (u32) (v64 >> 32);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v64 = v64;
+
+  return v.v32.b;
+  #endif
+}
+
+DECLSPEC u64 v64_from_v32ab_S (const u32 v32a, const u32 v32b)
+{
+  // v32a is the low half and v32b the high half. upsample() takes them the other way round. It is
+  // an OpenCL builtin that HIP does not have, so this arm has to stay inside IS_OPENCL.
+
+  #ifdef IS_OPENCL
+  const u64 r = upsample (v32b, v32a);
+
+  return r;
+  #else
+  vconv64_t v;
+
+  v.v32.a = v32a;
+  v.v32.b = v32b;
+
+  return v.v64;
+  #endif
+}
+
+// unpack function are similar, but always return u32
+
+DECLSPEC u32x unpack_v8a_from_v32 (const u32x v32)
+{
+  u32x r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+
+  #if VECT_SIZE == 1
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r) : "r"(v32));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s0) : "r"(v32.s0));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s1) : "r"(v32.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s2) : "r"(v32.s2));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s3) : "r"(v32.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s4) : "r"(v32.s4));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s5) : "r"(v32.s5));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s6) : "r"(v32.s6));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s7) : "r"(v32.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s8) : "r"(v32.s8));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.s9) : "r"(v32.s9));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.sa) : "r"(v32.sa));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.sb) : "r"(v32.sb));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.sc) : "r"(v32.sc));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.sd) : "r"(v32.sd));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.se) : "r"(v32.se));
+  asm volatile ("bfe.u32 %0, %1,  0, 8;" : "=r"(r.sf) : "r"(v32.sf));
+  #endif
+
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 0, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 0) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32x unpack_v8b_from_v32 (const u32x v32)
+{
+  u32x r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+
+  #if VECT_SIZE == 1
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r) : "r"(v32));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s0) : "r"(v32.s0));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s1) : "r"(v32.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s2) : "r"(v32.s2));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s3) : "r"(v32.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s4) : "r"(v32.s4));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s5) : "r"(v32.s5));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s6) : "r"(v32.s6));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s7) : "r"(v32.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s8) : "r"(v32.s8));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.s9) : "r"(v32.s9));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.sa) : "r"(v32.sa));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.sb) : "r"(v32.sb));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.sc) : "r"(v32.sc));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.sd) : "r"(v32.sd));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.se) : "r"(v32.se));
+  asm volatile ("bfe.u32 %0, %1,  8, 8;" : "=r"(r.sf) : "r"(v32.sf));
+  #endif
+
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 8, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 8) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32x unpack_v8c_from_v32 (const u32x v32)
+{
+  u32x r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+
+  #if VECT_SIZE == 1
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r) : "r"(v32));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s0) : "r"(v32.s0));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s1) : "r"(v32.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s2) : "r"(v32.s2));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s3) : "r"(v32.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s4) : "r"(v32.s4));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s5) : "r"(v32.s5));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s6) : "r"(v32.s6));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s7) : "r"(v32.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s8) : "r"(v32.s8));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.s9) : "r"(v32.s9));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.sa) : "r"(v32.sa));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.sb) : "r"(v32.sb));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.sc) : "r"(v32.sc));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.sd) : "r"(v32.sd));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.se) : "r"(v32.se));
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r.sf) : "r"(v32.sf));
+  #endif
+
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 16, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 16) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32x unpack_v8d_from_v32 (const u32x v32)
+{
+  u32x r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+
+  #if VECT_SIZE == 1
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r) : "r"(v32));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s0) : "r"(v32.s0));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s1) : "r"(v32.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s2) : "r"(v32.s2));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s3) : "r"(v32.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s4) : "r"(v32.s4));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s5) : "r"(v32.s5));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s6) : "r"(v32.s6));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s7) : "r"(v32.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s8) : "r"(v32.s8));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.s9) : "r"(v32.s9));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.sa) : "r"(v32.sa));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.sb) : "r"(v32.sb));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.sc) : "r"(v32.sc));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.sd) : "r"(v32.sd));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.se) : "r"(v32.se));
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r.sf) : "r"(v32.sf));
+  #endif
+
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 24, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 24) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 unpack_v8a_from_v32_S (const u32 v32)
+{
+  u32 r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+  asm volatile ("bfe.u32 %0, %1, 0, 8;" : "=r"(r) : "r"(v32));
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 0, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 0) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 unpack_v8b_from_v32_S (const u32 v32)
+{
+  u32 r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+  asm volatile ("bfe.u32 %0, %1, 8, 8;" : "=r"(r) : "r"(v32));
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 8, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 8) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 unpack_v8c_from_v32_S (const u32 v32)
+{
+  u32 r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+  asm volatile ("bfe.u32 %0, %1, 16, 8;" : "=r"(r) : "r"(v32));
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 16, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 16) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 unpack_v8d_from_v32_S (const u32 v32)
+{
+  u32 r = 0;
+
+  #if   defined IS_NV  && HAS_BFE  == 1
+  asm volatile ("bfe.u32 %0, %1, 24, 8;" : "=r"(r) : "r"(v32));
+  //#elif (defined IS_AMD || defined IS_HIP) && HAS_VBFE == 1
+  //__asm__ __volatile__ ("V_BFE_U32 %0, %1, 24, 8;" : "=v"(r) : "v"(v32));
+  #else
+  r = (v32 >> 24) & 0xff;
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 l32_from_64_S (u64 a)
+{
+  return v32a_from_v64_S (a);
+}
+
+DECLSPEC u32 h32_from_64_S (u64 a)
+{
+  return v32b_from_v64_S (a);
+}
+
+DECLSPEC u64 hl32_to_64_S (const u32 a, const u32 b)
+{
+  return v64_from_v32ab_S (b, a);
+}
+
+DECLSPEC u32x l32_from_64 (u64x a)
+{
+  u32x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = l32_from_64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = l32_from_64_S (a.s0);
+  r.s1 = l32_from_64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = l32_from_64_S (a.s2);
+  r.s3 = l32_from_64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = l32_from_64_S (a.s4);
+  r.s5 = l32_from_64_S (a.s5);
+  r.s6 = l32_from_64_S (a.s6);
+  r.s7 = l32_from_64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = l32_from_64_S (a.s8);
+  r.s9 = l32_from_64_S (a.s9);
+  r.sa = l32_from_64_S (a.sa);
+  r.sb = l32_from_64_S (a.sb);
+  r.sc = l32_from_64_S (a.sc);
+  r.sd = l32_from_64_S (a.sd);
+  r.se = l32_from_64_S (a.se);
+  r.sf = l32_from_64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32x h32_from_64 (u64x a)
+{
+  u32x r = 0;
+
+  #if VECT_SIZE == 1
+  r    = h32_from_64_S (a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = h32_from_64_S (a.s0);
+  r.s1 = h32_from_64_S (a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = h32_from_64_S (a.s2);
+  r.s3 = h32_from_64_S (a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = h32_from_64_S (a.s4);
+  r.s5 = h32_from_64_S (a.s5);
+  r.s6 = h32_from_64_S (a.s6);
+  r.s7 = h32_from_64_S (a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = h32_from_64_S (a.s8);
+  r.s9 = h32_from_64_S (a.s9);
+  r.sa = h32_from_64_S (a.sa);
+  r.sb = h32_from_64_S (a.sb);
+  r.sc = h32_from_64_S (a.sc);
+  r.sd = h32_from_64_S (a.sd);
+  r.se = h32_from_64_S (a.se);
+  r.sf = h32_from_64_S (a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u64x hl32_to_64 (const u32x a, const u32x b)
+{
+  u64x r;
+
+  #if VECT_SIZE == 1
+  r    = v64_from_v32ab_S  (b   , a);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = v64_from_v32ab_S  (b.s0, a.s0);
+  r.s1 = v64_from_v32ab_S  (b.s1, a.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = v64_from_v32ab_S  (b.s2, a.s2);
+  r.s3 = v64_from_v32ab_S  (b.s3, a.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = v64_from_v32ab_S  (b.s4, a.s4);
+  r.s5 = v64_from_v32ab_S  (b.s5, a.s5);
+  r.s6 = v64_from_v32ab_S  (b.s6, a.s6);
+  r.s7 = v64_from_v32ab_S  (b.s7, a.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = v64_from_v32ab_S  (b.s8, a.s8);
+  r.s9 = v64_from_v32ab_S  (b.s9, a.s9);
+  r.sa = v64_from_v32ab_S  (b.sa, a.sa);
+  r.sb = v64_from_v32ab_S  (b.sb, a.sb);
+  r.sc = v64_from_v32ab_S  (b.sc, a.sc);
+  r.sd = v64_from_v32ab_S  (b.sd, a.sd);
+  r.se = v64_from_v32ab_S  (b.se, a.se);
+  r.sf = v64_from_v32ab_S  (b.sf, a.sf);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 u16_bin_to_u32_hex_lsn (const u32 v)
+{
+  const u32 v0 = (v >> 0) & 15;
+  const u32 v1 = (v >> 4) & 15;
+
+  return ((v0 < 10) ? '0' + v0 : 'a' - 10 + v0) << 8
+       | ((v1 < 10) ? '0' + v1 : 'a' - 10 + v1) << 0;
+}
+
+DECLSPEC u32 u16_bin_to_u32_hex_msn (const u32 v)
+{
+  const u32 v0 = (v >> 4) & 15;
+  const u32 v1 = (v >> 0) & 15;
+
+  return ((v0 < 10) ? '0' + v0 : 'a' - 10 + v0) << 8
+       | ((v1 < 10) ? '0' + v1 : 'a' - 10 + v1) << 0;
+}
+
+// bit rotates
+//
+// For HC_CPU_OPENCL_EMU_H we dont need to care about vector functions
+// The VECT_SIZE is guaranteed to be set to 1 from cpu_opencl_emu.h
+
+DECLSPEC u32x hc_rotl32 (const u32x a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotl32 (a, n);
+  #elif defined IS_CUDA || defined IS_HIP
+  return rotl32 (a, n);
+  #else
+  #ifdef USE_ROTATE
+  return rotate (a, make_u32x (n));
+  #else
+  return ((a << n) | (a >> (32 - n)));
+  #endif
+  #endif
+}
+
+DECLSPEC u32x hc_rotr32 (const u32x a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotr32 (a, n);
+  #elif defined IS_CUDA || defined IS_HIP
+  return rotr32 (a, n);
+  #else
+  #ifdef USE_ROTATE
+  return rotate (a, make_u32x (32 - n));
+  #else
+  return ((a >> n) | (a << (32 - n)));
+  #endif
+  #endif
+}
+
+DECLSPEC u32 hc_rotl32_S (const u32 a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotl32 (a, n);
+  #elif defined IS_CUDA || defined IS_HIP
+  return rotl32_S (a, n);
+  #else
+  #ifdef USE_ROTATE
+  return rotate (a, (u32) (n));
+  #else
+  return ((a << n) | (a >> (32 - n)));
+  #endif
+  #endif
+}
+
+DECLSPEC u32 hc_rotr32_S (const u32 a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotr32 (a, n);
+  #elif defined IS_CUDA || defined IS_HIP
+  return rotr32_S (a, n);
+  #else
+  #ifdef USE_ROTATE
+  return rotate (a, (u32) (32 - n));
+  #else
+  return ((a >> n) | (a << (32 - n)));
+  #endif
+  #endif
+}
+
+// No GPU has a native 64 bit rotation, so it always costs two 32 bit funnel shifts. Spelling it
+// this way lets a compiler that recognises a funnel shift emit one instruction per half. n is a
+// literal at every call site, so the swap decision folds away. hl32_to_64_S() puts the halves
+// back together because it is a register pair, where a shift and an or is a real instruction.
+
+#define HC_BITALIGN(hi, lo, n) (((hi) << (32 - (n))) | ((lo) >> (n)))
+
+DECLSPEC u64 hc_rotr64_bitalign_S (const u64 a, const int n)
+{
+  const u32 a0 = (u32) (a >> 32);
+  const u32 a1 = (u32) (a >>  0);
+
+  const int m    = (n >> 0) & 31;
+  const int swap = (n >> 5) & 1;
+
+  // a rotation by a multiple of 32 has no funnel shift in it at all
+
+  if (m == 0)
+  {
+    if (swap == 1) return hl32_to_64_S (a1, a0);
+
+    return a;
+  }
+
+  const u32 t0 = (swap == 1) ? HC_BITALIGN (a0, a1, m) : HC_BITALIGN (a1, a0, m);
+  const u32 t1 = (swap == 1) ? HC_BITALIGN (a1, a0, m) : HC_BITALIGN (a0, a1, m);
+
+  const u64 r = hl32_to_64_S (t0, t1);
+
+  return r;
+}
+
+DECLSPEC u64x hc_rotl64 (const u64x a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotl64 (a, n);
+  #elif defined IS_CUDA
+  return rotl64 (a, n);
+  #elif (defined IS_AMD || defined IS_HIP)
+  return rotl64 (a, n);
+  #else
+  #if defined IS_AMD_GPU && (VECT_SIZE == 1)
+  return hc_rotr64_bitalign_S (a, 64 - n);
+  #elif defined USE_ROTATE
+  return rotate (a, make_u64x (n));
+  #else
+  return ((a << n) | (a >> (64 - n)));
+  #endif
+  #endif
+}
+
+DECLSPEC u64x hc_rotr64 (const u64x a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotr64 (a, n);
+  #elif defined IS_CUDA
+  return rotr64 (a, n);
+  #elif (defined IS_AMD || defined IS_HIP)
+  return rotr64 (a, n);
+  #else
+  #if defined IS_AMD_GPU && (VECT_SIZE == 1)
+  return hc_rotr64_bitalign_S (a, n);
+  #elif defined USE_ROTATE
+  return rotate (a, make_u64x (64 - n));
+  #else
+  return ((a >> n) | (a << (64 - n)));
+  #endif
+  #endif
+}
+
+DECLSPEC u64 hc_rotl64_S (const u64 a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotl64 (a, n);
+  #elif defined IS_CUDA
+  return rotl64_S (a, n);
+  #elif (defined IS_AMD || defined IS_HIP)
+  return rotl64_S (a, n);
+  #else
+  #ifdef IS_AMD_GPU
+  return hc_rotr64_bitalign_S (a, 64 - n);
+  #elif defined USE_ROTATE
+  return rotate (a, (u64) (n));
+  #else
+  return ((a << n) | (a >> (64 - n)));
+  #endif
+  #endif
+}
+
+DECLSPEC u64 hc_rotr64_S (const u64 a, const int n)
+{
+  #if   defined HC_CPU_OPENCL_EMU_H
+  return rotr64 (a, n);
+  #elif defined IS_CUDA
+  return rotr64_S (a, n);
+  #elif (defined IS_AMD || defined IS_HIP)
+  return rotr64_S (a, n);
+  #else
+  #ifdef IS_AMD_GPU
+  return hc_rotr64_bitalign_S (a, n);
+  #elif defined USE_ROTATE
+  return rotate (a, (u64) (64 - n));
+  #else
+  return ((a >> n) | (a << (64 - n)));
+  #endif
+  #endif
+}
+
+// bitwise swap
+
+DECLSPEC u32x hc_swap32 (const u32x v)
+{
+  u32x r;
+
+  #ifdef HC_CPU_OPENCL_EMU_H
+  r = byte_swap_32 (v);
+  #else
+  #if defined IS_NV  && HAS_PRMT  == 1
+
+  #if VECT_SIZE == 1
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r) : "r"(v));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s0) : "r"(v.s0));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s1) : "r"(v.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s2) : "r"(v.s2));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s3) : "r"(v.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s4) : "r"(v.s4));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s5) : "r"(v.s5));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s6) : "r"(v.s6));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s7) : "r"(v.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s8) : "r"(v.s8));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.s9) : "r"(v.s9));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.sa) : "r"(v.sa));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.sb) : "r"(v.sb));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.sc) : "r"(v.sc));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.sd) : "r"(v.sd));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.se) : "r"(v.se));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r.sf) : "r"(v.sf));
+  #endif
+
+  #else
+
+  #if defined USE_BITSELECT && defined USE_ROTATE
+  r = bitselect (rotate (v, make_u32x (24)),
+                 rotate (v, make_u32x ( 8)),
+                            make_u32x (0x00ff00ff));
+  #else
+
+  #if VECT_SIZE == 1
+  r = hc_swap32_S (v);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = hc_swap32_S (v.s0);
+  r.s1 = hc_swap32_S (v.s1);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = hc_swap32_S (v.s2);
+  r.s3 = hc_swap32_S (v.s3);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = hc_swap32_S (v.s4);
+  r.s5 = hc_swap32_S (v.s5);
+  r.s6 = hc_swap32_S (v.s6);
+  r.s7 = hc_swap32_S (v.s7);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = hc_swap32_S (v.s8);
+  r.s9 = hc_swap32_S (v.s9);
+  r.sa = hc_swap32_S (v.sa);
+  r.sb = hc_swap32_S (v.sb);
+  r.sc = hc_swap32_S (v.sc);
+  r.sd = hc_swap32_S (v.sd);
+  r.se = hc_swap32_S (v.se);
+  r.sf = hc_swap32_S (v.sf);
+  #endif
+
+  #endif
+
+  #endif
+
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_swap32_S (const u32 v)
+{
+  u32 r;
+
+  #ifdef HC_CPU_OPENCL_EMU_H
+  r = byte_swap_32 (v);
+  #else
+  #if defined IS_NV  && HAS_PRMT  == 1
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r) : "r"(v));
+  #else
+  #ifdef USE_SWIZZLE
+  #ifdef IS_METAL
+  uchar4 u = uchar4 ((v >> 0) & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF);
+  r = as_type<u32>(u.wzyx);
+  #else
+  r = as_uint (as_uchar4 (v).s3210);
+  #endif
+  #else
+  r = ((v & 0xff000000) >> 24)
+    | ((v & 0x00ff0000) >>  8)
+    | ((v & 0x0000ff00) <<  8)
+    | ((v & 0x000000ff) << 24);
+  #endif
+  #endif
+  #endif
+
+  return r;
+}
+
+DECLSPEC u64x hc_swap64 (const u64x v)
+{
+  u64x r;
+
+  #ifdef HC_CPU_OPENCL_EMU_H
+  r = byte_swap_64 (v);
+  #else
+  #if defined IS_NV && HAS_MOV64 == 1 && HAS_PRMT == 1
+
+  u32x il;
+  u32x ir;
+
+  #if VECT_SIZE == 1
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il), "=r"(ir) : "l"(v));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s0), "=r"(ir.s0) : "l"(v.s0));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s1), "=r"(ir.s1) : "l"(v.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s2), "=r"(ir.s2) : "l"(v.s2));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s3), "=r"(ir.s3) : "l"(v.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s4), "=r"(ir.s4) : "l"(v.s4));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s5), "=r"(ir.s5) : "l"(v.s5));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s6), "=r"(ir.s6) : "l"(v.s6));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s7), "=r"(ir.s7) : "l"(v.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s8), "=r"(ir.s8) : "l"(v.s8));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.s9), "=r"(ir.s9) : "l"(v.s9));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.sa), "=r"(ir.sa) : "l"(v.sa));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.sb), "=r"(ir.sb) : "l"(v.sb));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.sc), "=r"(ir.sc) : "l"(v.sc));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.sd), "=r"(ir.sd) : "l"(v.sd));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.se), "=r"(ir.se) : "l"(v.se));
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il.sf), "=r"(ir.sf) : "l"(v.sf));
+  #endif
+
+  u32x tl;
+  u32x tr;
+
+  #if VECT_SIZE == 1
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl) : "r"(il));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr) : "r"(ir));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s0) : "r"(il.s0));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s0) : "r"(ir.s0));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s1) : "r"(il.s1));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s1) : "r"(ir.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s2) : "r"(il.s2));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s2) : "r"(ir.s2));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s3) : "r"(il.s3));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s3) : "r"(ir.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s4) : "r"(il.s4));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s4) : "r"(ir.s4));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s5) : "r"(il.s5));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s5) : "r"(ir.s5));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s6) : "r"(il.s6));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s6) : "r"(ir.s6));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s7) : "r"(il.s7));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s7) : "r"(ir.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s8) : "r"(il.s8));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s8) : "r"(ir.s8));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.s9) : "r"(il.s9));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.s9) : "r"(ir.s9));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.sa) : "r"(il.sa));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.sa) : "r"(ir.sa));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.sb) : "r"(il.sb));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.sb) : "r"(ir.sb));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.sc) : "r"(il.sc));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.sc) : "r"(ir.sc));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.sd) : "r"(il.sd));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.sd) : "r"(ir.sd));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.se) : "r"(il.se));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.se) : "r"(ir.se));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl.sf) : "r"(il.sf));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr.sf) : "r"(ir.sf));
+  #endif
+
+  #if VECT_SIZE == 1
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r) : "r"(tr), "r"(tl));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s0) : "r"(tr.s0), "r"(tl.s0));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s1) : "r"(tr.s1), "r"(tl.s1));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s2) : "r"(tr.s2), "r"(tl.s2));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s3) : "r"(tr.s3), "r"(tl.s3));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s4) : "r"(tr.s4), "r"(tl.s4));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s5) : "r"(tr.s5), "r"(tl.s5));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s6) : "r"(tr.s6), "r"(tl.s6));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s7) : "r"(tr.s7), "r"(tl.s7));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s8) : "r"(tr.s8), "r"(tl.s8));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.s9) : "r"(tr.s9), "r"(tl.s9));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.sa) : "r"(tr.sa), "r"(tl.sa));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.sb) : "r"(tr.sb), "r"(tl.sb));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.sc) : "r"(tr.sc), "r"(tl.sc));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.sd) : "r"(tr.sd), "r"(tl.sd));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.se) : "r"(tr.se), "r"(tl.se));
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r.sf) : "r"(tr.sf), "r"(tl.sf));
+  #endif
+
+  #else
+
+  // A 64 bit byte reverse is two 32 bit ones over the halves, and asking for it that way is what
+  // every backend without a byte permute instruction wants. The 64 bit spellings that were here
+  // ask a compiler to see through a chain of 64 bit shifts, and neither AMD compiler does: on a
+  // gfx1100 the bitselect one cost 20 instructions under ROCm and 22 under Mesa, where this costs
+  // 2 and 6.
+
+  const u32x a0 = h32_from_64 (v);
+  const u32x a1 = l32_from_64 (v);
+
+  const u32x t0 = hc_swap32 (a0);
+  const u32x t1 = hc_swap32 (a1);
+
+  r = hl32_to_64 (t1, t0);
+
+  #endif
+  #endif
+
+  return r;
+}
+
+DECLSPEC u64 hc_swap64_S (const u64 v)
+{
+  u64 r;
+
+  #ifdef HC_CPU_OPENCL_EMU_H
+  r = byte_swap_64 (v);
+  #else
+  #if defined IS_NV  && HAS_PRMT  == 1
+  u32 il;
+  u32 ir;
+
+  asm volatile ("mov.b64 {%0, %1}, %2;" : "=r"(il), "=r"(ir) : "l"(v));
+
+  u32 tl;
+  u32 tr;
+
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tl) : "r"(il));
+  asm volatile ("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(tr) : "r"(ir));
+
+  asm volatile ("mov.b64 %0, {%1, %2};" : "=l"(r) : "r"(tr), "r"(tl));
+
+  #else
+
+  const u32 v0 = h32_from_64_S (v);
+  const u32 v1 = l32_from_64_S (v);
+
+  const u32 t0 = hc_swap32_S (v0);
+  const u32 t1 = hc_swap32_S (v1);
+
+  r = hl32_to_64_S (t1, t0);
+
+  #endif
+  #endif
+
+  return r;
+}
+
+#if (defined IS_AMD || defined IS_HIP || defined IS_AMD_USE_OPENCL)
+
+DECLSPEC u32x hc_bytealign_be (const u32x a, const u32x b, const int c)
+{
+  u32x r;
+
+  #if VECT_SIZE == 1
+  r = __builtin_amdgcn_alignbyte (a, b, c);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = __builtin_amdgcn_alignbyte (a.s0, b.s0, c);
+  r.s1 = __builtin_amdgcn_alignbyte (a.s1, b.s1, c);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = __builtin_amdgcn_alignbyte (a.s2, b.s2, c);
+  r.s3 = __builtin_amdgcn_alignbyte (a.s3, b.s3, c);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = __builtin_amdgcn_alignbyte (a.s4, b.s4, c);
+  r.s5 = __builtin_amdgcn_alignbyte (a.s5, b.s5, c);
+  r.s6 = __builtin_amdgcn_alignbyte (a.s6, b.s6, c);
+  r.s7 = __builtin_amdgcn_alignbyte (a.s7, b.s7, c);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = __builtin_amdgcn_alignbyte (a.s8, b.s8, c);
+  r.s9 = __builtin_amdgcn_alignbyte (a.s9, b.s9, c);
+  r.sa = __builtin_amdgcn_alignbyte (a.sa, b.sa, c);
+  r.sb = __builtin_amdgcn_alignbyte (a.sb, b.sb, c);
+  r.sc = __builtin_amdgcn_alignbyte (a.sc, b.sc, c);
+  r.sd = __builtin_amdgcn_alignbyte (a.sd, b.sd, c);
+  r.se = __builtin_amdgcn_alignbyte (a.se, b.se, c);
+  r.sf = __builtin_amdgcn_alignbyte (a.sf, b.sf, c);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_be_S (const u32 a, const u32 b, const int c)
+{
+  return __builtin_amdgcn_alignbyte (a, b, c);
+}
+
+DECLSPEC u32x hc_bytealign (const u32x a, const u32x b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  u32x r;
+
+  #if VECT_SIZE == 1
+  r = (c_mod_4 == 0) ? b : __builtin_amdgcn_alignbyte (b, a, 4 - c_mod_4);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = (c_mod_4 == 0) ? b.s0 : __builtin_amdgcn_alignbyte (b.s0, a.s0, 4 - c_mod_4);
+  r.s1 = (c_mod_4 == 0) ? b.s1 : __builtin_amdgcn_alignbyte (b.s1, a.s1, 4 - c_mod_4);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = (c_mod_4 == 0) ? b.s2 : __builtin_amdgcn_alignbyte (b.s2, a.s2, 4 - c_mod_4);
+  r.s3 = (c_mod_4 == 0) ? b.s3 : __builtin_amdgcn_alignbyte (b.s3, a.s3, 4 - c_mod_4);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = (c_mod_4 == 0) ? b.s4 : __builtin_amdgcn_alignbyte (b.s4, a.s4, 4 - c_mod_4);
+  r.s5 = (c_mod_4 == 0) ? b.s5 : __builtin_amdgcn_alignbyte (b.s5, a.s5, 4 - c_mod_4);
+  r.s6 = (c_mod_4 == 0) ? b.s6 : __builtin_amdgcn_alignbyte (b.s6, a.s6, 4 - c_mod_4);
+  r.s7 = (c_mod_4 == 0) ? b.s7 : __builtin_amdgcn_alignbyte (b.s7, a.s7, 4 - c_mod_4);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = (c_mod_4 == 0) ? b.s8 : __builtin_amdgcn_alignbyte (b.s8, a.s8, 4 - c_mod_4);
+  r.s9 = (c_mod_4 == 0) ? b.s9 : __builtin_amdgcn_alignbyte (b.s9, a.s9, 4 - c_mod_4);
+  r.sa = (c_mod_4 == 0) ? b.sa : __builtin_amdgcn_alignbyte (b.sa, a.sa, 4 - c_mod_4);
+  r.sb = (c_mod_4 == 0) ? b.sb : __builtin_amdgcn_alignbyte (b.sb, a.sb, 4 - c_mod_4);
+  r.sc = (c_mod_4 == 0) ? b.sc : __builtin_amdgcn_alignbyte (b.sc, a.sc, 4 - c_mod_4);
+  r.sd = (c_mod_4 == 0) ? b.sd : __builtin_amdgcn_alignbyte (b.sd, a.sd, 4 - c_mod_4);
+  r.se = (c_mod_4 == 0) ? b.se : __builtin_amdgcn_alignbyte (b.se, a.se, 4 - c_mod_4);
+  r.sf = (c_mod_4 == 0) ? b.sf : __builtin_amdgcn_alignbyte (b.sf, a.sf, 4 - c_mod_4);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_S (const u32 a, const u32 b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  return (c_mod_4 == 0) ? b : __builtin_amdgcn_alignbyte (b, a, 4 - c_mod_4);
+}
+
+#endif
+
+// v_perm_b32 is reachable on the OpenCL backend as well, but the block above is keyed on
+// IS_AMD, which is off. Split the byte permute out so anything that only needs that much
+// gets the instruction instead of falling back to a rotate.
+
+#if (defined IS_AMD || defined IS_HIP || defined IS_AMD_USE_OPENCL)
+
+DECLSPEC u32x hc_byte_perm (const u32x a, const u32x b, const int c)
+{
+  u32x r = 0;
+
+  #if VECT_SIZE == 1
+  r = __builtin_amdgcn_perm (b, a, c);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = __builtin_amdgcn_perm (b.s0, a.s0, c);
+  r.s1 = __builtin_amdgcn_perm (b.s1, a.s1, c);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = __builtin_amdgcn_perm (b.s2, a.s2, c);
+  r.s3 = __builtin_amdgcn_perm (b.s3, a.s3, c);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = __builtin_amdgcn_perm (b.s4, a.s4, c);
+  r.s5 = __builtin_amdgcn_perm (b.s5, a.s5, c);
+  r.s6 = __builtin_amdgcn_perm (b.s6, a.s6, c);
+  r.s7 = __builtin_amdgcn_perm (b.s7, a.s7, c);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = __builtin_amdgcn_perm (b.s8, a.s8, c);
+  r.s9 = __builtin_amdgcn_perm (b.s9, a.s9, c);
+  r.sa = __builtin_amdgcn_perm (b.sa, a.sa, c);
+  r.sb = __builtin_amdgcn_perm (b.sb, a.sb, c);
+  r.sc = __builtin_amdgcn_perm (b.sc, a.sc, c);
+  r.sd = __builtin_amdgcn_perm (b.sd, a.sd, c);
+  r.se = __builtin_amdgcn_perm (b.se, a.se, c);
+  r.sf = __builtin_amdgcn_perm (b.sf, a.sf, c);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_byte_perm_S (const u32 a, const u32 b, const int c)
+{
+  return __builtin_amdgcn_perm (b, a, c);
+}
+
+#endif
+
+#ifdef IS_NV
+
+DECLSPEC u32x hc_byte_perm (const u32x a, const u32x b, const int c)
+{
+  u32x r = 0;
+
+  #if VECT_SIZE == 1
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r)    : "r"(a),    "r"(b),    "r"(c));
+  #endif
+
+  #if VECT_SIZE >= 2
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s0) : "r"(a.s0), "r"(b.s0), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s1) : "r"(a.s1), "r"(b.s1), "r"(c));
+  #endif
+
+  #if VECT_SIZE >= 4
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s2) : "r"(a.s2), "r"(b.s2), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s3) : "r"(a.s3), "r"(b.s3), "r"(c));
+  #endif
+
+  #if VECT_SIZE >= 8
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s4) : "r"(a.s4), "r"(b.s4), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s5) : "r"(a.s5), "r"(b.s5), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s6) : "r"(a.s6), "r"(b.s6), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s7) : "r"(a.s7), "r"(b.s7), "r"(c));
+  #endif
+
+  #if VECT_SIZE >= 16
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s8) : "r"(a.s8), "r"(b.s8), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.s9) : "r"(a.s9), "r"(b.s9), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.sa) : "r"(a.sa), "r"(b.sa), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.sb) : "r"(a.sb), "r"(b.sb), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.sc) : "r"(a.sc), "r"(b.sc), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.sd) : "r"(a.sd), "r"(b.sd), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.se) : "r"(a.se), "r"(b.se), "r"(c));
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r.sf) : "r"(a.sf), "r"(b.sf), "r"(c));
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_byte_perm_S (const u32 a, const u32 b, const int c)
+{
+  u32 r = 0;
+
+  asm volatile ("prmt.b32 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+
+  return r;
+}
+
+#ifdef USE_FUNNELSHIFT
+DECLSPEC u32x hc_bytealign_be (const u32x a, const u32x b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  u32x r;
+
+  #if VECT_SIZE == 1
+  r = hc_funnelshift_r (b, a, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = hc_funnelshift_r (b.s0, a.s0, c_mod_4 * 8);
+  r.s1 = hc_funnelshift_r (b.s1, a.s1, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = hc_funnelshift_r (b.s2, a.s2, c_mod_4 * 8);
+  r.s3 = hc_funnelshift_r (b.s3, a.s3, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = hc_funnelshift_r (b.s4, a.s4, c_mod_4 * 8);
+  r.s5 = hc_funnelshift_r (b.s5, a.s5, c_mod_4 * 8);
+  r.s6 = hc_funnelshift_r (b.s6, a.s6, c_mod_4 * 8);
+  r.s7 = hc_funnelshift_r (b.s7, a.s7, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = hc_funnelshift_r (b.s8, a.s8, c_mod_4 * 8);
+  r.s9 = hc_funnelshift_r (b.s9, a.s9, c_mod_4 * 8);
+  r.sa = hc_funnelshift_r (b.sa, a.sa, c_mod_4 * 8);
+  r.sb = hc_funnelshift_r (b.sb, a.sb, c_mod_4 * 8);
+  r.sc = hc_funnelshift_r (b.sc, a.sc, c_mod_4 * 8);
+  r.sd = hc_funnelshift_r (b.sd, a.sd, c_mod_4 * 8);
+  r.se = hc_funnelshift_r (b.se, a.se, c_mod_4 * 8);
+  r.sf = hc_funnelshift_r (b.sf, a.sf, c_mod_4 * 8);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_be_S (const u32 a, const u32 b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  const u32 r = hc_funnelshift_r (b, a, c_mod_4 * 8);
+
+  return r;
+}
+
+DECLSPEC u32x hc_bytealign (const u32x a, const u32x b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  u32x r;
+
+  #if VECT_SIZE == 1
+  r = hc_funnelshift_l (a, b, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 2
+  r.s0 = hc_funnelshift_l (a.s0, b.s0, c_mod_4 * 8);
+  r.s1 = hc_funnelshift_l (a.s1, b.s1, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 4
+  r.s2 = hc_funnelshift_l (a.s2, b.s2, c_mod_4 * 8);
+  r.s3 = hc_funnelshift_l (a.s3, b.s3, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 8
+  r.s4 = hc_funnelshift_l (a.s4, b.s4, c_mod_4 * 8);
+  r.s5 = hc_funnelshift_l (a.s5, b.s5, c_mod_4 * 8);
+  r.s6 = hc_funnelshift_l (a.s6, b.s6, c_mod_4 * 8);
+  r.s7 = hc_funnelshift_l (a.s7, b.s7, c_mod_4 * 8);
+  #endif
+
+  #if VECT_SIZE >= 16
+  r.s8 = hc_funnelshift_l (a.s8, b.s8, c_mod_4 * 8);
+  r.s9 = hc_funnelshift_l (a.s9, b.s9, c_mod_4 * 8);
+  r.sa = hc_funnelshift_l (a.sa, b.sa, c_mod_4 * 8);
+  r.sb = hc_funnelshift_l (a.sb, b.sb, c_mod_4 * 8);
+  r.sc = hc_funnelshift_l (a.sc, b.sc, c_mod_4 * 8);
+  r.sd = hc_funnelshift_l (a.sd, b.sd, c_mod_4 * 8);
+  r.se = hc_funnelshift_l (a.se, b.se, c_mod_4 * 8);
+  r.sf = hc_funnelshift_l (a.sf, b.sf, c_mod_4 * 8);
+  #endif
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_S (const u32 a, const u32 b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  const u32 r = hc_funnelshift_l (a, b, c_mod_4 * 8);
+
+  return r;
+}
+#else
+DECLSPEC u32x hc_bytealign_be (const u32x a, const u32x b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  const u32x r = hc_byte_perm (b, a, (0x76543210 >> (c_mod_4 * 4)) & 0xffff);
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_be_S (const u32 a, const u32 b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  const u32 r = hc_byte_perm_S (b, a, (0x76543210 >> (c_mod_4 * 4)) & 0xffff);
+
+  return r;
+}
+
+DECLSPEC u32x hc_bytealign (const u32x a, const u32x b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  const int c_minus_4 = 4 - c_mod_4;
+
+  const u32x r = hc_byte_perm (a, b, (0x76543210 >> (c_minus_4 * 4)) & 0xffff);
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_S (const u32 a, const u32 b, const int c)
+{
+  const int c_mod_4 = c & 3;
+
+  const int c_minus_4 = 4 - c_mod_4;
+
+  const u32 r = hc_byte_perm_S (a, b, (0x76543210 >> (c_minus_4 * 4)) & 0xffff);
+
+  return r;
+}
+#endif
+#endif
+
+// AMD on the OpenCL backend takes the intrinsic versions above instead of these, so it
+// has to stay out of here or both would be defined.
+
+#if defined IS_GENERIC && !defined IS_AMD_USE_OPENCL
+
+// All four byte counts are the same funnel shift at a different amount, so the two functions below
+// spell it as one shift rather than as a chain of compares. A compiler with a funnel shift
+// instruction then emits one of those instead of three shifts and three selects. The zero case has
+// to stay a select, because a shift by 32 is a shift by 0 in C and would leave a | b behind.
+
+DECLSPEC u32x hc_bytealign_be (const u32x a, const u32x b, const int c)
+{
+  const int s = (c & 3) * 8;
+
+  const u32x r = (s == 0) ? b : ((a << (32 - s)) | (b >> s));
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_be_S (const u32 a, const u32 b, const int c)
+{
+  const int s = (c & 3) * 8;
+
+  const u32 r = (s == 0) ? b : ((a << (32 - s)) | (b >> s));
+
+  return r;
+}
+
+DECLSPEC u32x hc_bytealign (const u32x a, const u32x b, const int c)
+{
+  u32x r = 0;
+
+  const int cm = c & 3;
+
+       if (cm == 0) { r = b;                     }
+  else if (cm == 1) { r = (a >> 24) | (b <<  8); }
+  else if (cm == 2) { r = (a >> 16) | (b << 16); }
+  else if (cm == 3) { r = (a >>  8) | (b << 24); }
+
+  return r;
+}
+
+DECLSPEC u32 hc_bytealign_S (const u32 a, const u32 b, const int c)
+{
+  u32 r = 0;
+
+  const int cm = c & 3;
+
+       if (cm == 0) { r = b;                     }
+  else if (cm == 1) { r = (a >> 24) | (b <<  8); }
+  else if (cm == 2) { r = (a >> 16) | (b << 16); }
+  else if (cm == 3) { r = (a >>  8) | (b << 24); }
+
+  return r;
+}
+
+#endif
+
+/**
+ * arithmetic operations
+ */
+
+// Every vendor block used to carry its own hc_add3. All of them were the same expression.
+// The V_ADD3_U32 inline asm on the AMD side had been commented out, and LLVM matches
+// a + b + c to v_add3_u32 on AMD and to IADD3 on NVIDIA on its own. One definition covers
+// every backend, so the HAS_VADD3 split and its per lane expansion are gone with it.
+
+DECLSPEC u32x hc_add3 (const u32x a, const u32x b, const u32x c)
+{
+  return a + b + c;
+}
+
+DECLSPEC u32 hc_add3_S (const u32 a, const u32 b, const u32 c)
+{
+  return a + b + c;
+}
+
+// Only AMD keeps a hardware bit field extract here. The vector form of this function had
+// no callers at all and is gone; all nine call sites of the scalar form pass a runtime
+// shift and a constant width of 8.
+//
+// On AMD the builtin is worth having in every shape of argument: 1 instruction against 3
+// when both arguments are runtime values, and 1 against 2 in the shape the call sites
+// actually use.
+//
+// NVIDIA used to have a PTX bfe.u32 here and it was a pessimization. SASS on sm_89 with
+// CUDA 12.9, same call site shape, is 2 instructions for the C below and 6 for the asm,
+// because ptxas has to assemble bfe's packed operand with three prmt. It is also no better
+// than the C when every argument is constant. So NVIDIA takes the same path as everyone
+// else now.
+
+DECLSPEC u32 hc_bfe_S (const u32 a, const u32 b, const u32 c)
+{
+  #if defined IS_AMD || defined IS_HIP || defined IS_AMD_USE_OPENCL
+
+  return __builtin_amdgcn_ubfe (a, b, c);
+
+  #else
+
+  #define BIT(x)      (1u << (x))
+  #define BIT_MASK(x) (BIT (x) - 1)
+  #define BFE(x,y,z)  (((x) >> (y)) & BIT_MASK (z))
+
+  return BFE (a, b, c);
+
+  #undef BIT
+  #undef BIT_MASK
+  #undef BFE
+
+  #endif
+}
+
+DECLSPEC u32 hc_umulhi (const u32 x, const u32 y)
+{
+  #if defined IS_CUDA || defined IS_HIP
+  return __umulhi (x, y);
+  #elif defined IS_OPENCL
+  return mul_hi (x, y);
+  #elif defined IS_METAL
+  return mulhi (x, y);
+  #else
+  return h32_from_64_S ((u64) x * (u64) y);
+  #endif
+}
+
+DECLSPEC u32 hc_umullo (const u32 x, const u32 y)
+{
+  return l32_from_64_S ((u64) x * (u64) y);
+}
+
+/**
+ * pure scalar functions
+ */
+
+DECLSPEC int ffz (const u32 v)
+{
+  #ifdef _unroll
+  #pragma unroll
+  #endif
+  for (int i = 0; i < 32; i++)
+  {
+    if ((v >> i) & 1) continue;
+
+    return i;
+  }
+
+  return -1;
+}
+
+#ifdef KERNEL_STATIC
+DECLSPEC int hash_comp (PRIVATE_AS const u32 *d1, GLOBAL_AS const u32 *d2)
+{
+  if (d1[3] > d2[DGST_R3]) return ( 1);
+  if (d1[3] < d2[DGST_R3]) return (-1);
+  if (d1[2] > d2[DGST_R2]) return ( 1);
+  if (d1[2] < d2[DGST_R2]) return (-1);
+  if (d1[1] > d2[DGST_R1]) return ( 1);
+  if (d1[1] < d2[DGST_R1]) return (-1);
+  if (d1[0] > d2[DGST_R0]) return ( 1);
+  if (d1[0] < d2[DGST_R0]) return (-1);
+
+  return (0);
+}
+
+DECLSPEC u32 find_hash (PRIVATE_AS const u32 *digest, const u32 digests_cnt, GLOBAL_AS const digest_t *digests_buf)
+{
+  for (u32 l = 0, r = digests_cnt; r; r >>= 1)
+  {
+    const u32 m = r >> 1;
+
+    const u32 c = l + m;
+
+    const int cmp = hash_comp (digest, digests_buf[c].digest_buf);
+
+    if (cmp > 0)
+    {
+      l += m + 1;
+
+      r--;
+    }
+
+    if (cmp == 0) return (c);
+  }
+
+  return (-1);
+}
+#endif
+
+// Input has to be zero padded and buffer size has to be multiple of 4 and at least of length 24
+// We simply ignore buffer length for the first 24 bytes for some extra speed boost :)
+// Number of unrolls found by simply testing what gave best results
+
+DECLSPEC int hc_enc_scan (PRIVATE_AS const u32 *buf, const int len)
+{
+  if (buf[0] & 0x80808080) return 1;
+  if (buf[1] & 0x80808080) return 1;
+  if (buf[2] & 0x80808080) return 1;
+  if (buf[3] & 0x80808080) return 1;
+  if (buf[4] & 0x80808080) return 1;
+  if (buf[5] & 0x80808080) return 1;
+
+  for (int i = 24, j = 6; i < len; i += 4, j += 1)
+  {
+    if (buf[j] & 0x80808080) return 1;
+  }
+
+  return 0;
+}
+
+DECLSPEC int hc_enc_scan_global (GLOBAL_AS const u32 *buf, const int len)
+{
+  if (buf[0] & 0x80808080) return 1;
+  if (buf[1] & 0x80808080) return 1;
+  if (buf[2] & 0x80808080) return 1;
+  if (buf[3] & 0x80808080) return 1;
+  if (buf[4] & 0x80808080) return 1;
+  if (buf[5] & 0x80808080) return 1;
+
+  for (int i = 24, j = 6; i < len; i += 4, j += 1)
+  {
+    if (buf[j] & 0x80808080) return 1;
+  }
+
+  return 0;
+}
+
+// Constants and some code snippets from unicode.org's ConvertUTF.c
+// Compiler can perfectly translate some of the branches and switch cases this into MOVC
+// which is faster than lookup tables
+
+#define halfShift 10
+
+#define halfBase 0x0010000
+#define halfMask 0x3FF
+
+#define UNI_MAX_BMP          0xFFFF
+#define UNI_SUR_HIGH_START   0xD800
+#define UNI_SUR_HIGH_END     0xDBFF
+#define UNI_SUR_LOW_START    0xDC00
+#define UNI_SUR_LOW_END      0xDFFF
+
+/*
+ * Magic values subtracted from a buffer value during UTF8 conversion.
+ * This table contains as many values as there might be trailing bytes
+ * in a UTF-8 sequence.
+ */
+
+#define offsetsFromUTF8_0 0x00000000UL
+#define offsetsFromUTF8_1 0x00003080UL
+#define offsetsFromUTF8_2 0x000E2080UL
+#define offsetsFromUTF8_3 0x03C82080UL
+#define offsetsFromUTF8_4 0xFA082080UL
+#define offsetsFromUTF8_5 0x82082080UL
+
+DECLSPEC void hc_enc_init (PRIVATE_AS hc_enc_t *hc_enc)
+{
+  hc_enc->pos = 0;
+
+  hc_enc->cbuf = 0;
+  hc_enc->clen = 0;
+}
+
+DECLSPEC int hc_enc_has_next (PRIVATE_AS hc_enc_t *hc_enc, const int sz)
+{
+  if (hc_enc->pos < sz) return 1;
+
+  if (hc_enc->clen) return 1;
+
+  return 0;
+}
+
+DECLSPEC u32 hc_enc_seq_byte (const u32 w0, const u32 w1, const int p, const int j)
+{
+  const int k = p + j;
+
+  const u32 w = (k < 4) ? w0 : w1;
+
+  return (w >> ((k & 3) << 3)) & 0xff;
+}
+
+DECLSPEC int hc_enc_validate_utf8 (const u32 w0, const u32 w1, const int src_pos, const int extraBytesToRead)
+{
+  const int p = src_pos & 3;
+
+  if (extraBytesToRead == 0)
+  {
+    const u32 c0 = hc_enc_seq_byte (w0, w1, p, 0); if (c0 >= 0x80) return 0;
+  }
+  else if (extraBytesToRead == 1)
+  {
+    const u32 c0 = hc_enc_seq_byte (w0, w1, p, 0); if ((c0 < 0xc2) || (c0 > 0xdf)) return 0;
+    const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x80) || (c1 > 0xbf)) return 0;
+  }
+  else if (extraBytesToRead == 2)
+  {
+    const u32 c0 = hc_enc_seq_byte (w0, w1, p, 0);
+
+    if ((c0 >= 0xe0) && (c0 <= 0xe0))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0xa0) || (c1 > 0xbf)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+    }
+    else if ((c0 >= 0xe1) && (c0 <= 0xec))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x80) || (c1 > 0xbf)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+    }
+    else if ((c0 >= 0xed) && (c0 <= 0xed))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x80) || (c1 > 0x9f)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+    }
+    else if ((c0 >= 0xee) && (c0 <= 0xef))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x80) || (c1 > 0xbf)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+    }
+    else
+    {
+      return 0;
+    }
+  }
+  else if (extraBytesToRead == 3)
+  {
+    const u32 c0 = hc_enc_seq_byte (w0, w1, p, 0);
+
+    if ((c0 >= 0xf0) && (c0 <= 0xf0))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x90) || (c1 > 0xbf)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+      const u32 c3 = hc_enc_seq_byte (w0, w1, p, 3); if ((c3 < 0x80) || (c3 > 0xbf)) return 0;
+    }
+    else if ((c0 >= 0xf1) && (c0 <= 0xf3))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x80) || (c1 > 0xbf)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+      const u32 c3 = hc_enc_seq_byte (w0, w1, p, 3); if ((c3 < 0x80) || (c3 > 0xbf)) return 0;
+    }
+    else if ((c0 >= 0xf4) && (c0 <= 0xf4))
+    {
+      const u32 c1 = hc_enc_seq_byte (w0, w1, p, 1); if ((c1 < 0x80) || (c1 > 0xbf)) return 0;
+      const u32 c2 = hc_enc_seq_byte (w0, w1, p, 2); if ((c2 < 0x80) || (c2 > 0xbf)) return 0;
+      const u32 c3 = hc_enc_seq_byte (w0, w1, p, 3); if ((c3 < 0x80) || (c3 > 0xbf)) return 0;
+    }
+    else
+    {
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+// Input buffer and Output buffer size has to be multiple of 4 and at least of size 4.
+// The output buffer is not zero padded, so entire buffer has to be set all zero before entering this function or truncated afterwards.
+
+// All bytes of a utf8 sequence are extracted from a window of two consecutive u32 words that
+// is loaded once and passed to the validator by value, and the output is accumulated into
+// full u32 words before it is stored. This removes the u8 pointers casted from u32 buffers
+// with a variable index on both the read and the write side, which crash the AMDGPU back end
+// of Mesa rusticl (LLVM 21) while compiling gpu_utf8_to_utf16 - the process dies with SIGSEGV
+// inside libLLVM.
+
+DECLSPEC int hc_enc_next (PRIVATE_AS hc_enc_t *hc_enc, PRIVATE_AS const u32 *src_buf, const int src_len, const int src_sz, PRIVATE_AS u32 *dst_buf, const int dst_sz)
+{
+  int src_pos = hc_enc->pos;
+  int dst_pos = hc_enc->clen;
+
+  int ret = 0;
+
+  dst_buf[0] = hc_enc->cbuf;
+
+  // the low half of the current output word is pending whenever the output position is not aligned
+
+  u32 acc = 0;
+
+  if (hc_enc->clen == 2) acc = hc_enc->cbuf;
+
+  hc_enc->clen = 0;
+  hc_enc->cbuf = 0;
+
+  while ((src_pos < src_len) && (dst_pos < dst_sz))
+  {
+    const int idx = src_pos >> 2;
+
+    const u32 w0 = src_buf[idx];
+
+    const int p = src_pos & 3;
+
+    const u32 c = (w0 >> (p << 3)) & 0xff;
+
+    int extraBytesToRead = -1;
+
+    if (c <= 0x7f)
+    {
+      extraBytesToRead = 0;
+    }
+    else if ((c >= 0xc2) && (c <= 0xdf))
+    {
+      extraBytesToRead = 1;
+    }
+    else if ((c >= 0xe0) && (c <= 0xef))
+    {
+      extraBytesToRead = 2;
+    }
+    else if ((c >= 0xf0) && (c <= 0xf4))
+    {
+      extraBytesToRead = 3;
+    }
+
+    if (extraBytesToRead == -1)
+    {
+      ret = -1;
+
+      break;
+    }
+
+    if ((src_pos + extraBytesToRead) >= src_sz)
+    {
+      // broken input
+
+      ret = -1;
+
+      break;
+    }
+
+    // the second word is loaded only if the sequence crosses the word boundary, because
+    // src_buf[idx + 1] can otherwise read out of bounds (for example word 64 of a u32[64])
+
+    u32 w1 = 0;
+
+    if ((p + extraBytesToRead) > 3)
+    {
+      w1 = src_buf[idx + 1];
+    }
+
+    if (hc_enc_validate_utf8 (w0, w1, src_pos, extraBytesToRead) == 0)
+    {
+      // broken input
+
+      ret = -1;
+
+      break;
+    }
+
+    u32 ch = 0;
+
+    switch (extraBytesToRead)
+    {
+      case 3:
+        ch += hc_enc_seq_byte (w0, w1, p, 0); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 1); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 2); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 3);
+        ch -= offsetsFromUTF8_3;
+        break;
+      case 2:
+        ch += hc_enc_seq_byte (w0, w1, p, 0); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 1); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 2);
+        ch -= offsetsFromUTF8_2;
+        break;
+      case 1:
+        ch += hc_enc_seq_byte (w0, w1, p, 0); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 1);
+        ch -= offsetsFromUTF8_1;
+        break;
+      case 0:
+        ch += hc_enc_seq_byte (w0, w1, p, 0);
+        ch -= offsetsFromUTF8_0;
+        break;
+    }
+
+    src_pos += extraBytesToRead + 1;
+
+    /* Target is a character <= 0xFFFF */
+    if (ch <= UNI_MAX_BMP)
+    {
+      const u32 u = ch & 0xffff;
+
+      if ((dst_pos & 3) == 0)
+      {
+        acc = u;
+      }
+      else
+      {
+        dst_buf[dst_pos >> 2] = acc | (u << 16);
+      }
+
+      dst_pos += 2;
+    }
+    else
+    {
+      ch -= halfBase;
+
+      const u32 a = ((ch >> halfShift) + UNI_SUR_HIGH_START);
+      const u32 b = ((ch  & halfMask)  + UNI_SUR_LOW_START);
+
+      if ((dst_pos + 2) == dst_sz)
+      {
+        if ((dst_pos & 3) == 0)
+        {
+          acc = a & 0xffff;
+        }
+        else
+        {
+          dst_buf[dst_pos >> 2] = acc | ((a & 0xffff) << 16);
+        }
+
+        dst_pos += 2;
+
+        hc_enc->cbuf = b & 0xffff;
+        hc_enc->clen = 2;
+      }
+      else
+      {
+        if ((dst_pos & 3) == 0)
+        {
+          dst_buf[dst_pos >> 2] = (a & 0xffff) | ((b & 0xffff) << 16);
+
+          dst_pos += 4;
+        }
+        else
+        {
+          dst_buf[dst_pos >> 2] = acc | ((a & 0xffff) << 16);
+
+          dst_pos += 2;
+
+          acc = b & 0xffff;
+
+          dst_pos += 2;
+        }
+      }
+    }
+  }
+
+  // store a pending low half word, the high half stays zero
+
+  if ((dst_pos & 3) == 2)
+  {
+    dst_buf[dst_pos >> 2] = acc;
+  }
+
+  if (ret == -1)
+  {
+    hc_enc->pos = src_len;
+
+    return -1;
+  }
+
+  hc_enc->pos = src_pos;
+
+  return dst_pos;
+}
+
+DECLSPEC int hc_enc_next_global (PRIVATE_AS hc_enc_t *hc_enc, GLOBAL_AS const u32 *src_buf, const int src_len, const int src_sz, PRIVATE_AS u32 *dst_buf, const int dst_sz)
+{
+  int src_pos = hc_enc->pos;
+  int dst_pos = hc_enc->clen;
+
+  int ret = 0;
+
+  dst_buf[0] = hc_enc->cbuf;
+
+  // the low half of the current output word is pending whenever the output position is not aligned
+
+  u32 acc = 0;
+
+  if (hc_enc->clen == 2) acc = hc_enc->cbuf;
+
+  hc_enc->clen = 0;
+  hc_enc->cbuf = 0;
+
+  while ((src_pos < src_len) && (dst_pos < dst_sz))
+  {
+    const int idx = src_pos >> 2;
+
+    const u32 w0 = src_buf[idx];
+
+    const int p = src_pos & 3;
+
+    const u32 c = (w0 >> (p << 3)) & 0xff;
+
+    int extraBytesToRead = -1;
+
+    if (c <= 0x7f)
+    {
+      extraBytesToRead = 0;
+    }
+    else if ((c >= 0xc2) && (c <= 0xdf))
+    {
+      extraBytesToRead = 1;
+    }
+    else if ((c >= 0xe0) && (c <= 0xef))
+    {
+      extraBytesToRead = 2;
+    }
+    else if ((c >= 0xf0) && (c <= 0xf4))
+    {
+      extraBytesToRead = 3;
+    }
+
+    if (extraBytesToRead == -1)
+    {
+      ret = -1;
+
+      break;
+    }
+
+    if ((src_pos + extraBytesToRead) >= src_sz)
+    {
+      // broken input
+
+      ret = -1;
+
+      break;
+    }
+
+    // the second word is loaded only if the sequence crosses the word boundary, because
+    // src_buf[idx + 1] can otherwise read out of bounds (for example word 64 of a u32[64])
+
+    u32 w1 = 0;
+
+    if ((p + extraBytesToRead) > 3)
+    {
+      w1 = src_buf[idx + 1];
+    }
+
+    if (hc_enc_validate_utf8 (w0, w1, src_pos, extraBytesToRead) == 0)
+    {
+      // broken input
+
+      ret = -1;
+
+      break;
+    }
+
+    u32 ch = 0;
+
+    switch (extraBytesToRead)
+    {
+      case 3:
+        ch += hc_enc_seq_byte (w0, w1, p, 0); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 1); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 2); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 3);
+        ch -= offsetsFromUTF8_3;
+        break;
+      case 2:
+        ch += hc_enc_seq_byte (w0, w1, p, 0); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 1); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 2);
+        ch -= offsetsFromUTF8_2;
+        break;
+      case 1:
+        ch += hc_enc_seq_byte (w0, w1, p, 0); ch <<= 6;
+        ch += hc_enc_seq_byte (w0, w1, p, 1);
+        ch -= offsetsFromUTF8_1;
+        break;
+      case 0:
+        ch += hc_enc_seq_byte (w0, w1, p, 0);
+        ch -= offsetsFromUTF8_0;
+        break;
+    }
+
+    src_pos += extraBytesToRead + 1;
+
+    /* Target is a character <= 0xFFFF */
+    if (ch <= UNI_MAX_BMP)
+    {
+      const u32 u = ch & 0xffff;
+
+      if ((dst_pos & 3) == 0)
+      {
+        acc = u;
+      }
+      else
+      {
+        dst_buf[dst_pos >> 2] = acc | (u << 16);
+      }
+
+      dst_pos += 2;
+    }
+    else
+    {
+      ch -= halfBase;
+
+      const u32 a = ((ch >> halfShift) + UNI_SUR_HIGH_START);
+      const u32 b = ((ch  & halfMask)  + UNI_SUR_LOW_START);
+
+      if ((dst_pos + 2) == dst_sz)
+      {
+        if ((dst_pos & 3) == 0)
+        {
+          acc = a & 0xffff;
+        }
+        else
+        {
+          dst_buf[dst_pos >> 2] = acc | ((a & 0xffff) << 16);
+        }
+
+        dst_pos += 2;
+
+        hc_enc->cbuf = b & 0xffff;
+        hc_enc->clen = 2;
+      }
+      else
+      {
+        if ((dst_pos & 3) == 0)
+        {
+          dst_buf[dst_pos >> 2] = (a & 0xffff) | ((b & 0xffff) << 16);
+
+          dst_pos += 4;
+        }
+        else
+        {
+          dst_buf[dst_pos >> 2] = acc | ((a & 0xffff) << 16);
+
+          dst_pos += 2;
+
+          acc = b & 0xffff;
+
+          dst_pos += 2;
+        }
+      }
+    }
+  }
+
+  // store a pending low half word, the high half stays zero
+
+  if ((dst_pos & 3) == 2)
+  {
+    dst_buf[dst_pos >> 2] = acc;
+  }
+
+  if (ret == -1)
+  {
+    hc_enc->pos = src_len;
+
+    return -1;
+  }
+
+  hc_enc->pos = src_pos;
+
+  return dst_pos;
+}
+
+#undef halfShift
+
+#undef halfBase
+#undef halfMask
+
+#undef UNI_MAX_BMP
+#undef UNI_SUR_HIGH_START
+#undef UNI_SUR_HIGH_END
+#undef UNI_SUR_LOW_START
+#undef UNI_SUR_LOW_END
+
+#undef offsetsFromUTF8_0
+#undef offsetsFromUTF8_1
+#undef offsetsFromUTF8_2
+#undef offsetsFromUTF8_3
+#undef offsetsFromUTF8_4
+#undef offsetsFromUTF8_5
+
+DECLSPEC int pkcs_padding_bs8 (PRIVATE_AS const u32 *data_buf, const int data_len)
+{
+  if (data_len == 0) return -1; // cannot have zero length, is important to avoid out of boundary reads
+
+  if (data_len % 8) return -1; // has to be a multiple of block size
+
+  const int last_pad_pos = data_len - 1;
+
+  const int last_pad_elem = last_pad_pos / 4;
+
+  const u32 pad = data_buf[last_pad_elem] >> 24; // guaranteed by pkcs structure
+
+  if ((pad < 1) || (pad > 8)) return -1; // pkcs pads are not zero based
+
+  const u32 padm = (pad <<  0)
+                 | (pad <<  8)
+                 | (pad << 16)
+                 | (pad << 24);
+
+  u32 mask0 = 0;
+  u32 mask1 = 0;
+
+  switch (pad)
+  {
+    case  1:  mask0 = 0x00000000; mask1 = 0xff000000; break;
+    case  2:  mask0 = 0x00000000; mask1 = 0xffff0000; break;
+    case  3:  mask0 = 0x00000000; mask1 = 0xffffff00; break;
+    case  4:  mask0 = 0x00000000; mask1 = 0xffffffff; break;
+    case  5:  mask0 = 0xff000000; mask1 = 0xffffffff; break;
+    case  6:  mask0 = 0xffff0000; mask1 = 0xffffffff; break;
+    case  7:  mask0 = 0xffffff00; mask1 = 0xffffffff; break;
+    case  8:  mask0 = 0xffffffff; mask1 = 0xffffffff; break;
+  }
+
+  const u32 data0 = data_buf[last_pad_elem - 1];
+  const u32 data1 = data_buf[last_pad_elem - 0];
+
+  if ((data0 & mask0) != (padm & mask0)) return -1;
+  if ((data1 & mask1) != (padm & mask1)) return -1;
+
+  const int real_len = data_len - pad;
+
+  return real_len;
+}
+
+DECLSPEC int pkcs_padding_bs16 (PRIVATE_AS const u32 *data_buf, const int data_len)
+{
+  if (data_len == 0) return -1; // cannot have zero length, is important to avoid out of boundary reads
+
+  if (data_len % 16) return -1; // has to be a multiple of block size
+
+  const int last_pad_pos = data_len - 1;
+
+  const int last_pad_elem = last_pad_pos / 4;
+
+  const u32 pad = data_buf[last_pad_elem] >> 24; // guaranteed by pkcs structure
+
+  if ((pad < 1) || (pad > 16)) return -1; // pkcs pads are not zero based
+
+  const u32 padm = (pad <<  0)
+                 | (pad <<  8)
+                 | (pad << 16)
+                 | (pad << 24);
+
+  u32 mask0 = 0;
+  u32 mask1 = 0;
+  u32 mask2 = 0;
+  u32 mask3 = 0;
+
+  switch (pad)
+  {
+    case  1:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0x00000000; mask3 = 0xff000000; break;
+    case  2:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0x00000000; mask3 = 0xffff0000; break;
+    case  3:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0x00000000; mask3 = 0xffffff00; break;
+    case  4:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0x00000000; mask3 = 0xffffffff; break;
+    case  5:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0xff000000; mask3 = 0xffffffff; break;
+    case  6:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0xffff0000; mask3 = 0xffffffff; break;
+    case  7:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0xffffff00; mask3 = 0xffffffff; break;
+    case  8:  mask0 = 0x00000000; mask1 = 0x00000000; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case  9:  mask0 = 0x00000000; mask1 = 0xff000000; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 10:  mask0 = 0x00000000; mask1 = 0xffff0000; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 11:  mask0 = 0x00000000; mask1 = 0xffffff00; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 12:  mask0 = 0x00000000; mask1 = 0xffffffff; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 13:  mask0 = 0xff000000; mask1 = 0xffffffff; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 14:  mask0 = 0xffff0000; mask1 = 0xffffffff; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 15:  mask0 = 0xffffff00; mask1 = 0xffffffff; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+    case 16:  mask0 = 0xffffffff; mask1 = 0xffffffff; mask2 = 0xffffffff; mask3 = 0xffffffff; break;
+  }
+
+  const u32 data0 = data_buf[last_pad_elem - 3];
+  const u32 data1 = data_buf[last_pad_elem - 2];
+  const u32 data2 = data_buf[last_pad_elem - 1];
+  const u32 data3 = data_buf[last_pad_elem - 0];
+
+  if ((data0 & mask0) != (padm & mask0)) return -1;
+  if ((data1 & mask1) != (padm & mask1)) return -1;
+  if ((data2 & mask2) != (padm & mask2)) return -1;
+  if ((data3 & mask3) != (padm & mask3)) return -1;
+
+  const int real_len = data_len - pad;
+
+  return real_len;
+}
+
+DECLSPEC int asn1_detect (PRIVATE_AS const u32 *buf, const int len)
+{
+  if (len < 128)
+  {
+    if ((buf[0] & 0x00ff80ff) != 0x00020030) return 0;
+  }
+  else if (len < 256)
+  {
+    if ((buf[0] & 0xff00ffff) != 0x02008130) return 0;
+  }
+  else if (len < 65536)
+  {
+    if ((buf[0] & 0x0000ffff) != 0x00008230) return 0;
+    if ((buf[1] & 0x000000ff) != 0x00000002) return 0;
+  }
+
+  if (len < 128)
+  {
+    const int lenb = ((buf[0] & 0x00007f00) >>  8);
+
+    if ((lenb + 2) != len) return 0;
+  }
+  else if (len < 256)
+  {
+    const int lenb = ((buf[0] & 0x00ff0000) >> 16);
+
+    if ((lenb + 3) != len) return 0;
+  }
+  else if (len < 65536)
+  {
+    const int lenb = ((buf[0] & 0xff000000) >> 24)
+                   | ((buf[0] & 0x00ff0000) >>  8);
+
+    if ((lenb + 4) != len) return 0;
+  }
+
+  return 1;
+}
+
+DECLSPEC int asn1_check_int_tag (PRIVATE_AS const u32 *buf, const int len)
+{
+  PRIVATE_AS const u8 *bytes = (PRIVATE_AS const u8 *) buf;
+
+  int seq_len_offset = 0;
+
+  if (bytes[1] < 0x80)
+  {
+    seq_len_offset = 2;
+  }
+  else if (bytes[1] == 0x81)
+  {
+    seq_len_offset = 3;
+  }
+  else if (bytes[1] == 0x82)
+  {
+    seq_len_offset = 4;
+  }
+  else
+  {
+    return 0;
+  }
+
+  int pos = seq_len_offset;
+
+  if (pos >= len) return 0;
+  if (pos + 2 > len) return 0;
+
+  u8 tag = bytes[pos];
+
+  if (tag != 0x02) return 0;
+
+  u8 len_byte = bytes[pos + 1];
+
+  int val_len = 0;
+  int tmp_len = 1;
+
+  if (len_byte < 0x80)
+  {
+    val_len = len_byte;
+  }
+  else if (len_byte == 0x81)
+  {
+    if (pos + 2 >= len) return 0;
+    val_len = bytes[pos + 2];
+    tmp_len = 2;
+  }
+  else if (len_byte == 0x82)
+  {
+    if (pos + 3 >= len) return 0;
+    val_len = (bytes[pos + 2] << 8) | bytes[pos + 3];
+    tmp_len = 3;
+  }
+  else
+  {
+    return 0;
+  }
+
+  if (pos + 1 + tmp_len + val_len > len) return 0;
+
+  if (val_len != 1) return 0;
+
+  return 1;
+}
+
+#define BITMAP_STAGE(tab,t)                                                 \
+{                                                                           \
+  const u32 ht = a + ((t) * b);                                             \
+  const u32 pt = hc_rotl32_S (b, (((t) * 4) + 1)) ^ a;                      \
+                                                                            \
+  const u32 m = (1U << (pt & 31)) | (1U << ((pt >> 5) & 31));               \
+                                                                            \
+  if ((tab[ht & bitmap_mask] & m) != m) return (0);                         \
+}
+
+DECLSPEC u32 check (PRIVATE_AS const u32 *digest, GLOBAL_AS const u32 *bitmap_s1_a, GLOBAL_AS const u32 *bitmap_s1_b, GLOBAL_AS const u32 *bitmap_s1_c, GLOBAL_AS const u32 *bitmap_s1_d, GLOBAL_AS const u32 *bitmap_s2_a, GLOBAL_AS const u32 *bitmap_s2_b, GLOBAL_AS const u32 *bitmap_s2_c, GLOBAL_AS const u32 *bitmap_s2_d, const u32 bitmap_mask)
+{
+  // must match bitmap_set() in src/bitmap.c, a mismatch is a silent false negative
+
+  const u32 a = digest[0] ^ hc_rotl32_S (digest[1], 11) ^ hc_rotl32_S (digest[2], 22) ^ hc_rotl32_S (digest[3],  5);
+  const u32 b = digest[3] ^ hc_rotl32_S (digest[2],  7) ^ hc_rotl32_S (digest[1], 19) ^ hc_rotl32_S (digest[0], 27);
+
+  BITMAP_STAGE (bitmap_s1_a, 0);
+  BITMAP_STAGE (bitmap_s1_b, 1);
+  BITMAP_STAGE (bitmap_s1_c, 2);
+  BITMAP_STAGE (bitmap_s1_d, 3);
+  BITMAP_STAGE (bitmap_s2_a, 4);
+  BITMAP_STAGE (bitmap_s2_b, 5);
+  BITMAP_STAGE (bitmap_s2_c, 6);
+  BITMAP_STAGE (bitmap_s2_d, 7);
+
+  return (1);
+}
+
+DECLSPEC void mark_hash (GLOBAL_AS plain_t *plains_buf, GLOBAL_AS u32 *d_result, const u32 salt_pos, const u32 digests_cnt, const u32 digest_pos, const u32 hash_pos, const u64 gid, const u32 il_pos, const u32 extra1, const u32 extra2)
+{
+  const u32 idx = hc_atomic_inc (d_result);
+
+  #if ATTACK_MODE == 9
+
+  #else
+  if (idx >= digests_cnt)
+  {
+    // this is kind of tricky: we *must* call hc_atomic_inc() to know about the current value from a multi-thread perspective
+    // this action creates a buffer overflow, so we need to fix it here
+
+    hc_atomic_dec (d_result);
+
+    return;
+  }
+  #endif
+
+  plains_buf[idx].salt_pos   = salt_pos;
+  plains_buf[idx].digest_pos = digest_pos;  // relative
+  plains_buf[idx].hash_pos   = hash_pos;    // absolute
+  plains_buf[idx].gidvid     = gid;
+  plains_buf[idx].il_pos     = il_pos;
+  plains_buf[idx].extra1     = extra1;      // unused so far
+  plains_buf[idx].extra2     = extra2;      // unused so far
+}
+
+DECLSPEC int hc_count_char (PRIVATE_AS const u32 *buf, const int elems, const u32 c)
+{
+  int r = 0;
+
+  for (int i = 0; i < elems; i++)
+  {
+    const u32 v = buf[i];
+
+    if (((v >>  0) & 0xff) == c) r++;
+    if (((v >>  8) & 0xff) == c) r++;
+    if (((v >> 16) & 0xff) == c) r++;
+    if (((v >> 24) & 0xff) == c) r++;
+  }
+
+  return r;
+}
+
+DECLSPEC float hc_get_entropy (PRIVATE_AS const u32 *buf, const int elems)
+{
+  const int length = elems * 4;
+
+  float entropy = 0.0f;
+
+  #ifdef _unroll
+  #pragma unroll
+  #endif
+  for (u32 c = 0; c < 256; c++)
+  {
+    const int r = hc_count_char (buf, elems, c);
+
+    if (r == 0) continue;
+
+    float w = (float) r / length;
+
+    entropy += -w * log2 (w);
+  }
+
+  return entropy;
+}
+
+DECLSPEC int is_valid_hex_8 (const u8 v)
+{
+  // direct lookup table is slower thanks to CMOV
+
+  if ((v >= (u8) '0') && (v <= (u8) '9')) return 1;
+  if ((v >= (u8) 'a') && (v <= (u8) 'f')) return 1;
+
+  return 0;
+}
+
+DECLSPEC int is_valid_hex_32 (const u32 v)
+{
+  if (is_valid_hex_8 ((u8) (v >>  0)) == 0) return 0;
+  if (is_valid_hex_8 ((u8) (v >>  8)) == 0) return 0;
+  if (is_valid_hex_8 ((u8) (v >> 16)) == 0) return 0;
+  if (is_valid_hex_8 ((u8) (v >> 24)) == 0) return 0;
+
+  return 1;
+}
+
+DECLSPEC int is_valid_base58_8 (const u8 v)
+{
+  if (v > (u8) 'z') return 0;
+  if (v < (u8) '1') return 0;
+  if ((v > (u8) '9') && (v < (u8) 'A')) return 0;
+  if ((v > (u8) 'Z') && (v < (u8) 'a')) return 0;
+
+  // https://github.com/hashcat/hashcat/issues/3878
+  if (v == 'O') return 0;
+  if (v == 'I') return 0;
+  if (v == 'l') return 0;
+
+  return 1;
+}
+
+DECLSPEC int is_valid_base58_32 (const u32 v)
+{
+  if (is_valid_base58_8 ((u8) (v >>  0)) == 0) return 0;
+  if (is_valid_base58_8 ((u8) (v >>  8)) == 0) return 0;
+  if (is_valid_base58_8 ((u8) (v >> 16)) == 0) return 0;
+  if (is_valid_base58_8 ((u8) (v >> 24)) == 0) return 0;
+
+  return 1;
+}
+
+DECLSPEC int is_valid_printable_8 (const u8 v)
+{
+  if (v > (u8) 0x7e) return 0;
+  if (v < (u8) 0x20) return 0;
+
+  return 1;
+}
+
+DECLSPEC int is_valid_printable_32 (const u32 v)
+{
+  if (is_valid_printable_8 ((u8) (v >>  0)) == 0) return 0;
+  if (is_valid_printable_8 ((u8) (v >>  8)) == 0) return 0;
+  if (is_valid_printable_8 ((u8) (v >> 16)) == 0) return 0;
+  if (is_valid_printable_8 ((u8) (v >> 24)) == 0) return 0;
+
+  return 1;
+}
+
+DECLSPEC int is_valid_printable_8_incl_common_control (const u8 v)
+{
+  int valid=1;
+  // make sure only printables are allowed
+  if (v > (u8) 0x7e) valid=0;
+  if (v < (u8) 0x20) valid=0;
+
+  // but also allow some common control characters
+  if (v == (u8) 0x09) valid=1; // \t
+  if (v == (u8) 0x0a) valid=1; // \n
+  if (v == (u8) 0x0d) valid=1; // \r
+
+  return valid;
+}
+
+DECLSPEC int is_valid_printable_32_incl_common_control (const u32 v)
+{
+  if (is_valid_printable_8_incl_common_control ((u8) (v >>  0)) == 0) return 0;
+  if (is_valid_printable_8_incl_common_control ((u8) (v >>  8)) == 0) return 0;
+  if (is_valid_printable_8_incl_common_control ((u8) (v >> 16)) == 0) return 0;
+  if (is_valid_printable_8_incl_common_control ((u8) (v >> 24)) == 0) return 0;
+
+  return 1;
+}
+
+DECLSPEC int hc_find_keyboard_layout_map (const u32 search, const int search_len, KEYBOARD_MAP_AS keyboard_layout_mapping_t *s_keyboard_layout_mapping_buf, const int keyboard_layout_mapping_cnt)
+{
+  for (int idx = 0; idx < keyboard_layout_mapping_cnt; idx++)
+  {
+    const u32 src_char = s_keyboard_layout_mapping_buf[idx].src_char;
+    const int src_len  = s_keyboard_layout_mapping_buf[idx].src_len;
+
+    if (src_len == search_len)
+    {
+      const u32 mask = 0xffffffff >> ((4 - search_len) * 8);
+
+      if ((src_char & mask) == (search & mask)) return idx;
+    }
+  }
+
+  return -1;
+}
+
+DECLSPEC int hc_execute_keyboard_layout_mapping (PRIVATE_AS u32 *w, const int pw_len, KEYBOARD_MAP_AS keyboard_layout_mapping_t *s_keyboard_layout_mapping_buf, const int keyboard_layout_mapping_cnt)
+{
+  u32 out_buf[32] = { 0 };
+
+  PRIVATE_AS u8 *out_ptr = (PRIVATE_AS u8 *) out_buf;
+
+  int out_len = 0;
+
+  // TC/VC passwords are limited to 128
+
+  PRIVATE_AS u8 *w_ptr = (PRIVATE_AS u8 *) w;
+
+  int pw_pos = 0;
+
+  while (pw_pos < pw_len)
+  {
+    u32 src0 = 0;
+    u32 src1 = 0;
+    u32 src2 = 0;
+    u32 src3 = 0;
+
+    #define MIN(a,b) (((a) < (b)) ? (a) : (b))
+
+    const int rem = MIN (pw_len - pw_pos, 4);
+
+    #undef MIN
+
+    if (rem > 0) src0 = w_ptr[pw_pos + 0];
+    if (rem > 1) src1 = w_ptr[pw_pos + 1];
+    if (rem > 2) src2 = w_ptr[pw_pos + 2];
+    if (rem > 3) src3 = w_ptr[pw_pos + 3];
+
+    const u32 src = (src0 <<  0)
+                  | (src1 <<  8)
+                  | (src2 << 16)
+                  | (src3 << 24);
+
+    int src_len;
+
+    for (src_len = rem; src_len > 0; src_len--)
+    {
+      const int idx = hc_find_keyboard_layout_map (src, src_len, s_keyboard_layout_mapping_buf, keyboard_layout_mapping_cnt);
+
+      if (idx == -1) continue;
+
+      u32 dst_char = s_keyboard_layout_mapping_buf[idx].dst_char;
+      int dst_len  = s_keyboard_layout_mapping_buf[idx].dst_len;
+
+      // A mapping entry may be longer than the character it replaces, so the output grows, and the
+      // only thing that ever leaves this function is the 128 bytes copied back at the end. Ending
+      // the walk here keeps the writes inside out_buf and loses nothing that was ever returned.
+
+      if ((out_len + dst_len) > (int) sizeof (out_buf))
+      {
+        pw_pos = pw_len;
+
+        break;
+      }
+
+      switch (dst_len)
+      {
+        case 1:
+          out_ptr[out_len++] = (dst_char >>  0) & 0xff;
+          break;
+        case 2:
+          out_ptr[out_len++] = (dst_char >>  0) & 0xff;
+          out_ptr[out_len++] = (dst_char >>  8) & 0xff;
+          break;
+        case 3:
+          out_ptr[out_len++] = (dst_char >>  0) & 0xff;
+          out_ptr[out_len++] = (dst_char >>  8) & 0xff;
+          out_ptr[out_len++] = (dst_char >> 16) & 0xff;
+          break;
+        case 4:
+          out_ptr[out_len++] = (dst_char >>  0) & 0xff;
+          out_ptr[out_len++] = (dst_char >>  8) & 0xff;
+          out_ptr[out_len++] = (dst_char >> 16) & 0xff;
+          out_ptr[out_len++] = (dst_char >> 24) & 0xff;
+          break;
+      }
+
+      pw_pos += src_len;
+
+      break;
+    }
+
+    // not matched, keep original
+
+    if (src_len == 0)
+    {
+      if ((out_len + 1) > (int) sizeof (out_buf)) break;
+
+      out_ptr[out_len] = w_ptr[pw_pos];
+
+      out_len++;
+
+      pw_pos++;
+    }
+  }
+
+  w[ 0] = out_buf[ 0];
+  w[ 1] = out_buf[ 1];
+  w[ 2] = out_buf[ 2];
+  w[ 3] = out_buf[ 3];
+  w[ 4] = out_buf[ 4];
+  w[ 5] = out_buf[ 5];
+  w[ 6] = out_buf[ 6];
+  w[ 7] = out_buf[ 7];
+  w[ 8] = out_buf[ 8];
+  w[ 9] = out_buf[ 9];
+  w[10] = out_buf[10];
+  w[11] = out_buf[11];
+  w[12] = out_buf[12];
+  w[13] = out_buf[13];
+  w[14] = out_buf[14];
+  w[15] = out_buf[15];
+  w[16] = out_buf[16];
+  w[17] = out_buf[17];
+  w[18] = out_buf[18];
+  w[19] = out_buf[19];
+  w[20] = out_buf[20];
+  w[21] = out_buf[21];
+  w[22] = out_buf[22];
+  w[23] = out_buf[23];
+  w[24] = out_buf[24];
+  w[25] = out_buf[25];
+  w[26] = out_buf[26];
+  w[27] = out_buf[27];
+  w[28] = out_buf[28];
+  w[29] = out_buf[29];
+  w[30] = out_buf[30];
+  w[31] = out_buf[31];
+
+  return out_len;
+}
+
+DECLSPEC int count_bits_32 (const u32 v0, const u32 v1)
+{
+  u32 r = v0 ^ v1;
+
+  if (r == 0) return 0;
+
+  // from https://stackoverflow.com/questions/109023/count-the-number-of-set-bits-in-a-32-bit-integer
+
+  r = r - ((r >> 1) & 0x55555555);                  // add pairs of bits
+  r = (r & 0x33333333) + ((r >> 2) & 0x33333333);   // quads
+  r = (r + (r >> 4)) & 0x0F0F0F0F;                  // groups of 8
+  r *= 0x01010101;                                  // horizontal sum of bytes
+
+  // return just that top byte (after truncating to 32-bit even when int is wider than uint32_t)
+
+  return r >> 24;
+}
+
+/**
+ * vector functions
+ */
+
+DECLSPEC void make_utf16be (PRIVATE_AS const u32x *in, PRIVATE_AS u32x *out1, PRIVATE_AS u32x *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x3727);
+  out2[2] = hc_byte_perm (in[3], 0, 0x1707);
+  out2[1] = hc_byte_perm (in[2], 0, 0x3727);
+  out2[0] = hc_byte_perm (in[2], 0, 0x1707);
+  out1[3] = hc_byte_perm (in[1], 0, 0x3727);
+  out1[2] = hc_byte_perm (in[1], 0, 0x1707);
+  out1[1] = hc_byte_perm (in[0], 0, 0x3727);
+  out1[0] = hc_byte_perm (in[0], 0, 0x1707);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x03070207);
+  out2[2] = hc_byte_perm (in[3], 0, 0x01070007);
+  out2[1] = hc_byte_perm (in[2], 0, 0x03070207);
+  out2[0] = hc_byte_perm (in[2], 0, 0x01070007);
+  out1[3] = hc_byte_perm (in[1], 0, 0x03070207);
+  out1[2] = hc_byte_perm (in[1], 0, 0x01070007);
+  out1[1] = hc_byte_perm (in[0], 0, 0x03070207);
+  out1[0] = hc_byte_perm (in[0], 0, 0x01070007);
+
+  #else
+
+  out2[3] = ((in[3] >>  0) & 0xFF000000) | ((in[3] >> 8) & 0x0000FF00);
+  out2[2] = ((in[3] << 16) & 0xFF000000) | ((in[3] << 8) & 0x0000FF00);
+  out2[1] = ((in[2] >>  0) & 0xFF000000) | ((in[2] >> 8) & 0x0000FF00);
+  out2[0] = ((in[2] << 16) & 0xFF000000) | ((in[2] << 8) & 0x0000FF00);
+  out1[3] = ((in[1] >>  0) & 0xFF000000) | ((in[1] >> 8) & 0x0000FF00);
+  out1[2] = ((in[1] << 16) & 0xFF000000) | ((in[1] << 8) & 0x0000FF00);
+  out1[1] = ((in[0] >>  0) & 0xFF000000) | ((in[0] >> 8) & 0x0000FF00);
+  out1[0] = ((in[0] << 16) & 0xFF000000) | ((in[0] << 8) & 0x0000FF00);
+
+  #endif
+}
+
+DECLSPEC void make_utf16beN (PRIVATE_AS const u32x *in, PRIVATE_AS u32x *out1, PRIVATE_AS u32x *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x1707);
+  out2[2] = hc_byte_perm (in[3], 0, 0x3727);
+  out2[1] = hc_byte_perm (in[2], 0, 0x1707);
+  out2[0] = hc_byte_perm (in[2], 0, 0x3727);
+  out1[3] = hc_byte_perm (in[1], 0, 0x1707);
+  out1[2] = hc_byte_perm (in[1], 0, 0x3727);
+  out1[1] = hc_byte_perm (in[0], 0, 0x1707);
+  out1[0] = hc_byte_perm (in[0], 0, 0x3727);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x01070007);
+  out2[2] = hc_byte_perm (in[3], 0, 0x03070207);
+  out2[1] = hc_byte_perm (in[2], 0, 0x01070007);
+  out2[0] = hc_byte_perm (in[2], 0, 0x03070207);
+  out1[3] = hc_byte_perm (in[1], 0, 0x01070007);
+  out1[2] = hc_byte_perm (in[1], 0, 0x03070207);
+  out1[1] = hc_byte_perm (in[0], 0, 0x01070007);
+  out1[0] = hc_byte_perm (in[0], 0, 0x03070207);
+
+  #else
+
+  out2[3] = ((in[3] << 16) & 0xFF000000) | ((in[3] << 8) & 0x0000FF00);
+  out2[2] = ((in[3] >>  0) & 0xFF000000) | ((in[3] >> 8) & 0x0000FF00);
+  out2[1] = ((in[2] << 16) & 0xFF000000) | ((in[2] << 8) & 0x0000FF00);
+  out2[0] = ((in[2] >>  0) & 0xFF000000) | ((in[2] >> 8) & 0x0000FF00);
+  out1[3] = ((in[1] << 16) & 0xFF000000) | ((in[1] << 8) & 0x0000FF00);
+  out1[2] = ((in[1] >>  0) & 0xFF000000) | ((in[1] >> 8) & 0x0000FF00);
+  out1[1] = ((in[0] << 16) & 0xFF000000) | ((in[0] << 8) & 0x0000FF00);
+  out1[0] = ((in[0] >>  0) & 0xFF000000) | ((in[0] >> 8) & 0x0000FF00);
+
+  #endif
+}
+
+DECLSPEC void make_utf16le (PRIVATE_AS const u32x *in, PRIVATE_AS u32x *out1, PRIVATE_AS u32x *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x7372);
+  out2[2] = hc_byte_perm (in[3], 0, 0x7170);
+  out2[1] = hc_byte_perm (in[2], 0, 0x7372);
+  out2[0] = hc_byte_perm (in[2], 0, 0x7170);
+  out1[3] = hc_byte_perm (in[1], 0, 0x7372);
+  out1[2] = hc_byte_perm (in[1], 0, 0x7170);
+  out1[1] = hc_byte_perm (in[0], 0, 0x7372);
+  out1[0] = hc_byte_perm (in[0], 0, 0x7170);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x07030702);
+  out2[2] = hc_byte_perm (in[3], 0, 0x07010700);
+  out2[1] = hc_byte_perm (in[2], 0, 0x07030702);
+  out2[0] = hc_byte_perm (in[2], 0, 0x07010700);
+  out1[3] = hc_byte_perm (in[1], 0, 0x07030702);
+  out1[2] = hc_byte_perm (in[1], 0, 0x07010700);
+  out1[1] = hc_byte_perm (in[0], 0, 0x07030702);
+  out1[0] = hc_byte_perm (in[0], 0, 0x07010700);
+
+  #else
+
+  out2[3] = ((in[3] >> 8) & 0x00FF0000) | ((in[3] >> 16) & 0x000000FF);
+  out2[2] = ((in[3] << 8) & 0x00FF0000) | ((in[3] >>  0) & 0x000000FF);
+  out2[1] = ((in[2] >> 8) & 0x00FF0000) | ((in[2] >> 16) & 0x000000FF);
+  out2[0] = ((in[2] << 8) & 0x00FF0000) | ((in[2] >>  0) & 0x000000FF);
+  out1[3] = ((in[1] >> 8) & 0x00FF0000) | ((in[1] >> 16) & 0x000000FF);
+  out1[2] = ((in[1] << 8) & 0x00FF0000) | ((in[1] >>  0) & 0x000000FF);
+  out1[1] = ((in[0] >> 8) & 0x00FF0000) | ((in[0] >> 16) & 0x000000FF);
+  out1[0] = ((in[0] << 8) & 0x00FF0000) | ((in[0] >>  0) & 0x000000FF);
+
+  #endif
+}
+
+DECLSPEC void make_utf16leN (PRIVATE_AS const u32x *in, PRIVATE_AS u32x *out1, PRIVATE_AS u32x *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x7170);
+  out2[2] = hc_byte_perm (in[3], 0, 0x7372);
+  out2[1] = hc_byte_perm (in[2], 0, 0x7170);
+  out2[0] = hc_byte_perm (in[2], 0, 0x7372);
+  out1[3] = hc_byte_perm (in[1], 0, 0x7170);
+  out1[2] = hc_byte_perm (in[1], 0, 0x7372);
+  out1[1] = hc_byte_perm (in[0], 0, 0x7170);
+  out1[0] = hc_byte_perm (in[0], 0, 0x7372);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm (in[3], 0, 0x07010700);
+  out2[2] = hc_byte_perm (in[3], 0, 0x07030702);
+  out2[1] = hc_byte_perm (in[2], 0, 0x07010700);
+  out2[0] = hc_byte_perm (in[2], 0, 0x07030702);
+  out1[3] = hc_byte_perm (in[1], 0, 0x07010700);
+  out1[2] = hc_byte_perm (in[1], 0, 0x07030702);
+  out1[1] = hc_byte_perm (in[0], 0, 0x07010700);
+  out1[0] = hc_byte_perm (in[0], 0, 0x07030702);
+
+  #else
+
+  out2[3] = ((in[3] << 8) & 0x00FF0000) | ((in[3] >>  0) & 0x000000FF);
+  out2[2] = ((in[3] >> 8) & 0x00FF0000) | ((in[3] >> 16) & 0x000000FF);
+  out2[1] = ((in[2] << 8) & 0x00FF0000) | ((in[2] >>  0) & 0x000000FF);
+  out2[0] = ((in[2] >> 8) & 0x00FF0000) | ((in[2] >> 16) & 0x000000FF);
+  out1[3] = ((in[1] << 8) & 0x00FF0000) | ((in[1] >>  0) & 0x000000FF);
+  out1[2] = ((in[1] >> 8) & 0x00FF0000) | ((in[1] >> 16) & 0x000000FF);
+  out1[1] = ((in[0] << 8) & 0x00FF0000) | ((in[0] >>  0) & 0x000000FF);
+  out1[0] = ((in[0] >> 8) & 0x00FF0000) | ((in[0] >> 16) & 0x000000FF);
+
+  #endif
+}
+
+DECLSPEC void undo_utf16be (PRIVATE_AS const u32x *in1, PRIVATE_AS const u32x *in2, PRIVATE_AS u32x *out)
+{
+  #if defined IS_NV
+
+  out[0] = hc_byte_perm (in1[0], in1[1], 0x4602);
+  out[1] = hc_byte_perm (in1[2], in1[3], 0x4602);
+  out[2] = hc_byte_perm (in2[0], in2[1], 0x4602);
+  out[3] = hc_byte_perm (in2[2], in2[3], 0x4602);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out[0] = hc_byte_perm (in1[0], in1[1], 0x04060002);
+  out[1] = hc_byte_perm (in1[2], in1[3], 0x04060002);
+  out[2] = hc_byte_perm (in2[0], in2[1], 0x04060002);
+  out[3] = hc_byte_perm (in2[2], in2[3], 0x04060002);
+
+  #else
+
+  out[0] = ((in1[0] & 0x0000ff00) >>  8) | ((in1[0] & 0xff000000) >> 16)
+         | ((in1[1] & 0x0000ff00) <<  8) | ((in1[1] & 0xff000000) <<  0);
+  out[1] = ((in1[2] & 0x0000ff00) >>  8) | ((in1[2] & 0xff000000) >> 16)
+         | ((in1[3] & 0x0000ff00) <<  8) | ((in1[3] & 0xff000000) <<  0);
+  out[2] = ((in2[0] & 0x0000ff00) >>  8) | ((in2[0] & 0xff000000) >> 16)
+         | ((in2[1] & 0x0000ff00) <<  8) | ((in2[1] & 0xff000000) <<  0);
+  out[3] = ((in2[2] & 0x0000ff00) >>  8) | ((in2[2] & 0xff000000) >> 16)
+         | ((in2[3] & 0x0000ff00) <<  8) | ((in2[3] & 0xff000000) <<  0);
+
+  #endif
+}
+
+DECLSPEC void undo_utf16le (PRIVATE_AS const u32x *in1, PRIVATE_AS const u32x *in2, PRIVATE_AS u32x *out)
+{
+  #if defined IS_NV
+
+  out[0] = hc_byte_perm (in1[0], in1[1], 0x6420);
+  out[1] = hc_byte_perm (in1[2], in1[3], 0x6420);
+  out[2] = hc_byte_perm (in2[0], in2[1], 0x6420);
+  out[3] = hc_byte_perm (in2[2], in2[3], 0x6420);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out[0] = hc_byte_perm (in1[0], in1[1], 0x06040200);
+  out[1] = hc_byte_perm (in1[2], in1[3], 0x06040200);
+  out[2] = hc_byte_perm (in2[0], in2[1], 0x06040200);
+  out[3] = hc_byte_perm (in2[2], in2[3], 0x06040200);
+
+  #else
+
+  out[0] = ((in1[0] & 0x000000ff) >>  0) | ((in1[0] & 0x00ff0000) >>  8)
+         | ((in1[1] & 0x000000ff) << 16) | ((in1[1] & 0x00ff0000) <<  8);
+  out[1] = ((in1[2] & 0x000000ff) >>  0) | ((in1[2] & 0x00ff0000) >>  8)
+         | ((in1[3] & 0x000000ff) << 16) | ((in1[3] & 0x00ff0000) <<  8);
+  out[2] = ((in2[0] & 0x000000ff) >>  0) | ((in2[0] & 0x00ff0000) >>  8)
+         | ((in2[1] & 0x000000ff) << 16) | ((in2[1] & 0x00ff0000) <<  8);
+  out[3] = ((in2[2] & 0x000000ff) >>  0) | ((in2[2] & 0x00ff0000) >>  8)
+         | ((in2[3] & 0x000000ff) << 16) | ((in2[3] & 0x00ff0000) <<  8);
+
+  #endif
+}
+
+DECLSPEC void set_mark_1x4 (PRIVATE_AS u32 *v, const u32 offset)
+{
+  const u32 c = (offset & 15) / 4;
+  const u32 r = 0xffu << ((offset & 3) * 8);
+
+  v[0] = (c == 0) ? r : 0;
+  v[1] = (c == 1) ? r : 0;
+  v[2] = (c == 2) ? r : 0;
+  v[3] = (c == 3) ? r : 0;
+}
+
+DECLSPEC void append_helper_1x4 (PRIVATE_AS u32x *r, const u32 v, PRIVATE_AS const u32 *m)
+{
+  r[0] |= v & m[0];
+  r[1] |= v & m[1];
+  r[2] |= v & m[2];
+  r[3] |= v & m[3];
+}
+
+DECLSPEC void append_0x80_1x4 (PRIVATE_AS u32x *w0, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4 (v, offset);
+
+  append_helper_1x4 (w0, 0x80808080, v);
+}
+
+DECLSPEC void append_0x80_2x4 (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4 (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4 (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_3x4 (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4 (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4 (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w2, ((offset16 == 2) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_4x4 (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4 (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4 (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w2, ((offset16 == 2) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w3, ((offset16 == 3) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_8x4 (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *w4, PRIVATE_AS u32x *w5, PRIVATE_AS u32x *w6, PRIVATE_AS u32x *w7, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4 (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4 (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w2, ((offset16 == 2) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w3, ((offset16 == 3) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w4, ((offset16 == 4) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w5, ((offset16 == 5) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w6, ((offset16 == 6) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w7, ((offset16 == 7) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_1x16 (PRIVATE_AS u32x *w, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4 (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4 (w +  0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w +  4, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w +  8, ((offset16 == 2) ? 0x80808080 : 0), v);
+  append_helper_1x4 (w + 12, ((offset16 == 3) ? 0x80808080 : 0), v);
+}
+
+// The cases in the switch_buffer_by_offset and truncate_block functions below are generated.
+// Inside "case n" the n is a literal, so every i - n folds and the loop unrolls to the same
+// constant indices the hand written cases carried. Writing the index arithmetic once instead
+// of once per element removes the only real hazard in these functions. A mistyped index there
+// produces a wrong answer rather than a build error, so it shows up as a hash that does not
+// crack, months later, and not as a failed compile.
+//
+// The macros work on a flat buffer named w, and on the shift named offset. A function whose
+// caller passes four or eight separate arrays copies them into a local flat array first. That
+// costs nothing: after the unroll every index is a constant, so the flat array stays in
+// registers and the copies become register renames.
+
+#define SBBO_IN(base, src)  for (int i = 0; i < 4; i++) w[(base) + i] = src[i];
+#define SBBO_OUT(dst, base) for (int i = 0; i < 4; i++) dst[i] = w[(base) + i];
+
+// The plain form shifts the buffer up by n words and zero fills below it.
+
+#define SBBO_CASE_PLAIN(n, N, ALIGN)                                                             \
+  case (n):                                                                                      \
+    for (int i = (N) - 1; i > (n); i--) w[i] = ALIGN (w[i - (n) - 1], w[i - (n)], offset);        \
+    w[(n)] = ALIGN (0, w[0], offset);                                                            \
+    for (int i = (n) - 1; i >= 0; i--) w[i] = 0;                                                 \
+    break;
+
+// The carry form is the same shift, but the n words that fall off the top are kept, in a carry
+// buffer that sits at w[N] upwards. Only the topmost carry word reads past the data, and it
+// reads a literal zero, so the carry buffer is write only here. Carry words above n + N are
+// not written at all, which is what the hand written cases did.
+
+#define SBBO_CASE_CARRY(n, N, ALIGN)                                                             \
+  case (n):                                                                                      \
+    w[(n) + (N)] = ALIGN (w[(N) - 1], 0, offset);                                                \
+    for (int i = (n) + (N) - 1; i > (n); i--) w[i] = ALIGN (w[i - (n) - 1], w[i - (n)], offset);  \
+    w[(n)] = ALIGN (0, w[0], offset);                                                            \
+    for (int i = (n) - 1; i >= 0; i--) w[i] = 0;                                                 \
+    break;
+
+// truncate_block keeps the first len bytes of the buffer and clears the rest. The word the cut
+// falls inside is masked, the words above it are cleared, and the words below are left alone.
+// A cut on a word boundary gives a zero mask, which clears that word.
+
+#define TRUNC_MASK_LE(n) (~(0xffffffffU << (((n) % 4) * 8)))
+#define TRUNC_MASK_BE(n) (~(0xffffffffU >> (((n) % 4) * 8)))
+
+#define TRUNC_CASE(n, N, MASK)                          \
+  case (n):                                             \
+    w[(n) / 4] &= MASK (n);                             \
+    for (int i = ((n) / 4) + 1; i < (N); i++) w[i] = 0;  \
+    break;
+
+
+#define SBBO_CASES_16(FORM, N, ALIGN)  \
+  FORM ( 0, N, ALIGN)                  \
+  FORM ( 1, N, ALIGN)                  \
+  FORM ( 2, N, ALIGN)                  \
+  FORM ( 3, N, ALIGN)                  \
+  FORM ( 4, N, ALIGN)                  \
+  FORM ( 5, N, ALIGN)                  \
+  FORM ( 6, N, ALIGN)                  \
+  FORM ( 7, N, ALIGN)                  \
+  FORM ( 8, N, ALIGN)                  \
+  FORM ( 9, N, ALIGN)                  \
+  FORM (10, N, ALIGN)                  \
+  FORM (11, N, ALIGN)                  \
+  FORM (12, N, ALIGN)                  \
+  FORM (13, N, ALIGN)                  \
+  FORM (14, N, ALIGN)                  \
+  FORM (15, N, ALIGN)
+
+#define SBBO_CASES_32(FORM, N, ALIGN)  \
+  FORM ( 0, N, ALIGN)                  \
+  FORM ( 1, N, ALIGN)                  \
+  FORM ( 2, N, ALIGN)                  \
+  FORM ( 3, N, ALIGN)                  \
+  FORM ( 4, N, ALIGN)                  \
+  FORM ( 5, N, ALIGN)                  \
+  FORM ( 6, N, ALIGN)                  \
+  FORM ( 7, N, ALIGN)                  \
+  FORM ( 8, N, ALIGN)                  \
+  FORM ( 9, N, ALIGN)                  \
+  FORM (10, N, ALIGN)                  \
+  FORM (11, N, ALIGN)                  \
+  FORM (12, N, ALIGN)                  \
+  FORM (13, N, ALIGN)                  \
+  FORM (14, N, ALIGN)                  \
+  FORM (15, N, ALIGN)                  \
+  FORM (16, N, ALIGN)                  \
+  FORM (17, N, ALIGN)                  \
+  FORM (18, N, ALIGN)                  \
+  FORM (19, N, ALIGN)                  \
+  FORM (20, N, ALIGN)                  \
+  FORM (21, N, ALIGN)                  \
+  FORM (22, N, ALIGN)                  \
+  FORM (23, N, ALIGN)                  \
+  FORM (24, N, ALIGN)                  \
+  FORM (25, N, ALIGN)                  \
+  FORM (26, N, ALIGN)                  \
+  FORM (27, N, ALIGN)                  \
+  FORM (28, N, ALIGN)                  \
+  FORM (29, N, ALIGN)                  \
+  FORM (30, N, ALIGN)                  \
+  FORM (31, N, ALIGN)
+
+#define SBBO_CASES_64(FORM, N, ALIGN)  \
+  FORM ( 0, N, ALIGN)                  \
+  FORM ( 1, N, ALIGN)                  \
+  FORM ( 2, N, ALIGN)                  \
+  FORM ( 3, N, ALIGN)                  \
+  FORM ( 4, N, ALIGN)                  \
+  FORM ( 5, N, ALIGN)                  \
+  FORM ( 6, N, ALIGN)                  \
+  FORM ( 7, N, ALIGN)                  \
+  FORM ( 8, N, ALIGN)                  \
+  FORM ( 9, N, ALIGN)                  \
+  FORM (10, N, ALIGN)                  \
+  FORM (11, N, ALIGN)                  \
+  FORM (12, N, ALIGN)                  \
+  FORM (13, N, ALIGN)                  \
+  FORM (14, N, ALIGN)                  \
+  FORM (15, N, ALIGN)                  \
+  FORM (16, N, ALIGN)                  \
+  FORM (17, N, ALIGN)                  \
+  FORM (18, N, ALIGN)                  \
+  FORM (19, N, ALIGN)                  \
+  FORM (20, N, ALIGN)                  \
+  FORM (21, N, ALIGN)                  \
+  FORM (22, N, ALIGN)                  \
+  FORM (23, N, ALIGN)                  \
+  FORM (24, N, ALIGN)                  \
+  FORM (25, N, ALIGN)                  \
+  FORM (26, N, ALIGN)                  \
+  FORM (27, N, ALIGN)                  \
+  FORM (28, N, ALIGN)                  \
+  FORM (29, N, ALIGN)                  \
+  FORM (30, N, ALIGN)                  \
+  FORM (31, N, ALIGN)                  \
+  FORM (32, N, ALIGN)                  \
+  FORM (33, N, ALIGN)                  \
+  FORM (34, N, ALIGN)                  \
+  FORM (35, N, ALIGN)                  \
+  FORM (36, N, ALIGN)                  \
+  FORM (37, N, ALIGN)                  \
+  FORM (38, N, ALIGN)                  \
+  FORM (39, N, ALIGN)                  \
+  FORM (40, N, ALIGN)                  \
+  FORM (41, N, ALIGN)                  \
+  FORM (42, N, ALIGN)                  \
+  FORM (43, N, ALIGN)                  \
+  FORM (44, N, ALIGN)                  \
+  FORM (45, N, ALIGN)                  \
+  FORM (46, N, ALIGN)                  \
+  FORM (47, N, ALIGN)                  \
+  FORM (48, N, ALIGN)                  \
+  FORM (49, N, ALIGN)                  \
+  FORM (50, N, ALIGN)                  \
+  FORM (51, N, ALIGN)                  \
+  FORM (52, N, ALIGN)                  \
+  FORM (53, N, ALIGN)                  \
+  FORM (54, N, ALIGN)                  \
+  FORM (55, N, ALIGN)                  \
+  FORM (56, N, ALIGN)                  \
+  FORM (57, N, ALIGN)                  \
+  FORM (58, N, ALIGN)                  \
+  FORM (59, N, ALIGN)                  \
+  FORM (60, N, ALIGN)                  \
+  FORM (61, N, ALIGN)                  \
+  FORM (62, N, ALIGN)                  \
+  FORM (63, N, ALIGN)
+
+#define TRUNC_CASES_16(MASK, N)  \
+  TRUNC_CASE ( 0, N, MASK)       \
+  TRUNC_CASE ( 1, N, MASK)       \
+  TRUNC_CASE ( 2, N, MASK)       \
+  TRUNC_CASE ( 3, N, MASK)       \
+  TRUNC_CASE ( 4, N, MASK)       \
+  TRUNC_CASE ( 5, N, MASK)       \
+  TRUNC_CASE ( 6, N, MASK)       \
+  TRUNC_CASE ( 7, N, MASK)       \
+  TRUNC_CASE ( 8, N, MASK)       \
+  TRUNC_CASE ( 9, N, MASK)       \
+  TRUNC_CASE (10, N, MASK)       \
+  TRUNC_CASE (11, N, MASK)       \
+  TRUNC_CASE (12, N, MASK)       \
+  TRUNC_CASE (13, N, MASK)       \
+  TRUNC_CASE (14, N, MASK)       \
+  TRUNC_CASE (15, N, MASK)
+
+#define TRUNC_CASES_64(MASK, N)  \
+  TRUNC_CASE ( 0, N, MASK)       \
+  TRUNC_CASE ( 1, N, MASK)       \
+  TRUNC_CASE ( 2, N, MASK)       \
+  TRUNC_CASE ( 3, N, MASK)       \
+  TRUNC_CASE ( 4, N, MASK)       \
+  TRUNC_CASE ( 5, N, MASK)       \
+  TRUNC_CASE ( 6, N, MASK)       \
+  TRUNC_CASE ( 7, N, MASK)       \
+  TRUNC_CASE ( 8, N, MASK)       \
+  TRUNC_CASE ( 9, N, MASK)       \
+  TRUNC_CASE (10, N, MASK)       \
+  TRUNC_CASE (11, N, MASK)       \
+  TRUNC_CASE (12, N, MASK)       \
+  TRUNC_CASE (13, N, MASK)       \
+  TRUNC_CASE (14, N, MASK)       \
+  TRUNC_CASE (15, N, MASK)       \
+  TRUNC_CASE (16, N, MASK)       \
+  TRUNC_CASE (17, N, MASK)       \
+  TRUNC_CASE (18, N, MASK)       \
+  TRUNC_CASE (19, N, MASK)       \
+  TRUNC_CASE (20, N, MASK)       \
+  TRUNC_CASE (21, N, MASK)       \
+  TRUNC_CASE (22, N, MASK)       \
+  TRUNC_CASE (23, N, MASK)       \
+  TRUNC_CASE (24, N, MASK)       \
+  TRUNC_CASE (25, N, MASK)       \
+  TRUNC_CASE (26, N, MASK)       \
+  TRUNC_CASE (27, N, MASK)       \
+  TRUNC_CASE (28, N, MASK)       \
+  TRUNC_CASE (29, N, MASK)       \
+  TRUNC_CASE (30, N, MASK)       \
+  TRUNC_CASE (31, N, MASK)       \
+  TRUNC_CASE (32, N, MASK)       \
+  TRUNC_CASE (33, N, MASK)       \
+  TRUNC_CASE (34, N, MASK)       \
+  TRUNC_CASE (35, N, MASK)       \
+  TRUNC_CASE (36, N, MASK)       \
+  TRUNC_CASE (37, N, MASK)       \
+  TRUNC_CASE (38, N, MASK)       \
+  TRUNC_CASE (39, N, MASK)       \
+  TRUNC_CASE (40, N, MASK)       \
+  TRUNC_CASE (41, N, MASK)       \
+  TRUNC_CASE (42, N, MASK)       \
+  TRUNC_CASE (43, N, MASK)       \
+  TRUNC_CASE (44, N, MASK)       \
+  TRUNC_CASE (45, N, MASK)       \
+  TRUNC_CASE (46, N, MASK)       \
+  TRUNC_CASE (47, N, MASK)       \
+  TRUNC_CASE (48, N, MASK)       \
+  TRUNC_CASE (49, N, MASK)       \
+  TRUNC_CASE (50, N, MASK)       \
+  TRUNC_CASE (51, N, MASK)       \
+  TRUNC_CASE (52, N, MASK)       \
+  TRUNC_CASE (53, N, MASK)       \
+  TRUNC_CASE (54, N, MASK)       \
+  TRUNC_CASE (55, N, MASK)       \
+  TRUNC_CASE (56, N, MASK)       \
+  TRUNC_CASE (57, N, MASK)       \
+  TRUNC_CASE (58, N, MASK)       \
+  TRUNC_CASE (59, N, MASK)       \
+  TRUNC_CASE (60, N, MASK)       \
+  TRUNC_CASE (61, N, MASK)       \
+  TRUNC_CASE (62, N, MASK)       \
+  TRUNC_CASE (63, N, MASK)
+
+DECLSPEC void switch_buffer_by_offset_le (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32 offset)
+{
+  u32x w[16];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_PLAIN, 16, hc_bytealign)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+}
+
+DECLSPEC void switch_buffer_by_offset_carry_le (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *c0, PRIVATE_AS u32x *c1, PRIVATE_AS u32x *c2, PRIVATE_AS u32x *c3, const u32 offset)
+{
+  u32x w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, c0)
+  SBBO_IN (20, c1)
+  SBBO_IN (24, c2)
+  SBBO_IN (28, c3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_CARRY, 16, hc_bytealign)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (c0, 16)
+  SBBO_OUT (c1, 20)
+  SBBO_OUT (c2, 24)
+  SBBO_OUT (c3, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_be (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32 offset)
+{
+  u32x w[16];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_PLAIN, 16, hc_bytealign_be)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+}
+
+DECLSPEC void switch_buffer_by_offset_carry_be (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *c0, PRIVATE_AS u32x *c1, PRIVATE_AS u32x *c2, PRIVATE_AS u32x *c3, const u32 offset)
+{
+  u32x w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, c0)
+  SBBO_IN (20, c1)
+  SBBO_IN (24, c2)
+  SBBO_IN (28, c3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_CARRY, 16, hc_bytealign_be)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (c0, 16)
+  SBBO_OUT (c1, 20)
+  SBBO_OUT (c2, 24)
+  SBBO_OUT (c3, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_le (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *w4, PRIVATE_AS u32x *w5, PRIVATE_AS u32x *w6, PRIVATE_AS u32x *w7, const u32 offset)
+{
+  u32x w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_PLAIN, 32, hc_bytealign)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_carry_le (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *w4, PRIVATE_AS u32x *w5, PRIVATE_AS u32x *w6, PRIVATE_AS u32x *w7, PRIVATE_AS u32x *c0, PRIVATE_AS u32x *c1, PRIVATE_AS u32x *c2, PRIVATE_AS u32x *c3, PRIVATE_AS u32x *c4, PRIVATE_AS u32x *c5, PRIVATE_AS u32x *c6, PRIVATE_AS u32x *c7, const u32 offset)
+{
+  u32x w[64];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+  SBBO_IN (32, c0)
+  SBBO_IN (36, c1)
+  SBBO_IN (40, c2)
+  SBBO_IN (44, c3)
+  SBBO_IN (48, c4)
+  SBBO_IN (52, c5)
+  SBBO_IN (56, c6)
+  SBBO_IN (60, c7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_CARRY, 32, hc_bytealign)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+  SBBO_OUT (c0, 32)
+  SBBO_OUT (c1, 36)
+  SBBO_OUT (c2, 40)
+  SBBO_OUT (c3, 44)
+  SBBO_OUT (c4, 48)
+  SBBO_OUT (c5, 52)
+  SBBO_OUT (c6, 56)
+  SBBO_OUT (c7, 60)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_be (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *w4, PRIVATE_AS u32x *w5, PRIVATE_AS u32x *w6, PRIVATE_AS u32x *w7, const u32 offset)
+{
+  u32x w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_PLAIN, 32, hc_bytealign_be)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_carry_be (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *w4, PRIVATE_AS u32x *w5, PRIVATE_AS u32x *w6, PRIVATE_AS u32x *w7, PRIVATE_AS u32x *c0, PRIVATE_AS u32x *c1, PRIVATE_AS u32x *c2, PRIVATE_AS u32x *c3, PRIVATE_AS u32x *c4, PRIVATE_AS u32x *c5, PRIVATE_AS u32x *c6, PRIVATE_AS u32x *c7, const u32 offset)
+{
+  u32x w[64];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+  SBBO_IN (32, c0)
+  SBBO_IN (36, c1)
+  SBBO_IN (40, c2)
+  SBBO_IN (44, c3)
+  SBBO_IN (48, c4)
+  SBBO_IN (52, c5)
+  SBBO_IN (56, c6)
+  SBBO_IN (60, c7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_CARRY, 32, hc_bytealign_be)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+  SBBO_OUT (c0, 32)
+  SBBO_OUT (c1, 36)
+  SBBO_OUT (c2, 40)
+  SBBO_OUT (c3, 44)
+  SBBO_OUT (c4, 48)
+  SBBO_OUT (c5, 52)
+  SBBO_OUT (c6, 56)
+  SBBO_OUT (c7, 60)
+}
+
+/**
+ * vector functions as scalar (for outer loop usage)
+ */
+
+DECLSPEC void truncate_block_4x4_le_S (PRIVATE_AS u32 *w, const u32 len)
+{
+  switch (len)
+  {
+    TRUNC_CASES_16 (TRUNC_MASK_LE, 4)
+  }
+}
+
+DECLSPEC void truncate_block_4x4_be_S (PRIVATE_AS u32 *w, const u32 len)
+{
+  switch (len)
+  {
+    TRUNC_CASES_16 (TRUNC_MASK_BE, 4)
+  }
+}
+
+DECLSPEC void truncate_block_16x4_be_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 len)
+{
+  u32 w[16];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+
+  switch (len)
+  {
+    TRUNC_CASES_64 (TRUNC_MASK_BE, 16)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+}
+
+DECLSPEC void set_mark_1x4_S (PRIVATE_AS u32 *v, const u32 offset)
+{
+  const u32 c = (offset & 15) / 4;
+  const u32 r = 0xffu << ((offset & 3) * 8);
+
+  v[0] = (c == 0) ? r : 0;
+  v[1] = (c == 1) ? r : 0;
+  v[2] = (c == 2) ? r : 0;
+  v[3] = (c == 3) ? r : 0;
+}
+
+DECLSPEC void append_helper_1x4_S (PRIVATE_AS u32 *r, const u32 v, PRIVATE_AS const u32 *m)
+{
+  r[0] |= v & m[0];
+  r[1] |= v & m[1];
+  r[2] |= v & m[2];
+  r[3] |= v & m[3];
+}
+
+DECLSPEC void append_0x01_2x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x01010101 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x01010101 : 0), v);
+}
+
+DECLSPEC void append_0x06_2x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x06060606 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x06060606 : 0), v);
+}
+
+DECLSPEC void append_0x01_4x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x01010101 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x01010101 : 0), v);
+  append_helper_1x4_S (w2, ((offset16 == 2) ? 0x01010101 : 0), v);
+  append_helper_1x4_S (w3, ((offset16 == 3) ? 0x01010101 : 0), v);
+}
+
+DECLSPEC void append_0x2d_4x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x2d2d2d2d : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x2d2d2d2d : 0), v);
+  append_helper_1x4_S (w2, ((offset16 == 2) ? 0x2d2d2d2d : 0), v);
+  append_helper_1x4_S (w3, ((offset16 == 3) ? 0x2d2d2d2d : 0), v);
+}
+
+DECLSPEC void append_0x3a_4x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x3a3a3a3a : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x3a3a3a3a : 0), v);
+  append_helper_1x4_S (w2, ((offset16 == 2) ? 0x3a3a3a3a : 0), v);
+  append_helper_1x4_S (w3, ((offset16 == 3) ? 0x3a3a3a3a : 0), v);
+}
+
+DECLSPEC void append_0x80_1x4_S (PRIVATE_AS u32 *w0, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  append_helper_1x4_S (w0, 0x80808080, v);
+}
+
+DECLSPEC void append_0x80_2x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_3x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w2, ((offset16 == 2) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_4x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w2, ((offset16 == 2) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w3, ((offset16 == 3) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void append_0x80_8x4_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *w4, PRIVATE_AS u32 *w5, PRIVATE_AS u32 *w6, PRIVATE_AS u32 *w7, const u32 offset)
+{
+  u32 v[4];
+
+  set_mark_1x4_S (v, offset);
+
+  const u32 offset16 = offset / 16;
+
+  append_helper_1x4_S (w0, ((offset16 == 0) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w1, ((offset16 == 1) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w2, ((offset16 == 2) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w3, ((offset16 == 3) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w4, ((offset16 == 4) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w5, ((offset16 == 5) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w6, ((offset16 == 6) ? 0x80808080 : 0), v);
+  append_helper_1x4_S (w7, ((offset16 == 7) ? 0x80808080 : 0), v);
+}
+
+DECLSPEC void make_utf16be_S (PRIVATE_AS const u32 *in, PRIVATE_AS u32 *out1, PRIVATE_AS u32 *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm_S (in[3], 0, 0x3727);
+  out2[2] = hc_byte_perm_S (in[3], 0, 0x1707);
+  out2[1] = hc_byte_perm_S (in[2], 0, 0x3727);
+  out2[0] = hc_byte_perm_S (in[2], 0, 0x1707);
+  out1[3] = hc_byte_perm_S (in[1], 0, 0x3727);
+  out1[2] = hc_byte_perm_S (in[1], 0, 0x1707);
+  out1[1] = hc_byte_perm_S (in[0], 0, 0x3727);
+  out1[0] = hc_byte_perm_S (in[0], 0, 0x1707);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm_S (in[3], 0, 0x03070207);
+  out2[2] = hc_byte_perm_S (in[3], 0, 0x01070007);
+  out2[1] = hc_byte_perm_S (in[2], 0, 0x03070207);
+  out2[0] = hc_byte_perm_S (in[2], 0, 0x01070007);
+  out1[3] = hc_byte_perm_S (in[1], 0, 0x03070207);
+  out1[2] = hc_byte_perm_S (in[1], 0, 0x01070007);
+  out1[1] = hc_byte_perm_S (in[0], 0, 0x03070207);
+  out1[0] = hc_byte_perm_S (in[0], 0, 0x01070007);
+
+  #else
+
+  out2[3] = ((in[3] >>  0) & 0xFF000000) | ((in[3] >> 8) & 0x0000FF00);
+  out2[2] = ((in[3] << 16) & 0xFF000000) | ((in[3] << 8) & 0x0000FF00);
+  out2[1] = ((in[2] >>  0) & 0xFF000000) | ((in[2] >> 8) & 0x0000FF00);
+  out2[0] = ((in[2] << 16) & 0xFF000000) | ((in[2] << 8) & 0x0000FF00);
+  out1[3] = ((in[1] >>  0) & 0xFF000000) | ((in[1] >> 8) & 0x0000FF00);
+  out1[2] = ((in[1] << 16) & 0xFF000000) | ((in[1] << 8) & 0x0000FF00);
+  out1[1] = ((in[0] >>  0) & 0xFF000000) | ((in[0] >> 8) & 0x0000FF00);
+  out1[0] = ((in[0] << 16) & 0xFF000000) | ((in[0] << 8) & 0x0000FF00);
+
+  #endif
+}
+
+DECLSPEC void make_utf16beN_S (PRIVATE_AS const u32 *in, PRIVATE_AS u32 *out1, PRIVATE_AS u32 *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm_S (in[3], 0, 0x1707);
+  out2[2] = hc_byte_perm_S (in[3], 0, 0x3727);
+  out2[1] = hc_byte_perm_S (in[2], 0, 0x1707);
+  out2[0] = hc_byte_perm_S (in[2], 0, 0x3727);
+  out1[3] = hc_byte_perm_S (in[1], 0, 0x1707);
+  out1[2] = hc_byte_perm_S (in[1], 0, 0x3727);
+  out1[1] = hc_byte_perm_S (in[0], 0, 0x1707);
+  out1[0] = hc_byte_perm_S (in[0], 0, 0x3727);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm_S (in[3], 0, 0x01070007);
+  out2[2] = hc_byte_perm_S (in[3], 0, 0x03070207);
+  out2[1] = hc_byte_perm_S (in[2], 0, 0x01070007);
+  out2[0] = hc_byte_perm_S (in[2], 0, 0x03070207);
+  out1[3] = hc_byte_perm_S (in[1], 0, 0x01070007);
+  out1[2] = hc_byte_perm_S (in[1], 0, 0x03070207);
+  out1[1] = hc_byte_perm_S (in[0], 0, 0x01070007);
+  out1[0] = hc_byte_perm_S (in[0], 0, 0x03070207);
+
+  #else
+
+  out2[3] = ((in[3] << 16) & 0xFF000000) | ((in[3] << 8) & 0x0000FF00);
+  out2[2] = ((in[3] >>  0) & 0xFF000000) | ((in[3] >> 8) & 0x0000FF00);
+  out2[1] = ((in[2] << 16) & 0xFF000000) | ((in[2] << 8) & 0x0000FF00);
+  out2[0] = ((in[2] >>  0) & 0xFF000000) | ((in[2] >> 8) & 0x0000FF00);
+  out1[3] = ((in[1] << 16) & 0xFF000000) | ((in[1] << 8) & 0x0000FF00);
+  out1[2] = ((in[1] >>  0) & 0xFF000000) | ((in[1] >> 8) & 0x0000FF00);
+  out1[1] = ((in[0] << 16) & 0xFF000000) | ((in[0] << 8) & 0x0000FF00);
+  out1[0] = ((in[0] >>  0) & 0xFF000000) | ((in[0] >> 8) & 0x0000FF00);
+
+  #endif
+}
+
+DECLSPEC void make_utf16le_S (PRIVATE_AS const u32 *in, PRIVATE_AS u32 *out1, PRIVATE_AS u32 *out2)
+{
+  #if defined IS_NV
+
+  out2[3] = hc_byte_perm_S (in[3], 0, 0x7372);
+  out2[2] = hc_byte_perm_S (in[3], 0, 0x7170);
+  out2[1] = hc_byte_perm_S (in[2], 0, 0x7372);
+  out2[0] = hc_byte_perm_S (in[2], 0, 0x7170);
+  out1[3] = hc_byte_perm_S (in[1], 0, 0x7372);
+  out1[2] = hc_byte_perm_S (in[1], 0, 0x7170);
+  out1[1] = hc_byte_perm_S (in[0], 0, 0x7372);
+  out1[0] = hc_byte_perm_S (in[0], 0, 0x7170);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out2[3] = hc_byte_perm_S (in[3], 0, 0x07030702);
+  out2[2] = hc_byte_perm_S (in[3], 0, 0x07010700);
+  out2[1] = hc_byte_perm_S (in[2], 0, 0x07030702);
+  out2[0] = hc_byte_perm_S (in[2], 0, 0x07010700);
+  out1[3] = hc_byte_perm_S (in[1], 0, 0x07030702);
+  out1[2] = hc_byte_perm_S (in[1], 0, 0x07010700);
+  out1[1] = hc_byte_perm_S (in[0], 0, 0x07030702);
+  out1[0] = hc_byte_perm_S (in[0], 0, 0x07010700);
+
+  #else
+
+  out2[3] = ((in[3] >> 8) & 0x00FF0000) | ((in[3] >> 16) & 0x000000FF);
+  out2[2] = ((in[3] << 8) & 0x00FF0000) | ((in[3] >>  0) & 0x000000FF);
+  out2[1] = ((in[2] >> 8) & 0x00FF0000) | ((in[2] >> 16) & 0x000000FF);
+  out2[0] = ((in[2] << 8) & 0x00FF0000) | ((in[2] >>  0) & 0x000000FF);
+  out1[3] = ((in[1] >> 8) & 0x00FF0000) | ((in[1] >> 16) & 0x000000FF);
+  out1[2] = ((in[1] << 8) & 0x00FF0000) | ((in[1] >>  0) & 0x000000FF);
+  out1[1] = ((in[0] >> 8) & 0x00FF0000) | ((in[0] >> 16) & 0x000000FF);
+  out1[0] = ((in[0] << 8) & 0x00FF0000) | ((in[0] >>  0) & 0x000000FF);
+
+  #endif
+}
+
+DECLSPEC void undo_utf16be_S (PRIVATE_AS const u32 *in1, PRIVATE_AS const u32 *in2, PRIVATE_AS u32 *out)
+{
+  #if defined IS_NV
+
+  out[0] = hc_byte_perm_S (in1[0], in1[1], 0x4602);
+  out[1] = hc_byte_perm_S (in1[2], in1[3], 0x4602);
+  out[2] = hc_byte_perm_S (in2[0], in2[1], 0x4602);
+  out[3] = hc_byte_perm_S (in2[2], in2[3], 0x4602);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out[0] = hc_byte_perm_S (in1[0], in1[1], 0x04060002);
+  out[1] = hc_byte_perm_S (in1[2], in1[3], 0x04060002);
+  out[2] = hc_byte_perm_S (in2[0], in2[1], 0x04060002);
+  out[3] = hc_byte_perm_S (in2[2], in2[3], 0x04060002);
+
+  #else
+
+  out[0] = ((in1[0] & 0x0000ff00) >>  8) | ((in1[0] & 0xff000000) >> 16)
+         | ((in1[1] & 0x0000ff00) <<  8) | ((in1[1] & 0xff000000) <<  0);
+  out[1] = ((in1[2] & 0x0000ff00) >>  8) | ((in1[2] & 0xff000000) >> 16)
+         | ((in1[3] & 0x0000ff00) <<  8) | ((in1[3] & 0xff000000) <<  0);
+  out[2] = ((in2[0] & 0x0000ff00) >>  8) | ((in2[0] & 0xff000000) >> 16)
+         | ((in2[1] & 0x0000ff00) <<  8) | ((in2[1] & 0xff000000) <<  0);
+  out[3] = ((in2[2] & 0x0000ff00) >>  8) | ((in2[2] & 0xff000000) >> 16)
+         | ((in2[3] & 0x0000ff00) <<  8) | ((in2[3] & 0xff000000) <<  0);
+
+  #endif
+}
+
+DECLSPEC void undo_utf16le_S (PRIVATE_AS const u32 *in1, PRIVATE_AS const u32 *in2, PRIVATE_AS u32 *out)
+{
+  #if defined IS_NV
+
+  out[0] = hc_byte_perm_S (in1[0], in1[1], 0x6420);
+  out[1] = hc_byte_perm_S (in1[2], in1[3], 0x6420);
+  out[2] = hc_byte_perm_S (in2[0], in2[1], 0x6420);
+  out[3] = hc_byte_perm_S (in2[2], in2[3], 0x6420);
+
+  #elif defined IS_AMD || defined IS_HIP
+
+  out[0] = hc_byte_perm_S (in1[0], in1[1], 0x06040200);
+  out[1] = hc_byte_perm_S (in1[2], in1[3], 0x06040200);
+  out[2] = hc_byte_perm_S (in2[0], in2[1], 0x06040200);
+  out[3] = hc_byte_perm_S (in2[2], in2[3], 0x06040200);
+
+  #else
+
+  out[0] = ((in1[0] & 0x000000ff) >>  0) | ((in1[0] & 0x00ff0000) >>  8)
+         | ((in1[1] & 0x000000ff) << 16) | ((in1[1] & 0x00ff0000) <<  8);
+  out[1] = ((in1[2] & 0x000000ff) >>  0) | ((in1[2] & 0x00ff0000) >>  8)
+         | ((in1[3] & 0x000000ff) << 16) | ((in1[3] & 0x00ff0000) <<  8);
+  out[2] = ((in2[0] & 0x000000ff) >>  0) | ((in2[0] & 0x00ff0000) >>  8)
+         | ((in2[1] & 0x000000ff) << 16) | ((in2[1] & 0x00ff0000) <<  8);
+  out[3] = ((in2[2] & 0x000000ff) >>  0) | ((in2[2] & 0x00ff0000) >>  8)
+         | ((in2[3] & 0x000000ff) << 16) | ((in2[3] & 0x00ff0000) <<  8);
+
+  #endif
+}
+
+DECLSPEC void switch_buffer_by_offset_le_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 offset)
+{
+  u32 w[16];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_PLAIN, 16, hc_bytealign_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+}
+
+DECLSPEC void switch_buffer_by_offset_carry_le_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *c0, PRIVATE_AS u32 *c1, PRIVATE_AS u32 *c2, PRIVATE_AS u32 *c3, const u32 offset)
+{
+  u32 w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, c0)
+  SBBO_IN (20, c1)
+  SBBO_IN (24, c2)
+  SBBO_IN (28, c3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_CARRY, 16, hc_bytealign_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (c0, 16)
+  SBBO_OUT (c1, 20)
+  SBBO_OUT (c2, 24)
+  SBBO_OUT (c3, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_be_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, const u32 offset)
+{
+  u32 w[16];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_PLAIN, 16, hc_bytealign_be_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+}
+
+DECLSPEC void switch_buffer_by_offset_carry_be_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *c0, PRIVATE_AS u32 *c1, PRIVATE_AS u32 *c2, PRIVATE_AS u32 *c3, const u32 offset)
+{
+  u32 w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, c0)
+  SBBO_IN (20, c1)
+  SBBO_IN (24, c2)
+  SBBO_IN (28, c3)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_16 (SBBO_CASE_CARRY, 16, hc_bytealign_be_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (c0, 16)
+  SBBO_OUT (c1, 20)
+  SBBO_OUT (c2, 24)
+  SBBO_OUT (c3, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_le_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *w4, PRIVATE_AS u32 *w5, PRIVATE_AS u32 *w6, PRIVATE_AS u32 *w7, const u32 offset)
+{
+  u32 w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_PLAIN, 32, hc_bytealign_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_carry_le_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *w4, PRIVATE_AS u32 *w5, PRIVATE_AS u32 *w6, PRIVATE_AS u32 *w7, PRIVATE_AS u32 *c0, PRIVATE_AS u32 *c1, PRIVATE_AS u32 *c2, PRIVATE_AS u32 *c3, PRIVATE_AS u32 *c4, PRIVATE_AS u32 *c5, PRIVATE_AS u32 *c6, PRIVATE_AS u32 *c7, const u32 offset)
+{
+  u32 w[64];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+  SBBO_IN (32, c0)
+  SBBO_IN (36, c1)
+  SBBO_IN (40, c2)
+  SBBO_IN (44, c3)
+  SBBO_IN (48, c4)
+  SBBO_IN (52, c5)
+  SBBO_IN (56, c6)
+  SBBO_IN (60, c7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_CARRY, 32, hc_bytealign_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+  SBBO_OUT (c0, 32)
+  SBBO_OUT (c1, 36)
+  SBBO_OUT (c2, 40)
+  SBBO_OUT (c3, 44)
+  SBBO_OUT (c4, 48)
+  SBBO_OUT (c5, 52)
+  SBBO_OUT (c6, 56)
+  SBBO_OUT (c7, 60)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_be_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *w4, PRIVATE_AS u32 *w5, PRIVATE_AS u32 *w6, PRIVATE_AS u32 *w7, const u32 offset)
+{
+  u32 w[32];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_PLAIN, 32, hc_bytealign_be_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_carry_be_S (PRIVATE_AS u32 *w0, PRIVATE_AS u32 *w1, PRIVATE_AS u32 *w2, PRIVATE_AS u32 *w3, PRIVATE_AS u32 *w4, PRIVATE_AS u32 *w5, PRIVATE_AS u32 *w6, PRIVATE_AS u32 *w7, PRIVATE_AS u32 *c0, PRIVATE_AS u32 *c1, PRIVATE_AS u32 *c2, PRIVATE_AS u32 *c3, PRIVATE_AS u32 *c4, PRIVATE_AS u32 *c5, PRIVATE_AS u32 *c6, PRIVATE_AS u32 *c7, const u32 offset)
+{
+  u32 w[64];
+
+  SBBO_IN ( 0, w0)
+  SBBO_IN ( 4, w1)
+  SBBO_IN ( 8, w2)
+  SBBO_IN (12, w3)
+  SBBO_IN (16, w4)
+  SBBO_IN (20, w5)
+  SBBO_IN (24, w6)
+  SBBO_IN (28, w7)
+  SBBO_IN (32, c0)
+  SBBO_IN (36, c1)
+  SBBO_IN (40, c2)
+  SBBO_IN (44, c3)
+  SBBO_IN (48, c4)
+  SBBO_IN (52, c5)
+  SBBO_IN (56, c6)
+  SBBO_IN (60, c7)
+
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_32 (SBBO_CASE_CARRY, 32, hc_bytealign_be_S)
+  }
+
+  SBBO_OUT (w0,  0)
+  SBBO_OUT (w1,  4)
+  SBBO_OUT (w2,  8)
+  SBBO_OUT (w3, 12)
+  SBBO_OUT (w4, 16)
+  SBBO_OUT (w5, 20)
+  SBBO_OUT (w6, 24)
+  SBBO_OUT (w7, 28)
+  SBBO_OUT (c0, 32)
+  SBBO_OUT (c1, 36)
+  SBBO_OUT (c2, 40)
+  SBBO_OUT (c3, 44)
+  SBBO_OUT (c4, 48)
+  SBBO_OUT (c5, 52)
+  SBBO_OUT (c6, 56)
+  SBBO_OUT (c7, 60)
+}
+
+DECLSPEC void switch_buffer_by_offset_1x64_le_S (PRIVATE_AS u32 *w, const u32 offset)
+{
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_64 (SBBO_CASE_PLAIN, 64, hc_bytealign_S)
+  }
+}
+
+DECLSPEC void switch_buffer_by_offset_1x64_be_S (PRIVATE_AS u32 *w, const u32 offset)
+{
+  const int offset_switch = offset / 4;
+
+  switch (offset_switch)
+  {
+    SBBO_CASES_64 (SBBO_CASE_PLAIN, 64, hc_bytealign_be_S)
+  }
+}
+
+#undef SBBO_IN
+#undef SBBO_OUT
+#undef SBBO_CASE_PLAIN
+#undef SBBO_CASE_CARRY
+#undef SBBO_CASES_16
+#undef SBBO_CASES_32
+#undef SBBO_CASES_64
+#undef TRUNC_MASK_LE
+#undef TRUNC_MASK_BE
+#undef TRUNC_CASE
+#undef TRUNC_CASES_16
+#undef TRUNC_CASES_64
+
+/**
+ * vector functions on scalar types (for inner loop usage)
+ */
+
+#define PACKVS2(sn,vn,e)  \
+  sn[0] = vn[0].s##e;     \
+  sn[1] = vn[1].s##e;
+
+#define PACKSV2(sn,vn,e)  \
+  vn[0].s##e = sn[0];     \
+  vn[1].s##e = sn[1];
+
+#define PACKVS24(s0,s1,v0,v1,e) \
+  PACKVS4 (s0, v0, e);          \
+  PACKVS4 (s1, v1, e);
+
+#define PACKSV24(s0,s1,v0,v1,e) \
+  PACKSV4 (s0, v0, e);          \
+  PACKSV4 (s1, v1, e);
+
+#define PACKVS4(sn,vn,e)  \
+  sn[0] = vn[0].s##e;     \
+  sn[1] = vn[1].s##e;     \
+  sn[2] = vn[2].s##e;     \
+  sn[3] = vn[3].s##e;
+
+#define PACKSV4(sn,vn,e)  \
+  vn[0].s##e = sn[0];     \
+  vn[1].s##e = sn[1];     \
+  vn[2].s##e = sn[2];     \
+  vn[3].s##e = sn[3];
+
+#define PACKVS44(s0,s1,s2,s3,v0,v1,v2,v3,e) \
+  PACKVS4 (s0, v0, e);                      \
+  PACKVS4 (s1, v1, e);                      \
+  PACKVS4 (s2, v2, e);                      \
+  PACKVS4 (s3, v3, e);
+
+#define PACKSV44(s0,s1,s2,s3,v0,v1,v2,v3,e) \
+  PACKSV4 (s0, v0, e);                      \
+  PACKSV4 (s1, v1, e);                      \
+  PACKSV4 (s2, v2, e);                      \
+  PACKSV4 (s3, v3, e);
+
+#define PACKVS84(s0,s1,s2,s3,s4,s5,s6,s7,v0,v1,v2,v3,v4,v5,v6,v7,e) \
+  PACKVS4 (s0, v0, e);                                              \
+  PACKVS4 (s1, v1, e);                                              \
+  PACKVS4 (s2, v2, e);                                              \
+  PACKVS4 (s3, v3, e);                                              \
+  PACKVS4 (s4, v4, e);                                              \
+  PACKVS4 (s5, v5, e);                                              \
+  PACKVS4 (s6, v6, e);                                              \
+  PACKVS4 (s7, v7, e);
+
+#define PACKSV84(s0,s1,s2,s3,s4,s5,s6,s7,v0,v1,v2,v3,v4,v5,v6,v7,e) \
+  PACKSV4 (s0, v0, e);                                              \
+  PACKSV4 (s1, v1, e);                                              \
+  PACKSV4 (s2, v2, e);                                              \
+  PACKSV4 (s3, v3, e);                                              \
+  PACKSV4 (s4, v4, e);                                              \
+  PACKSV4 (s5, v5, e);                                              \
+  PACKSV4 (s6, v6, e);                                              \
+  PACKSV4 (s7, v7, e);
+
+// attack-mode 12
+
+// One piece into a byte buffer at an offset, for the kernels that hold the candidate as bytes rather
+// than as words. Returns the offset it leaves behind, so the pieces chain. A candidate that would run
+// past the end of the buffer is cut rather than allowed to write outside it.
+
+DECLSPEC u32 combs_copy_bytes (PRIVATE_AS u8 *out, const u32 out_len, GLOBAL_AS const u32 *src, const u32 src_len)
+{
+  if (out_len >= COMBS_BYTES_MAX) return out_len;
+
+  GLOBAL_AS const u8 *src_ptr = (GLOBAL_AS const u8 *) src;
+
+  const u32 room = COMBS_BYTES_MAX - out_len;
+
+  const u32 copy_len = (src_len < room) ? src_len : room;
+
+  for (u32 i = 0; i < copy_len; i++) out[out_len + i] = src_ptr[i];
+
+  const u32 len = out_len + copy_len;
+
+  return len;
+}
+
+// How much the amplifier contributes to the candidate length. Under -a 12 that is all four pieces
+// together, and under every other attack mode it is the one buffer.
+
+DECLSPEC u32 combs_len_S (GLOBAL_AS const pw_t *combs_buf, const u32 il_pos, MAYBE_UNUSED const u32 combs_mode)
+{
+  #if ATTACK_MODE == 12
+  if (combs_mode == COMBINATOR_MODE_BASE_MIDDLE)
+  {
+    u32 len = COMBS_PIECE (il_pos, COMBS_PIECE_PRE).pw_len;
+
+    len += COMBS_PIECE (il_pos, COMBS_PIECE_MID).pw_len;
+    len += COMBS_PIECE (il_pos, COMBS_PIECE_WORD).pw_len;
+    len += COMBS_PIECE (il_pos, COMBS_PIECE_POST).pw_len;
+
+    return len;
+  }
+  #endif
+
+  const u32 one = combs_buf[il_pos].pw_len;
+
+  return one;
+}
+
+// The base word into a full width buffer. A kernel may hold the base word in fewer words than the
+// assembler works in, so only the words its length actually covers are read.
+
+DECLSPEC void combs_base_copy (PRIVATE_AS u32 *out, PRIVATE_AS const u32 *base, const u32 base_len)
+{
+  const u32 cnt = (base_len + 3) / 4;
+
+  for (u32 i = 0; i < 64; i++) out[i] = (i < cnt) ? base[i] : 0;
+}
+
+// One more piece onto the end of a candidate that is being assembled. src holds the piece at offset
+// zero and is moved to where the piece belongs, so the caller does not get it back unchanged.
+
+DECLSPEC void combs_append_1x64_le_S (PRIVATE_AS u32 *out, const u32 out_len, PRIVATE_AS u32 *src)
+{
+  switch_buffer_by_offset_1x64_le_S (src, out_len);
+
+  for (int i = 0; i < 64; i++) out[i] |= src[i];
+}
+
+DECLSPEC void combs_append_1x64_be_S (PRIVATE_AS u32 *out, const u32 out_len, PRIVATE_AS u32 *src)
+{
+  switch_buffer_by_offset_1x64_be_S (src, out_len);
+
+  for (int i = 0; i < 64; i++) out[i] |= src[i];
+}
+
+// The whole candidate in one buffer, and its length. Under -a 12 that is five pieces in a fixed
+// order, mask, base word, mask, second word, mask, and any of them may be empty. Under every other
+// attack mode the amplifier simply follows the base word.
+//
+// A kernel that needs the assembled plaintext as bytes rather than as a hash stream calls this and
+// hands the buffer to the code it already has.
+
+DECLSPEC u32 combs_assemble_1x64_le_S (GLOBAL_AS const pw_t *combs_buf, const u32 il_pos, MAYBE_UNUSED const u32 combs_mode, PRIVATE_AS const u32 *base, const u32 base_len, PRIVATE_AS u32 *out)
+{
+  u32 tmp[64];
+
+  #if ATTACK_MODE == 12
+  if (combs_mode == COMBINATOR_MODE_BASE_MIDDLE)
+  {
+    // the piece in front of the base word starts the candidate, so it never moves
+
+    for (int i = 0; i < 64; i++) out[i] = COMBS_PIECE (il_pos, COMBS_PIECE_PRE).i[i];
+
+    u32 out_len = COMBS_PIECE (il_pos, COMBS_PIECE_PRE).pw_len;
+
+    combs_base_copy (tmp, base, base_len);
+
+    combs_append_1x64_le_S (out, out_len, tmp);
+
+    out_len += base_len;
+
+    const u32 mid_len = COMBS_PIECE (il_pos, COMBS_PIECE_MID).pw_len;
+
+    if (mid_len > 0)
+    {
+      for (int i = 0; i < 64; i++) tmp[i] = COMBS_PIECE (il_pos, COMBS_PIECE_MID).i[i];
+
+      combs_append_1x64_le_S (out, out_len, tmp);
+
+      out_len += mid_len;
+    }
+
+    const u32 word_len = COMBS_PIECE (il_pos, COMBS_PIECE_WORD).pw_len;
+
+    if (word_len > 0)
+    {
+      for (int i = 0; i < 64; i++) tmp[i] = COMBS_PIECE (il_pos, COMBS_PIECE_WORD).i[i];
+
+      combs_append_1x64_le_S (out, out_len, tmp);
+
+      out_len += word_len;
+    }
+
+    const u32 post_len = COMBS_PIECE (il_pos, COMBS_PIECE_POST).pw_len;
+
+    if (post_len > 0)
+    {
+      for (int i = 0; i < 64; i++) tmp[i] = COMBS_PIECE (il_pos, COMBS_PIECE_POST).i[i];
+
+      combs_append_1x64_le_S (out, out_len, tmp);
+
+      out_len += post_len;
+    }
+
+    return out_len;
+  }
+  #endif
+
+  // the base word and one piece behind it, which is what every attack mode other than -a 12 has
+  // and what -a 12 itself has whenever the mask puts nothing in front of the word
+
+  combs_base_copy (out, base, base_len);
+
+  for (int i = 0; i < 64; i++) tmp[i] = combs_buf[il_pos].i[i];
+
+  combs_append_1x64_le_S (out, base_len, tmp);
+
+  const u32 len = base_len + combs_buf[il_pos].pw_len;
+
+  return len;
+}
+
+// The same, for the kernels that hold their buffers big endian. Every piece is byte swapped as it is
+// read, and the base word is expected to be swapped already, which is how those kernels hold it.
+
+DECLSPEC u32 combs_assemble_1x64_be_S (GLOBAL_AS const pw_t *combs_buf, const u32 il_pos, MAYBE_UNUSED const u32 combs_mode, PRIVATE_AS const u32 *base, const u32 base_len, PRIVATE_AS u32 *out)
+{
+  u32 tmp[64];
+
+  #if ATTACK_MODE == 12
+  if (combs_mode == COMBINATOR_MODE_BASE_MIDDLE)
+  {
+    // the piece in front of the base word starts the candidate, so it never moves
+
+    for (int i = 0; i < 64; i++) out[i] = hc_swap32_S (COMBS_PIECE (il_pos, COMBS_PIECE_PRE).i[i]);
+
+    u32 out_len = COMBS_PIECE (il_pos, COMBS_PIECE_PRE).pw_len;
+
+    combs_base_copy (tmp, base, base_len);
+
+    combs_append_1x64_be_S (out, out_len, tmp);
+
+    out_len += base_len;
+
+    const u32 mid_len = COMBS_PIECE (il_pos, COMBS_PIECE_MID).pw_len;
+
+    if (mid_len > 0)
+    {
+      for (int i = 0; i < 64; i++) tmp[i] = hc_swap32_S (COMBS_PIECE (il_pos, COMBS_PIECE_MID).i[i]);
+
+      combs_append_1x64_be_S (out, out_len, tmp);
+
+      out_len += mid_len;
+    }
+
+    const u32 word_len = COMBS_PIECE (il_pos, COMBS_PIECE_WORD).pw_len;
+
+    if (word_len > 0)
+    {
+      for (int i = 0; i < 64; i++) tmp[i] = hc_swap32_S (COMBS_PIECE (il_pos, COMBS_PIECE_WORD).i[i]);
+
+      combs_append_1x64_be_S (out, out_len, tmp);
+
+      out_len += word_len;
+    }
+
+    const u32 post_len = COMBS_PIECE (il_pos, COMBS_PIECE_POST).pw_len;
+
+    if (post_len > 0)
+    {
+      for (int i = 0; i < 64; i++) tmp[i] = hc_swap32_S (COMBS_PIECE (il_pos, COMBS_PIECE_POST).i[i]);
+
+      combs_append_1x64_be_S (out, out_len, tmp);
+
+      out_len += post_len;
+    }
+
+    return out_len;
+  }
+  #endif
+
+  // the base word and one piece behind it, which is what every attack mode other than -a 12 has
+  // and what -a 12 itself has whenever the mask puts nothing in front of the word
+
+  combs_base_copy (out, base, base_len);
+
+  for (int i = 0; i < 64; i++) tmp[i] = hc_swap32_S (combs_buf[il_pos].i[i]);
+
+  combs_append_1x64_be_S (out, base_len, tmp);
+
+  const u32 len = base_len + combs_buf[il_pos].pw_len;
+
+  return len;
+}
+
+DECLSPEC void switch_buffer_by_offset_le_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  switch_buffer_by_offset_le_S (w0, w1, w2, w3, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+  u32 t2[4];
+  u32 t3[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 8); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s8); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 8);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 9); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.s9); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 9);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, a); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.sa); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, a);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, b); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.sb); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, b);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, c); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.sc); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, c);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, d); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.sd); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, d);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, e); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.se); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, e);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, f); switch_buffer_by_offset_le_S (t0, t1, t2, t3, offset.sf); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, f);
+
+  #endif
+}
+
+DECLSPEC void switch_buffer_by_offset_8x4_le_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, PRIVATE_AS u32x *w4, PRIVATE_AS u32x *w5, PRIVATE_AS u32x *w6, PRIVATE_AS u32x *w7, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  switch_buffer_by_offset_8x4_le_S (w0, w1, w2, w3, w4, w5, w6, w7, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+  u32 t2[4];
+  u32 t3[4];
+  u32 t4[4];
+  u32 t5[4];
+  u32 t6[4];
+  u32 t7[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  // 1
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s0);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+
+  // 2
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s1);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+
+  #elif VECT_SIZE == 4
+
+  // 1
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s0);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+
+  // 2
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s1);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+
+  // 3
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 2);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s2);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 2);
+
+  // 4
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 3);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s3);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 3);
+
+  #elif VECT_SIZE == 8
+
+  // 1
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s0);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+
+  // 2
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s1);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+
+  // 3
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 2);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s2);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 2);
+
+  // 4
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 3);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s3);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 3);
+
+  // 5
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 4);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s4);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 4);
+
+  // 6
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 5);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s5);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 5);
+
+  // 7
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 6);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s6);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 6);
+
+  // 8
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 7);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s7);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 7);
+
+  #elif VECT_SIZE == 16
+
+  // 1
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s0);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 0);
+
+  // 2
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s1);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 1);
+
+  // 3
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 2);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s2);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 2);
+
+  // 4
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 3);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s3);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 3);
+
+  // 5
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 4);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s4);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 4);
+
+  // 6
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 5);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s5);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 5);
+
+  // 7
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 6);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s6);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 6);
+
+  // 8
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 7);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s7);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 7);
+
+  // 9
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 8);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s8);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 8);
+
+  // 10
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 9);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.s9);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, 9);
+
+  // 11
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, a);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.sa);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, a);
+
+  // 12
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, b);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.sb);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, b);
+
+  // 13
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, c);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.sc);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, c);
+
+  // 14
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, d);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.sd);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, d);
+
+  // 15
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, e);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.se);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, e);
+
+  // 16
+  PACKVS84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, f);
+  switch_buffer_by_offset_8x4_le_S (t0, t1, t2, t3, t4, t5, t6, t7, offset.sf);
+  PACKSV84 (t0, t1, t2, t3, t4, t5, t6, t7, w0, w1, w2, w3, w4, w5, w6, w7, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x01_2x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x01_2x4_S (w0, w1, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x01_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x01_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x01_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x01_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x01_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x01_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x01_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x01_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x01_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x01_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+  PACKVS24 (t0, t1, w0, w1, 4); append_0x01_2x4_S (t0, t1, offset.s4); PACKSV24 (t0, t1, w0, w1, 4);
+  PACKVS24 (t0, t1, w0, w1, 5); append_0x01_2x4_S (t0, t1, offset.s5); PACKSV24 (t0, t1, w0, w1, 5);
+  PACKVS24 (t0, t1, w0, w1, 6); append_0x01_2x4_S (t0, t1, offset.s6); PACKSV24 (t0, t1, w0, w1, 6);
+  PACKVS24 (t0, t1, w0, w1, 7); append_0x01_2x4_S (t0, t1, offset.s7); PACKSV24 (t0, t1, w0, w1, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x01_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x01_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x01_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x01_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+  PACKVS24 (t0, t1, w0, w1, 4); append_0x01_2x4_S (t0, t1, offset.s4); PACKSV24 (t0, t1, w0, w1, 4);
+  PACKVS24 (t0, t1, w0, w1, 5); append_0x01_2x4_S (t0, t1, offset.s5); PACKSV24 (t0, t1, w0, w1, 5);
+  PACKVS24 (t0, t1, w0, w1, 6); append_0x01_2x4_S (t0, t1, offset.s6); PACKSV24 (t0, t1, w0, w1, 6);
+  PACKVS24 (t0, t1, w0, w1, 7); append_0x01_2x4_S (t0, t1, offset.s7); PACKSV24 (t0, t1, w0, w1, 7);
+  PACKVS24 (t0, t1, w0, w1, 8); append_0x01_2x4_S (t0, t1, offset.s8); PACKSV24 (t0, t1, w0, w1, 8);
+  PACKVS24 (t0, t1, w0, w1, 9); append_0x01_2x4_S (t0, t1, offset.s9); PACKSV24 (t0, t1, w0, w1, 9);
+  PACKVS24 (t0, t1, w0, w1, a); append_0x01_2x4_S (t0, t1, offset.sa); PACKSV24 (t0, t1, w0, w1, a);
+  PACKVS24 (t0, t1, w0, w1, b); append_0x01_2x4_S (t0, t1, offset.sb); PACKSV24 (t0, t1, w0, w1, b);
+  PACKVS24 (t0, t1, w0, w1, c); append_0x01_2x4_S (t0, t1, offset.sc); PACKSV24 (t0, t1, w0, w1, c);
+  PACKVS24 (t0, t1, w0, w1, d); append_0x01_2x4_S (t0, t1, offset.sd); PACKSV24 (t0, t1, w0, w1, d);
+  PACKVS24 (t0, t1, w0, w1, e); append_0x01_2x4_S (t0, t1, offset.se); PACKSV24 (t0, t1, w0, w1, e);
+  PACKVS24 (t0, t1, w0, w1, f); append_0x01_2x4_S (t0, t1, offset.sf); PACKSV24 (t0, t1, w0, w1, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x01_4x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x01_4x4_S (w0, w1, w2, w3, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+  u32 t2[4];
+  u32 t3[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x01_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x01_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x01_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x01_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x01_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x01_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x01_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x01_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x01_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x01_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x01_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x01_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x01_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x01_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x01_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x01_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x01_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x01_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x01_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x01_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x01_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x01_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 8); append_0x01_4x4_S (t0, t1, t2, t3, offset.s8); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 8);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 9); append_0x01_4x4_S (t0, t1, t2, t3, offset.s9); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 9);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, a); append_0x01_4x4_S (t0, t1, t2, t3, offset.sa); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, a);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, b); append_0x01_4x4_S (t0, t1, t2, t3, offset.sb); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, b);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, c); append_0x01_4x4_S (t0, t1, t2, t3, offset.sc); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, c);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, d); append_0x01_4x4_S (t0, t1, t2, t3, offset.sd); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, d);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, e); append_0x01_4x4_S (t0, t1, t2, t3, offset.se); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, e);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, f); append_0x01_4x4_S (t0, t1, t2, t3, offset.sf); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x06_2x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x06_2x4_S (w0, w1, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x06_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x06_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x06_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x06_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x06_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x06_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x06_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x06_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x06_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x06_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+  PACKVS24 (t0, t1, w0, w1, 4); append_0x06_2x4_S (t0, t1, offset.s4); PACKSV24 (t0, t1, w0, w1, 4);
+  PACKVS24 (t0, t1, w0, w1, 5); append_0x06_2x4_S (t0, t1, offset.s5); PACKSV24 (t0, t1, w0, w1, 5);
+  PACKVS24 (t0, t1, w0, w1, 6); append_0x06_2x4_S (t0, t1, offset.s6); PACKSV24 (t0, t1, w0, w1, 6);
+  PACKVS24 (t0, t1, w0, w1, 7); append_0x06_2x4_S (t0, t1, offset.s7); PACKSV24 (t0, t1, w0, w1, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x06_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x06_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x06_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x06_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+  PACKVS24 (t0, t1, w0, w1, 4); append_0x06_2x4_S (t0, t1, offset.s4); PACKSV24 (t0, t1, w0, w1, 4);
+  PACKVS24 (t0, t1, w0, w1, 5); append_0x06_2x4_S (t0, t1, offset.s5); PACKSV24 (t0, t1, w0, w1, 5);
+  PACKVS24 (t0, t1, w0, w1, 6); append_0x06_2x4_S (t0, t1, offset.s6); PACKSV24 (t0, t1, w0, w1, 6);
+  PACKVS24 (t0, t1, w0, w1, 7); append_0x06_2x4_S (t0, t1, offset.s7); PACKSV24 (t0, t1, w0, w1, 7);
+  PACKVS24 (t0, t1, w0, w1, 8); append_0x06_2x4_S (t0, t1, offset.s8); PACKSV24 (t0, t1, w0, w1, 8);
+  PACKVS24 (t0, t1, w0, w1, 9); append_0x06_2x4_S (t0, t1, offset.s9); PACKSV24 (t0, t1, w0, w1, 9);
+  PACKVS24 (t0, t1, w0, w1, a); append_0x06_2x4_S (t0, t1, offset.sa); PACKSV24 (t0, t1, w0, w1, a);
+  PACKVS24 (t0, t1, w0, w1, b); append_0x06_2x4_S (t0, t1, offset.sb); PACKSV24 (t0, t1, w0, w1, b);
+  PACKVS24 (t0, t1, w0, w1, c); append_0x06_2x4_S (t0, t1, offset.sc); PACKSV24 (t0, t1, w0, w1, c);
+  PACKVS24 (t0, t1, w0, w1, d); append_0x06_2x4_S (t0, t1, offset.sd); PACKSV24 (t0, t1, w0, w1, d);
+  PACKVS24 (t0, t1, w0, w1, e); append_0x06_2x4_S (t0, t1, offset.se); PACKSV24 (t0, t1, w0, w1, e);
+  PACKVS24 (t0, t1, w0, w1, f); append_0x06_2x4_S (t0, t1, offset.sf); PACKSV24 (t0, t1, w0, w1, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x80_2x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x80_2x4_S (w0, w1, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x80_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x80_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x80_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x80_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x80_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x80_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x80_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x80_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x80_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x80_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+  PACKVS24 (t0, t1, w0, w1, 4); append_0x80_2x4_S (t0, t1, offset.s4); PACKSV24 (t0, t1, w0, w1, 4);
+  PACKVS24 (t0, t1, w0, w1, 5); append_0x80_2x4_S (t0, t1, offset.s5); PACKSV24 (t0, t1, w0, w1, 5);
+  PACKVS24 (t0, t1, w0, w1, 6); append_0x80_2x4_S (t0, t1, offset.s6); PACKSV24 (t0, t1, w0, w1, 6);
+  PACKVS24 (t0, t1, w0, w1, 7); append_0x80_2x4_S (t0, t1, offset.s7); PACKSV24 (t0, t1, w0, w1, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS24 (t0, t1, w0, w1, 0); append_0x80_2x4_S (t0, t1, offset.s0); PACKSV24 (t0, t1, w0, w1, 0);
+  PACKVS24 (t0, t1, w0, w1, 1); append_0x80_2x4_S (t0, t1, offset.s1); PACKSV24 (t0, t1, w0, w1, 1);
+  PACKVS24 (t0, t1, w0, w1, 2); append_0x80_2x4_S (t0, t1, offset.s2); PACKSV24 (t0, t1, w0, w1, 2);
+  PACKVS24 (t0, t1, w0, w1, 3); append_0x80_2x4_S (t0, t1, offset.s3); PACKSV24 (t0, t1, w0, w1, 3);
+  PACKVS24 (t0, t1, w0, w1, 4); append_0x80_2x4_S (t0, t1, offset.s4); PACKSV24 (t0, t1, w0, w1, 4);
+  PACKVS24 (t0, t1, w0, w1, 5); append_0x80_2x4_S (t0, t1, offset.s5); PACKSV24 (t0, t1, w0, w1, 5);
+  PACKVS24 (t0, t1, w0, w1, 6); append_0x80_2x4_S (t0, t1, offset.s6); PACKSV24 (t0, t1, w0, w1, 6);
+  PACKVS24 (t0, t1, w0, w1, 7); append_0x80_2x4_S (t0, t1, offset.s7); PACKSV24 (t0, t1, w0, w1, 7);
+  PACKVS24 (t0, t1, w0, w1, 8); append_0x80_2x4_S (t0, t1, offset.s8); PACKSV24 (t0, t1, w0, w1, 8);
+  PACKVS24 (t0, t1, w0, w1, 9); append_0x80_2x4_S (t0, t1, offset.s9); PACKSV24 (t0, t1, w0, w1, 9);
+  PACKVS24 (t0, t1, w0, w1, a); append_0x80_2x4_S (t0, t1, offset.sa); PACKSV24 (t0, t1, w0, w1, a);
+  PACKVS24 (t0, t1, w0, w1, b); append_0x80_2x4_S (t0, t1, offset.sb); PACKSV24 (t0, t1, w0, w1, b);
+  PACKVS24 (t0, t1, w0, w1, c); append_0x80_2x4_S (t0, t1, offset.sc); PACKSV24 (t0, t1, w0, w1, c);
+  PACKVS24 (t0, t1, w0, w1, d); append_0x80_2x4_S (t0, t1, offset.sd); PACKSV24 (t0, t1, w0, w1, d);
+  PACKVS24 (t0, t1, w0, w1, e); append_0x80_2x4_S (t0, t1, offset.se); PACKSV24 (t0, t1, w0, w1, e);
+  PACKVS24 (t0, t1, w0, w1, f); append_0x80_2x4_S (t0, t1, offset.sf); PACKSV24 (t0, t1, w0, w1, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x80_4x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x80_4x4_S (w0, w1, w2, w3, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+  u32 t2[4];
+  u32 t3[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x80_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x80_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x80_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x80_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x80_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x80_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x80_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x80_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x80_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x80_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x80_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x80_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x80_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x80_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x80_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x80_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x80_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x80_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x80_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x80_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x80_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x80_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 8); append_0x80_4x4_S (t0, t1, t2, t3, offset.s8); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 8);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 9); append_0x80_4x4_S (t0, t1, t2, t3, offset.s9); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 9);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, a); append_0x80_4x4_S (t0, t1, t2, t3, offset.sa); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, a);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, b); append_0x80_4x4_S (t0, t1, t2, t3, offset.sb); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, b);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, c); append_0x80_4x4_S (t0, t1, t2, t3, offset.sc); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, c);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, d); append_0x80_4x4_S (t0, t1, t2, t3, offset.sd); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, d);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, e); append_0x80_4x4_S (t0, t1, t2, t3, offset.se); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, e);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, f); append_0x80_4x4_S (t0, t1, t2, t3, offset.sf); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x2d_4x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x2d_4x4_S (w0, w1, w2, w3, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+  u32 t2[4];
+  u32 t3[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 8); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s8); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 8);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 9); append_0x2d_4x4_S (t0, t1, t2, t3, offset.s9); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 9);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, a); append_0x2d_4x4_S (t0, t1, t2, t3, offset.sa); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, a);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, b); append_0x2d_4x4_S (t0, t1, t2, t3, offset.sb); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, b);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, c); append_0x2d_4x4_S (t0, t1, t2, t3, offset.sc); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, c);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, d); append_0x2d_4x4_S (t0, t1, t2, t3, offset.sd); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, d);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, e); append_0x2d_4x4_S (t0, t1, t2, t3, offset.se); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, e);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, f); append_0x2d_4x4_S (t0, t1, t2, t3, offset.sf); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, f);
+
+  #endif
+}
+
+DECLSPEC void append_0x3a_4x4_VV (PRIVATE_AS u32x *w0, PRIVATE_AS u32x *w1, PRIVATE_AS u32x *w2, PRIVATE_AS u32x *w3, const u32x offset)
+{
+  #if VECT_SIZE == 1
+
+  append_0x3a_4x4_S (w0, w1, w2, w3, offset);
+
+  #else
+
+  u32 t0[4];
+  u32 t1[4];
+  u32 t2[4];
+  u32 t3[4];
+
+  #endif
+
+  #if   VECT_SIZE == 2
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+
+  #elif VECT_SIZE == 4
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+
+  #elif VECT_SIZE == 8
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+
+  #elif VECT_SIZE == 16
+
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 0); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s0); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 0);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 1); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s1); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 1);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 2); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s2); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 2);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 3); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s3); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 3);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 4); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s4); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 4);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 5); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s5); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 5);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 6); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s6); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 6);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 7); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s7); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 7);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 8); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s8); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 8);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, 9); append_0x3a_4x4_S (t0, t1, t2, t3, offset.s9); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, 9);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, a); append_0x3a_4x4_S (t0, t1, t2, t3, offset.sa); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, a);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, b); append_0x3a_4x4_S (t0, t1, t2, t3, offset.sb); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, b);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, c); append_0x3a_4x4_S (t0, t1, t2, t3, offset.sc); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, c);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, d); append_0x3a_4x4_S (t0, t1, t2, t3, offset.sd); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, d);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, e); append_0x3a_4x4_S (t0, t1, t2, t3, offset.se); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, e);
+  PACKVS44 (t0, t1, t2, t3, w0, w1, w2, w3, f); append_0x3a_4x4_S (t0, t1, t2, t3, offset.sf); PACKSV44 (t0, t1, t2, t3, w0, w1, w2, w3, f);
+
+  #endif
+}

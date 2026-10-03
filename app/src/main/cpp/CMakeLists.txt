@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project(wlantool_native C)
+project(wlantool_native C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -82,3 +82,5 @@ add_custom_command(
         COMMENT "Building the unified libterminal.so executable from source")
 
 add_custom_target(terminal ALL DEPENDS "${TERMINAL_OUTPUT}")
+
+add_subdirectory(hashcat)

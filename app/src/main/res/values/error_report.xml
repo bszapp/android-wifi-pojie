@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_report_title">崩溃啦 o(╥﹏╥)o</string>
+    <string name="error_report_message">应用遇到了未处理的错误，已暂停正常运行。您可以导出错误报告，或重新启动应用。</string>
+    <string name="error_report_details_title">错误信息</string>
+    <string name="error_report_device_title">设备信息</string>
+    <string name="error_report_export">导出错误报告</string>
+    <string name="error_report_copy">复制错误信息</string>
+    <string name="error_report_copied">已复制错误信息和设备信息</string>
+    <string name="error_report_restart">重新启动应用</string>
+    <string name="error_report_exported">错误报告已导出</string>
+    <string name="error_report_export_failed">导出错误报告失败：%1$s</string>
+    <string name="error_report_read_failed">读取错误报告失败：%1$s</string>
+</resources>

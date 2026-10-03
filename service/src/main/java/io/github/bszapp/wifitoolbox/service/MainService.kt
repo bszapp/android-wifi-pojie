@@ -78,13 +78,16 @@ open class MainService(
         },
     )
 
-    private val wifiListController = WifiListController(
+    private val wifiListController: WifiListController = WifiListController(
         androidApiProvider = { initializer.androidApi },
         hybridWifiScanner = hybridWifiScanner,
         terminalManager = terminalManager,
         onWifiStateChanged = communication::broadcastWifiState,
         onSavedWifiListChanged = communication::broadcastSavedWifiList,
-        onModeStateChanged = communication::broadcastWifiModeState,
+        onModeStateChanged = { state ->
+            communication.broadcastWifiModeState(state)
+            serviceNotifications.refresh()
+        },
         onMonitorRecordedBytesChanged = communication::broadcastMonitorRecordedBytes,
         onMonitorPcapExported = communication::broadcastMonitorPcapExported,
         onError = { operation, error ->
@@ -96,7 +99,7 @@ open class MainService(
         },
     )
 
-    private val taskManager = TaskManager(
+    private val taskManager: TaskManager = TaskManager(
         androidApiProvider = { initializer.androidApi },
         wifiLogAnalyzer = wifiLogAnalyzer,
         terminalManager = terminalManager,
@@ -111,6 +114,46 @@ open class MainService(
             )
         },
     )
+
+    private val serviceNotifications: ServiceNotificationManager = ServiceNotificationManager(
+        hashcatTaskCountProvider = { hashcatManager.activeCount() },
+        modeProvider = { wifiListController.getModeState().mode },
+        taskProvider = {
+            taskManager.currentTaskId().takeIf { it != TaskManager.NO_TASK_ID }
+                ?.let(taskManager::snapshot)
+        },
+        appUserIdProvider = { initializer.requireStartupInfo().trustedUid / 100_000 },
+        onError = { operation, error ->
+            communication.broadcastServiceError(
+                source = "Service.Notification",
+                operation = operation,
+                error = error,
+            )
+        },
+    )
+
+    private val hashcatManager: io.github.bszapp.wifitoolbox.service.hashcat.HashcatManager = io.github.bszapp.wifitoolbox.service.hashcat.HashcatManager(
+        onError = { operation, error -> communication.broadcastServiceError("Service.Hashcat", operation, error) },
+        onActivityChanged = { serviceNotifications.refresh() },
+    )
+
+    private val notificationTaskCallback = object : ITaskManagerCallback.Stub() {
+        override fun onTaskManagerChanged(currentTaskId: Long, changedTaskId: Long) {
+            serviceNotifications.refresh()
+        }
+
+        override fun onTaskLogRangeChanged(
+            taskId: Long, generation: Long, oldestAvailableId: Long, latestId: Long, lineCount: Int,
+        ) = Unit
+
+        override fun onGlobalTaskLogRangeChanged(
+            generation: Long, oldestAvailableId: Long, latestId: Long, lineCount: Int,
+        ) = Unit
+    }
+
+    init {
+        taskManager.registerCallback(notificationTaskCallback)
+    }
 
     private val wifiEventMonitor = ServiceWifiBroadcastLogger(
         onWifiStateChanged = wifiListController::onWifiStateMayHaveChanged,
@@ -132,6 +175,7 @@ open class MainService(
 
     private fun initializeFromStartupInfo(startupInfo: StartupInfo): StartupInfo {
         val completed = initializer.initialize(startupInfo)
+        serviceNotifications.start()
         wifiEventMonitor.start()
         wifiListController.initialize()
         communication.startBinderPublisher()
@@ -564,11 +608,38 @@ open class MainService(
         communication.acknowledgeWifiModeState(cb, generation)
     }
 
+    override fun startHashcat(request: io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch, inputs: ParcelFileDescriptor) = communication.callFromApp {
+        inputs.use { hashcatManager.start(request.id, it, false, request.revision, request.createdAt, request.memoryLimitMiB) }
+    }
+    override fun resumeHashcat(request: io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch, inputs: ParcelFileDescriptor) = communication.callFromApp {
+        inputs.use { hashcatManager.start(request.id, it, true, request.revision, request.createdAt, request.memoryLimitMiB) }
+    }
+    override fun pauseHashcat(taskId: String): Boolean = communication.callFromApp { hashcatManager.pause(taskId) }
+    override fun prepareHashcatShutdown(): Boolean = communication.callFromApp { hashcatManager.prepareShutdown() }
+    override fun getHashcatTask(taskId: String): ParcelFileDescriptor = communication.callFromApp {
+        val snapshot = hashcatManager.snapshot(taskId)
+        io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFiles.pipe { out ->
+            out.writer(Charsets.UTF_8).use { it.write(snapshot.toJson().toString()) }
+        }
+    }
+    override fun getHashcatTaskIds(offset: Int): Array<String> = communication.callFromApp { hashcatManager.ids(offset) }
+    override fun getHashcatMemory(): ParcelFileDescriptor = communication.callFromApp {
+        val memory = hashcatManager.memory()
+        io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFiles.pipe { out ->
+            out.writer(Charsets.UTF_8).use { it.write(memory.toJson().toString()) }
+        }
+    }
+    override fun registerHashcatCallback(cb: IHashcatCallback) = communication.callFromApp { hashcatManager.register(cb) }
+    override fun unregisterHashcatCallback(cb: IHashcatCallback) = communication.callFromApp { hashcatManager.unregister(cb) }
+
     override fun shutdown() = communication.callFromApp {
+        check(hashcatManager.prepareShutdown()) { "Hashcat 任务备份尚未完成，服务保持运行" }
         Log.d(TAG, "收到 shutdown，服务退出")
         wifiEventMonitor.stop()
         wifiListController.stop()
         hybridWifiScanner.close()
+        taskManager.unregisterCallback(notificationTaskCallback)
+        serviceNotifications.close()
         taskManager.close()
         containerSystemManager.close()
         initializer.close()

@@ -17,6 +17,18 @@ sealed interface Route : NavKey, Parcelable {
 
     @Parcelize
     data object ColorPalette : Route
+
+    @Parcelize
+    data object Log : Route
+
+    @Parcelize
+    data object WpaHashcat : Route
+
+    @Parcelize
+    data object Resources : Route
+
+    @Parcelize
+    data object DictionaryEditor : Route
 }
 
 class Navigator(initialKey: NavKey) {

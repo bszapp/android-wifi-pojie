@@ -1,0 +1,2572 @@
+/**
+ * Author......: See docs/credits.txt
+ * License.....: MIT
+ */
+
+#ifndef INC_TYPES_H
+#define INC_TYPES_H
+
+#if ATTACK_MODE == 9
+#define BITMAP_MASK         kernel_param->bitmap_mask
+#define PCFG_POOL_AT1       kernel_param->pcfg_pool_at1
+#define PCFG_POOL_AT2       kernel_param->pcfg_pool_at2
+#define PCFG_POOL_AT3       kernel_param->pcfg_pool_at3
+#define SALT_POS_HOST       (kernel_param->pws_pos + gid)
+#define SALT_POS_HOST_BID   (kernel_param->pws_pos + bid)
+#define LOOP_POS            kernel_param->loop_pos
+#define LOOP_CNT            kernel_param->loop_cnt
+#define IL_CNT              kernel_param->il_cnt
+#define DIGESTS_CNT         1
+#define DIGESTS_OFFSET_HOST     (kernel_param->pws_pos + gid)
+#define DIGESTS_OFFSET_HOST_BID (kernel_param->pws_pos + bid)
+#define COMBS_MODE          kernel_param->combs_mode
+#define SALT_REPEAT         kernel_param->salt_repeat
+#define PWS_POS             kernel_param->pws_pos
+#define GID_CNT             kernel_param->gid_max
+#define PCFG_LANE_STRIDE    kernel_param->pcfg_lane_stride
+#else
+#define BITMAP_MASK         kernel_param->bitmap_mask
+#define PCFG_POOL_AT1       kernel_param->pcfg_pool_at1
+#define PCFG_POOL_AT2       kernel_param->pcfg_pool_at2
+#define PCFG_POOL_AT3       kernel_param->pcfg_pool_at3
+#define SALT_POS_HOST       kernel_param->salt_pos_host
+#define SALT_POS_HOST_BID   SALT_POS_HOST
+#define LOOP_POS            kernel_param->loop_pos
+#define LOOP_CNT            kernel_param->loop_cnt
+#define IL_CNT              kernel_param->il_cnt
+#define DIGESTS_CNT         kernel_param->digests_cnt
+#define DIGESTS_OFFSET_HOST kernel_param->digests_offset_host
+#define DIGESTS_OFFSET_HOST_BID DIGESTS_OFFSET_HOST
+#define COMBS_MODE          kernel_param->combs_mode
+#define SALT_REPEAT         kernel_param->salt_repeat
+#define PWS_POS             kernel_param->pws_pos
+#define GID_CNT             kernel_param->gid_max
+#define PCFG_LANE_STRIDE    kernel_param->pcfg_lane_stride
+#endif
+
+#ifdef IS_CUDA
+// https://docs.nvidia.com/cuda/nvrtc/index.html#integer-size
+typedef unsigned char       uchar;
+typedef unsigned short      ushort;
+typedef unsigned int        uint;
+typedef unsigned long       ulong;
+typedef unsigned long long  ullong;
+#endif
+
+#ifdef IS_METAL
+typedef unsigned char  uchar;
+typedef unsigned short ushort;
+typedef unsigned int   uint;
+typedef unsigned long  ulong;
+#define ullong ulong
+#endif
+
+#ifdef IS_OPENCL
+typedef ulong   ullong;
+typedef ulong2  ullong2;
+typedef ulong4  ullong4;
+typedef ulong8  ullong8;
+typedef ulong16 ullong16;
+#endif
+
+#ifdef KERNEL_STATIC
+typedef uchar  u8;
+typedef ushort u16;
+typedef uint   u32;
+#ifdef IS_METAL
+typedef ulong  u64;
+#else
+typedef ullong u64;
+#endif
+#else
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+#endif
+
+//testwise disabled
+//typedef u8  u8a  __attribute__ ((aligned (8)));
+//typedef u16 u16a __attribute__ ((aligned (8)));
+//typedef u32 u32a __attribute__ ((aligned (8)));
+//typedef u64 u64a __attribute__ ((aligned (8)));
+
+typedef u8  u8a;
+typedef u16 u16a;
+typedef u32 u32a;
+typedef u64 u64a;
+
+#ifndef NEW_SIMD_CODE
+#undef  VECT_SIZE
+#define VECT_SIZE 1
+#endif
+
+#define CONCAT(a, b)       a##b
+#define VTYPE(type, width) CONCAT(type, width)
+
+// emulated is always VECT_SIZE = 1
+#if VECT_SIZE == 1
+typedef u8   u8x;
+typedef u16  u16x;
+typedef u32  u32x;
+typedef u64  u64x;
+
+#define make_u8x  (u8)
+#define make_u16x (u16)
+#define make_u32x (u32)
+#define make_u64x (u64)
+
+#else
+
+#if defined IS_CUDA || defined IS_HIP
+
+#ifndef __device_builtin__
+#define __device_builtin__
+#endif
+
+#ifndef __builtin_align__
+#define __builtin_align__(x)
+#endif
+
+
+#if VECT_SIZE == 2
+
+struct __device_builtin__ __builtin_align__(2) u8x
+{
+  u8 s0;
+  u8 s1;
+
+  inline __device__  u8x (const u8 a, const u8 b) : s0(a), s1(b) { }
+  inline __device__  u8x (const u8 a)             : s0(a), s1(a) { }
+
+  inline __device__  u8x (void) : s0(0), s1(0) { }
+  inline __device__ ~u8x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(4) u16x
+{
+  u16 s0;
+  u16 s1;
+
+  inline __device__  u16x (const u16 a, const u16 b) : s0(a), s1(b) { }
+  inline __device__  u16x (const u16 a)              : s0(a), s1(a) { }
+
+  inline __device__  u16x (void) : s0(0), s1(0) { }
+  inline __device__ ~u16x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(8) u32x
+{
+  u32 s0;
+  u32 s1;
+
+  inline __device__  u32x (const u32 a, const u32 b) : s0(a), s1(b) { }
+  inline __device__  u32x (const u32 a)              : s0(a), s1(a) { }
+
+  inline __device__  u32x (void) : s0(0), s1(0) { }
+  inline __device__ ~u32x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(16) u64x
+{
+  u64 s0;
+  u64 s1;
+
+  inline __device__  u64x (const u64 a, const u64 b) : s0(a), s1(b) { }
+  inline __device__  u64x (const u64 a)              : s0(a), s1(a) { }
+
+  inline __device__  u64x (void) : s0(0), s1(0) { }
+  inline __device__ ~u64x (void) { }
+};
+
+inline __device__ bool operator != (const u32x a, const u32  b) { return ((a.s0 != b)    && (a.s1 != b));    }
+inline __device__ bool operator != (const u32x a, const u32x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1)); }
+
+inline __device__ void operator ^= (u32x &a, const u32  b) { a.s0 ^= b;    a.s1 ^= b;     }
+inline __device__ void operator ^= (u32x &a, const u32x b) { a.s0 ^= b.s0; a.s1 ^= b.s1;  }
+
+inline __device__ void operator |= (u32x &a, const u32  b) { a.s0 |= b;    a.s1 |= b;     }
+inline __device__ void operator |= (u32x &a, const u32x b) { a.s0 |= b.s0; a.s1 |= b.s1;  }
+
+inline __device__ void operator &= (u32x &a, const u32  b) { a.s0 &= b;    a.s1 &= b;     }
+inline __device__ void operator &= (u32x &a, const u32x b) { a.s0 &= b.s0; a.s1 &= b.s1;  }
+
+inline __device__ void operator += (u32x &a, const u32  b) { a.s0 += b;    a.s1 += b;     }
+inline __device__ void operator += (u32x &a, const u32x b) { a.s0 += b.s0; a.s1 += b.s1;  }
+
+inline __device__ void operator -= (u32x &a, const u32  b) { a.s0 -= b;    a.s1 -= b;     }
+inline __device__ void operator -= (u32x &a, const u32x b) { a.s0 -= b.s0; a.s1 -= b.s1;  }
+
+inline __device__ void operator *= (u32x &a, const u32  b) { a.s0 *= b;    a.s1 *= b;     }
+inline __device__ void operator *= (u32x &a, const u32x b) { a.s0 *= b.s0; a.s1 *= b.s1;  }
+
+inline __device__ void operator >>= (u32x &a, const u32  b) { a.s0 >>= b;    a.s1 >>= b;     }
+inline __device__ void operator >>= (u32x &a, const u32x b) { a.s0 >>= b.s0; a.s1 >>= b.s1;  }
+
+inline __device__ void operator <<= (u32x &a, const u32  b) { a.s0 <<= b;    a.s1 <<= b;     }
+inline __device__ void operator <<= (u32x &a, const u32x b) { a.s0 <<= b.s0; a.s1 <<= b.s1;  }
+
+inline __device__ u32x operator << (const u32x a, const u32  b) { return u32x ((a.s0 << b),    (a.s1 << b)   );  }
+inline __device__ u32x operator << (const u32x a, const u32x b) { return u32x ((a.s0 << b.s0), (a.s1 << b.s1));  }
+
+inline __device__ u32x operator >> (const u32x a, const u32  b) { return u32x ((a.s0 >> b),    (a.s1 >> b)   );  }
+inline __device__ u32x operator >> (const u32x a, const u32x b) { return u32x ((a.s0 >> b.s0), (a.s1 >> b.s1));  }
+
+inline __device__ u32x operator ^  (const u32x a, const u32  b) { return u32x ((a.s0 ^  b),    (a.s1 ^  b)   );  }
+inline __device__ u32x operator ^  (const u32x a, const u32x b) { return u32x ((a.s0 ^  b.s0), (a.s1 ^  b.s1));  }
+
+inline __device__ u32x operator |  (const u32x a, const u32  b) { return u32x ((a.s0 |  b),    (a.s1 |  b)   );  }
+inline __device__ u32x operator |  (const u32x a, const u32x b) { return u32x ((a.s0 |  b.s0), (a.s1 |  b.s1));  }
+
+inline __device__ u32x operator &  (const u32x a, const u32  b) { return u32x ((a.s0 &  b),    (a.s1 &  b)   );  }
+inline __device__ u32x operator &  (const u32x a, const u32x b) { return u32x ((a.s0 &  b.s0), (a.s1 &  b.s1));  }
+
+inline __device__ u32x operator +  (const u32x a, const u32  b) { return u32x ((a.s0 +  b),    (a.s1 +  b)   );  }
+inline __device__ u32x operator +  (const u32x a, const u32x b) { return u32x ((a.s0 +  b.s0), (a.s1 +  b.s1));  }
+
+inline __device__ u32x operator -  (const u32x a, const u32  b) { return u32x ((a.s0 -  b),    (a.s1 -  b)   );  }
+inline __device__ u32x operator -  (const u32x a, const u32x b) { return u32x ((a.s0 -  b.s0), (a.s1 -  b.s1));  }
+
+inline __device__ u32x operator *  (const u32x a, const u32  b) { return u32x ((a.s0 *  b),    (a.s1 *  b)   );  }
+inline __device__ u32x operator *  (const u32x a, const u32x b) { return u32x ((a.s0 *  b.s0), (a.s1 *  b.s1));  }
+
+inline __device__ u32x operator %  (const u32x a, const u32  b) { return u32x ((a.s0 %  b),    (a.s1 %  b)   );  }
+inline __device__ u32x operator %  (const u32x a, const u32x b) { return u32x ((a.s0 %  b.s0), (a.s1 %  b.s1));  }
+
+inline __device__ u32x operator ~  (const u32x a) { return u32x (~a.s0, ~a.s1); }
+
+inline __device__ bool operator != (const u64x a, const u64  b) { return ((a.s0 != b)    && (a.s1 != b));    }
+inline __device__ bool operator != (const u64x a, const u64x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1)); }
+
+inline __device__ void operator ^= (u64x &a, const u64  b) { a.s0 ^= b;    a.s1 ^= b;     }
+inline __device__ void operator ^= (u64x &a, const u64x b) { a.s0 ^= b.s0; a.s1 ^= b.s1;  }
+
+inline __device__ void operator |= (u64x &a, const u64  b) { a.s0 |= b;    a.s1 |= b;     }
+inline __device__ void operator |= (u64x &a, const u64x b) { a.s0 |= b.s0; a.s1 |= b.s1;  }
+
+inline __device__ void operator &= (u64x &a, const u64  b) { a.s0 &= b;    a.s1 &= b;     }
+inline __device__ void operator &= (u64x &a, const u64x b) { a.s0 &= b.s0; a.s1 &= b.s1;  }
+
+inline __device__ void operator += (u64x &a, const u64  b) { a.s0 += b;    a.s1 += b;     }
+inline __device__ void operator += (u64x &a, const u64x b) { a.s0 += b.s0; a.s1 += b.s1;  }
+
+inline __device__ void operator -= (u64x &a, const u64  b) { a.s0 -= b;    a.s1 -= b;     }
+inline __device__ void operator -= (u64x &a, const u64x b) { a.s0 -= b.s0; a.s1 -= b.s1;  }
+
+inline __device__ void operator *= (u64x &a, const u64  b) { a.s0 *= b;    a.s1 *= b;     }
+inline __device__ void operator *= (u64x &a, const u64x b) { a.s0 *= b.s0; a.s1 *= b.s1;  }
+
+inline __device__ void operator >>= (u64x &a, const u64  b) { a.s0 >>= b;    a.s1 >>= b;     }
+inline __device__ void operator >>= (u64x &a, const u64x b) { a.s0 >>= b.s0; a.s1 >>= b.s1;  }
+
+inline __device__ void operator <<= (u64x &a, const u64  b) { a.s0 <<= b;    a.s1 <<= b;     }
+inline __device__ void operator <<= (u64x &a, const u64x b) { a.s0 <<= b.s0; a.s1 <<= b.s1;  }
+
+inline __device__ u64x operator << (const u64x a, const u64  b) { return u64x ((a.s0 << b),    (a.s1 << b)   );  }
+inline __device__ u64x operator << (const u64x a, const u64x b) { return u64x ((a.s0 << b.s0), (a.s1 << b.s1));  }
+
+inline __device__ u64x operator >> (const u64x a, const u64  b) { return u64x ((a.s0 >> b),    (a.s1 >> b)   );  }
+inline __device__ u64x operator >> (const u64x a, const u64x b) { return u64x ((a.s0 >> b.s0), (a.s1 >> b.s1));  }
+
+inline __device__ u64x operator ^  (const u64x a, const u64  b) { return u64x ((a.s0 ^  b),    (a.s1 ^  b)   );  }
+inline __device__ u64x operator ^  (const u64x a, const u64x b) { return u64x ((a.s0 ^  b.s0), (a.s1 ^  b.s1));  }
+
+inline __device__ u64x operator |  (const u64x a, const u64  b) { return u64x ((a.s0 |  b),    (a.s1 |  b)   );  }
+inline __device__ u64x operator |  (const u64x a, const u64x b) { return u64x ((a.s0 |  b.s0), (a.s1 |  b.s1));  }
+
+inline __device__ u64x operator &  (const u64x a, const u64  b) { return u64x ((a.s0 &  b),    (a.s1 &  b)   );  }
+inline __device__ u64x operator &  (const u64x a, const u64x b) { return u64x ((a.s0 &  b.s0), (a.s1 &  b.s1));  }
+
+inline __device__ u64x operator +  (const u64x a, const u64  b) { return u64x ((a.s0 +  b),    (a.s1 +  b)   );  }
+inline __device__ u64x operator +  (const u64x a, const u64x b) { return u64x ((a.s0 +  b.s0), (a.s1 +  b.s1));  }
+
+inline __device__ u64x operator -  (const u64x a, const u64  b) { return u64x ((a.s0 -  b),    (a.s1 -  b)   );  }
+inline __device__ u64x operator -  (const u64x a, const u64x b) { return u64x ((a.s0 -  b.s0), (a.s1 -  b.s1));  }
+
+inline __device__ u64x operator *  (const u64x a, const u64  b) { return u64x ((a.s0 *  b),    (a.s1 *  b)   );  }
+inline __device__ u64x operator *  (const u64x a, const u64x b) { return u64x ((a.s0 *  b.s0), (a.s1 *  b.s1));  }
+
+inline __device__ u64x operator %  (const u64x a, const u64  b) { return u64x ((a.s0 %  b),    (a.s1 %  b)   );  }
+inline __device__ u64x operator %  (const u64x a, const u64x b) { return u64x ((a.s0 %  b.s0), (a.s1 %  b.s1));  }
+
+inline __device__ u64x operator ~  (const u64x a) { return u64x (~a.s0, ~a.s1); }
+
+#endif
+
+#if VECT_SIZE == 4
+
+struct __device_builtin__ __builtin_align__(4) u8x
+{
+  u8 s0;
+  u8 s1;
+  u8 s2;
+  u8 s3;
+
+  inline __device__  u8x (const u8 a, const u8 b, const u8 c, const u8 d) : s0(a), s1(b), s2(c), s3(d) { }
+  inline __device__  u8x (const u8 a)                                     : s0(a), s1(a), s2(a), s3(a) { }
+
+  inline __device__  u8x (void) : s0(0), s1(0), s2(0), s3(0) { }
+  inline __device__ ~u8x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(8) u16x
+{
+  u16 s0;
+  u16 s1;
+  u16 s2;
+  u16 s3;
+
+  inline __device__  u16x (const u16 a, const u16 b, const u16 c, const u16 d) : s0(a), s1(b), s2(c), s3(d) { }
+  inline __device__  u16x (const u16 a)                                        : s0(a), s1(a), s2(a), s3(a) { }
+
+  inline __device__  u16x (void) : s0(0), s1(0), s2(0), s3(0) { }
+  inline __device__ ~u16x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(16) u32x
+{
+  u32 s0;
+  u32 s1;
+  u32 s2;
+  u32 s3;
+
+  inline __device__  u32x (const u32 a, const u32 b, const u32 c, const u32 d) : s0(a), s1(b), s2(c), s3(d) { }
+  inline __device__  u32x (const u32 a)                                        : s0(a), s1(a), s2(a), s3(a) { }
+
+  inline __device__  u32x (void) : s0(0), s1(0), s2(0), s3(0) { }
+  inline __device__ ~u32x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(32) u64x
+{
+  u64 s0;
+  u64 s1;
+  u64 s2;
+  u64 s3;
+
+  inline __device__  u64x (const u64 a, const u64 b, const u64 c, const u64 d) : s0(a), s1(b), s2(c), s3(d) { }
+  inline __device__  u64x (const u64 a)                                        : s0(a), s1(a), s2(a), s3(a) { }
+
+  inline __device__  u64x (void) : s0(0), s1(0), s2(0), s3(0) { }
+  inline __device__ ~u64x (void) { }
+};
+
+inline __device__ bool operator != (const u32x a, const u32  b) { return ((a.s0 != b)    && (a.s1 != b)    && (a.s2 != b)    && (a.s3 != b)   ); }
+inline __device__ bool operator != (const u32x a, const u32x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1) && (a.s2 != b.s2) && (a.s3 != b.s3)); }
+
+inline __device__ void operator ^= (u32x &a, const u32  b) { a.s0 ^= b;    a.s1 ^= b;    a.s2 ^= b;    a.s3 ^= b;     }
+inline __device__ void operator ^= (u32x &a, const u32x b) { a.s0 ^= b.s0; a.s1 ^= b.s1; a.s2 ^= b.s2; a.s3 ^= b.s3;  }
+
+inline __device__ void operator |= (u32x &a, const u32  b) { a.s0 |= b;    a.s1 |= b;    a.s2 |= b;    a.s3 |= b;     }
+inline __device__ void operator |= (u32x &a, const u32x b) { a.s0 |= b.s0; a.s1 |= b.s1; a.s2 |= b.s2; a.s3 |= b.s3;  }
+
+inline __device__ void operator &= (u32x &a, const u32  b) { a.s0 &= b;    a.s1 &= b;    a.s2 &= b;    a.s3 &= b;     }
+inline __device__ void operator &= (u32x &a, const u32x b) { a.s0 &= b.s0; a.s1 &= b.s1; a.s2 &= b.s2; a.s3 &= b.s3;  }
+
+inline __device__ void operator += (u32x &a, const u32  b) { a.s0 += b;    a.s1 += b;    a.s2 += b;    a.s3 += b;     }
+inline __device__ void operator += (u32x &a, const u32x b) { a.s0 += b.s0; a.s1 += b.s1; a.s2 += b.s2; a.s3 += b.s3;  }
+
+inline __device__ void operator -= (u32x &a, const u32  b) { a.s0 -= b;    a.s1 -= b;    a.s2 -= b;    a.s3 -= b;     }
+inline __device__ void operator -= (u32x &a, const u32x b) { a.s0 -= b.s0; a.s1 -= b.s1; a.s2 -= b.s2; a.s3 -= b.s3;  }
+
+inline __device__ void operator *= (u32x &a, const u32  b) { a.s0 *= b;    a.s1 *= b;    a.s2 *= b;    a.s3 *= b;     }
+inline __device__ void operator *= (u32x &a, const u32x b) { a.s0 *= b.s0; a.s1 *= b.s1; a.s2 *= b.s2; a.s3 *= b.s3;  }
+
+inline __device__ void operator >>= (u32x &a, const u32  b) { a.s0 >>= b;    a.s1 >>= b;    a.s2 >>= b;    a.s3 >>= b;     }
+inline __device__ void operator >>= (u32x &a, const u32x b) { a.s0 >>= b.s0; a.s1 >>= b.s1; a.s2 >>= b.s2; a.s3 >>= b.s3;  }
+
+inline __device__ void operator <<= (u32x &a, const u32  b) { a.s0 <<= b;    a.s1 <<= b;    a.s2 <<= b;    a.s3 <<= b;     }
+inline __device__ void operator <<= (u32x &a, const u32x b) { a.s0 <<= b.s0; a.s1 <<= b.s1; a.s2 <<= b.s2; a.s3 <<= b.s3;  }
+
+inline __device__ u32x operator << (const u32x a, const u32  b) { return u32x ((a.s0 << b),    (a.s1 << b)   , (a.s2 << b),    (a.s3 << b)   );  }
+inline __device__ u32x operator << (const u32x a, const u32x b) { return u32x ((a.s0 << b.s0), (a.s1 << b.s1), (a.s2 << b.s2), (a.s3 << b.s3));  }
+
+inline __device__ u32x operator >> (const u32x a, const u32  b) { return u32x ((a.s0 >> b),    (a.s1 >> b)   , (a.s2 >> b),    (a.s3 >> b)   );  }
+inline __device__ u32x operator >> (const u32x a, const u32x b) { return u32x ((a.s0 >> b.s0), (a.s1 >> b.s1), (a.s2 >> b.s2), (a.s3 >> b.s3));  }
+
+inline __device__ u32x operator ^  (const u32x a, const u32  b) { return u32x ((a.s0 ^  b),    (a.s1 ^  b)   , (a.s2 ^  b),    (a.s3 ^  b)   );  }
+inline __device__ u32x operator ^  (const u32x a, const u32x b) { return u32x ((a.s0 ^  b.s0), (a.s1 ^  b.s1), (a.s2 ^  b.s2), (a.s3 ^  b.s3));  }
+
+inline __device__ u32x operator |  (const u32x a, const u32  b) { return u32x ((a.s0 |  b),    (a.s1 |  b)   , (a.s2 |  b),    (a.s3 |  b)   );  }
+inline __device__ u32x operator |  (const u32x a, const u32x b) { return u32x ((a.s0 |  b.s0), (a.s1 |  b.s1), (a.s2 |  b.s2), (a.s3 |  b.s3));  }
+
+inline __device__ u32x operator &  (const u32x a, const u32  b) { return u32x ((a.s0 &  b),    (a.s1 &  b)   , (a.s2 &  b),    (a.s3 &  b)   );  }
+inline __device__ u32x operator &  (const u32x a, const u32x b) { return u32x ((a.s0 &  b.s0), (a.s1 &  b.s1), (a.s2 &  b.s2), (a.s3 &  b.s3));  }
+
+inline __device__ u32x operator +  (const u32x a, const u32  b) { return u32x ((a.s0 +  b),    (a.s1 +  b)   , (a.s2 +  b),    (a.s3 +  b)   );  }
+inline __device__ u32x operator +  (const u32x a, const u32x b) { return u32x ((a.s0 +  b.s0), (a.s1 +  b.s1), (a.s2 +  b.s2), (a.s3 +  b.s3));  }
+
+inline __device__ u32x operator -  (const u32x a, const u32  b) { return u32x ((a.s0 -  b),    (a.s1 -  b)   , (a.s2 -  b),    (a.s3 -  b)   );  }
+inline __device__ u32x operator -  (const u32x a, const u32x b) { return u32x ((a.s0 -  b.s0), (a.s1 -  b.s1), (a.s2 -  b.s2), (a.s3 -  b.s3));  }
+
+inline __device__ u32x operator *  (const u32x a, const u32  b) { return u32x ((a.s0 *  b),    (a.s1 *  b)   , (a.s2 *  b),    (a.s3 *  b)   );  }
+inline __device__ u32x operator *  (const u32x a, const u32x b) { return u32x ((a.s0 *  b.s0), (a.s1 *  b.s1), (a.s2 *  b.s2), (a.s3 *  b.s3));  }
+
+inline __device__ u32x operator %  (const u32x a, const u32  b) { return u32x ((a.s0 %  b),    (a.s1 %  b)   , (a.s2 %  b),    (a.s3 %  b)   );  }
+inline __device__ u32x operator %  (const u32x a, const u32x b) { return u32x ((a.s0 %  b.s0), (a.s1 %  b.s1), (a.s2 %  b.s2), (a.s3 %  b.s3));  }
+
+inline __device__ u32x operator ~  (const u32x a) { return u32x (~a.s0, ~a.s1, ~a.s2, ~a.s3); }
+
+inline __device__ bool operator != (const u64x a, const u64  b) { return ((a.s0 != b)    && (a.s1 != b)    && (a.s2 != b)    && (a.s3 != b)   ); }
+inline __device__ bool operator != (const u64x a, const u64x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1) && (a.s2 != b.s2) && (a.s3 != b.s3)); }
+
+inline __device__ void operator ^= (u64x &a, const u64  b) { a.s0 ^= b;    a.s1 ^= b;    a.s2 ^= b;    a.s3 ^= b;     }
+inline __device__ void operator ^= (u64x &a, const u64x b) { a.s0 ^= b.s0; a.s1 ^= b.s1; a.s2 ^= b.s2; a.s3 ^= b.s3;  }
+
+inline __device__ void operator |= (u64x &a, const u64  b) { a.s0 |= b;    a.s1 |= b;    a.s2 |= b;    a.s3 |= b;     }
+inline __device__ void operator |= (u64x &a, const u64x b) { a.s0 |= b.s0; a.s1 |= b.s1; a.s2 |= b.s2; a.s3 |= b.s3;  }
+
+inline __device__ void operator &= (u64x &a, const u64  b) { a.s0 &= b;    a.s1 &= b;    a.s2 &= b;    a.s3 &= b;     }
+inline __device__ void operator &= (u64x &a, const u64x b) { a.s0 &= b.s0; a.s1 &= b.s1; a.s2 &= b.s2; a.s3 &= b.s3;  }
+
+inline __device__ void operator += (u64x &a, const u64  b) { a.s0 += b;    a.s1 += b;    a.s2 += b;    a.s3 += b;     }
+inline __device__ void operator += (u64x &a, const u64x b) { a.s0 += b.s0; a.s1 += b.s1; a.s2 += b.s2; a.s3 += b.s3;  }
+
+inline __device__ void operator -= (u64x &a, const u64  b) { a.s0 -= b;    a.s1 -= b;    a.s2 -= b;    a.s3 -= b;     }
+inline __device__ void operator -= (u64x &a, const u64x b) { a.s0 -= b.s0; a.s1 -= b.s1; a.s2 -= b.s2; a.s3 -= b.s3;  }
+
+inline __device__ void operator *= (u64x &a, const u64  b) { a.s0 *= b;    a.s1 *= b;    a.s2 *= b;    a.s3 *= b;     }
+inline __device__ void operator *= (u64x &a, const u64x b) { a.s0 *= b.s0; a.s1 *= b.s1; a.s2 *= b.s2; a.s3 *= b.s3;  }
+
+inline __device__ void operator >>= (u64x &a, const u64  b) { a.s0 >>= b;    a.s1 >>= b;    a.s2 >>= b;    a.s3 >>= b;     }
+inline __device__ void operator >>= (u64x &a, const u64x b) { a.s0 >>= b.s0; a.s1 >>= b.s1; a.s2 >>= b.s2; a.s3 >>= b.s3;  }
+
+inline __device__ void operator <<= (u64x &a, const u64  b) { a.s0 <<= b;    a.s1 <<= b;    a.s2 <<= b;    a.s3 <<= b;     }
+inline __device__ void operator <<= (u64x &a, const u64x b) { a.s0 <<= b.s0; a.s1 <<= b.s1; a.s2 <<= b.s2; a.s3 <<= b.s3;  }
+
+inline __device__ u64x operator << (const u64x a, const u64  b) { return u64x ((a.s0 << b),    (a.s1 << b)   , (a.s2 << b),    (a.s3 << b)   );  }
+inline __device__ u64x operator << (const u64x a, const u64x b) { return u64x ((a.s0 << b.s0), (a.s1 << b.s1), (a.s2 << b.s2), (a.s3 << b.s3));  }
+
+inline __device__ u64x operator >> (const u64x a, const u64  b) { return u64x ((a.s0 >> b),    (a.s1 >> b)   , (a.s2 >> b),    (a.s3 >> b)   );  }
+inline __device__ u64x operator >> (const u64x a, const u64x b) { return u64x ((a.s0 >> b.s0), (a.s1 >> b.s1), (a.s2 >> b.s2), (a.s3 >> b.s3));  }
+
+inline __device__ u64x operator ^  (const u64x a, const u64  b) { return u64x ((a.s0 ^  b),    (a.s1 ^  b)   , (a.s2 ^  b),    (a.s3 ^  b)   );  }
+inline __device__ u64x operator ^  (const u64x a, const u64x b) { return u64x ((a.s0 ^  b.s0), (a.s1 ^  b.s1), (a.s2 ^  b.s2), (a.s3 ^  b.s3));  }
+
+inline __device__ u64x operator |  (const u64x a, const u64  b) { return u64x ((a.s0 |  b),    (a.s1 |  b)   , (a.s2 |  b),    (a.s3 |  b)   );  }
+inline __device__ u64x operator |  (const u64x a, const u64x b) { return u64x ((a.s0 |  b.s0), (a.s1 |  b.s1), (a.s2 |  b.s2), (a.s3 |  b.s3));  }
+
+inline __device__ u64x operator &  (const u64x a, const u64  b) { return u64x ((a.s0 &  b),    (a.s1 &  b)   , (a.s2 &  b),    (a.s3 &  b)   );  }
+inline __device__ u64x operator &  (const u64x a, const u64x b) { return u64x ((a.s0 &  b.s0), (a.s1 &  b.s1), (a.s2 &  b.s2), (a.s3 &  b.s3));  }
+
+inline __device__ u64x operator +  (const u64x a, const u64  b) { return u64x ((a.s0 +  b),    (a.s1 +  b)   , (a.s2 +  b),    (a.s3 +  b)   );  }
+inline __device__ u64x operator +  (const u64x a, const u64x b) { return u64x ((a.s0 +  b.s0), (a.s1 +  b.s1), (a.s2 +  b.s2), (a.s3 +  b.s3));  }
+
+inline __device__ u64x operator -  (const u64x a, const u64  b) { return u64x ((a.s0 -  b),    (a.s1 -  b)   , (a.s2 -  b),    (a.s3 -  b)   );  }
+inline __device__ u64x operator -  (const u64x a, const u64x b) { return u64x ((a.s0 -  b.s0), (a.s1 -  b.s1), (a.s2 -  b.s2), (a.s3 -  b.s3));  }
+
+inline __device__ u64x operator *  (const u64x a, const u64  b) { return u64x ((a.s0 *  b),    (a.s1 *  b)   , (a.s2 *  b),    (a.s3 *  b)   );  }
+inline __device__ u64x operator *  (const u64x a, const u64x b) { return u64x ((a.s0 *  b.s0), (a.s1 *  b.s1), (a.s2 *  b.s2), (a.s3 *  b.s3));  }
+
+inline __device__ u64x operator %  (const u64x a, const u32  b) { return u64x ((a.s0 %  b),    (a.s1 %  b)   , (a.s2 %  b),    (a.s3 %  b)   );  }
+inline __device__ u64x operator %  (const u64x a, const u64x b) { return u64x ((a.s0 %  b.s0), (a.s1 %  b.s1), (a.s2 %  b.s2), (a.s3 %  b.s3));  }
+
+inline __device__ u64x operator ~  (const u64x a) { return u64x (~a.s0, ~a.s1, ~a.s2, ~a.s3); }
+
+#endif
+
+#if VECT_SIZE == 8
+
+struct __device_builtin__ __builtin_align__(8) u8x
+{
+  u8 s0;
+  u8 s1;
+  u8 s2;
+  u8 s3;
+  u8 s4;
+  u8 s5;
+  u8 s6;
+  u8 s7;
+
+  inline __device__  u8x (const u8 a, const u8 b, const u8 c, const u8 d, const u8 e, const u8 f, const u8 g, const u8 h) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h) { }
+  inline __device__  u8x (const u8 a)                                                                                     : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a) { }
+
+  inline __device__  u8x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0) { }
+  inline __device__ ~u8x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(16) u16x
+{
+  u16 s0;
+  u16 s1;
+  u16 s2;
+  u16 s3;
+  u16 s4;
+  u16 s5;
+  u16 s6;
+  u16 s7;
+
+  inline __device__  u16x (const u16 a, const u16 b, const u16 c, const u16 d, const u16 e, const u16 f, const u16 g, const u16 h) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h) { }
+  inline __device__  u16x (const u16 a)                                                                                            : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a) { }
+
+  inline __device__  u16x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0) { }
+  inline __device__ ~u16x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(32) u32x
+{
+  u32 s0;
+  u32 s1;
+  u32 s2;
+  u32 s3;
+  u32 s4;
+  u32 s5;
+  u32 s6;
+  u32 s7;
+
+  inline __device__  u32x (const u32 a, const u32 b, const u32 c, const u32 d, const u32 e, const u32 f, const u32 g, const u32 h) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h) { }
+  inline __device__  u32x (const u32 a)                                                                                            : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a) { }
+
+  inline __device__  u32x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0) { }
+  inline __device__ ~u32x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(64) u64x
+{
+  u64 s0;
+  u64 s1;
+  u64 s2;
+  u64 s3;
+  u64 s4;
+  u64 s5;
+  u64 s6;
+  u64 s7;
+
+  inline __device__  u64x (const u64 a, const u64 b, const u64 c, const u64 d, const u64 e, const u64 f, const u64 g, const u64 h) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h) { }
+  inline __device__  u64x (const u64 a)                                                                                            : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a) { }
+
+  inline __device__  u64x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0) { }
+  inline __device__ ~u64x (void) { }
+};
+
+inline __device__ bool operator != (const u32x a, const u32  b) { return ((a.s0 != b)    && (a.s1 != b)    && (a.s2 != b)    && (a.s3 != b)    && (a.s4 != b)    && (a.s5 != b)    && (a.s6 != b)    && (a.s7 != b)   ); }
+inline __device__ bool operator != (const u32x a, const u32x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1) && (a.s2 != b.s2) && (a.s3 != b.s3) && (a.s4 != b.s4) && (a.s5 != b.s5) && (a.s6 != b.s6) && (a.s7 != b.s7)); }
+
+inline __device__ void operator ^= (u32x &a, const u32  b) { a.s0 ^= b;    a.s1 ^= b;    a.s2 ^= b;    a.s3 ^= b;    a.s4 ^= b;    a.s5 ^= b;    a.s6 ^= b;    a.s7 ^= b;     }
+inline __device__ void operator ^= (u32x &a, const u32x b) { a.s0 ^= b.s0; a.s1 ^= b.s1; a.s2 ^= b.s2; a.s3 ^= b.s3; a.s4 ^= b.s4; a.s5 ^= b.s5; a.s6 ^= b.s6; a.s7 ^= b.s7;  }
+
+inline __device__ void operator |= (u32x &a, const u32  b) { a.s0 |= b;    a.s1 |= b;    a.s2 |= b;    a.s3 |= b;    a.s4 |= b;    a.s5 |= b;    a.s6 |= b;    a.s7 |= b;     }
+inline __device__ void operator |= (u32x &a, const u32x b) { a.s0 |= b.s0; a.s1 |= b.s1; a.s2 |= b.s2; a.s3 |= b.s3; a.s4 |= b.s4; a.s5 |= b.s5; a.s6 |= b.s6; a.s7 |= b.s7;  }
+
+inline __device__ void operator &= (u32x &a, const u32  b) { a.s0 &= b;    a.s1 &= b;    a.s2 &= b;    a.s3 &= b;    a.s4 &= b;    a.s5 &= b;    a.s6 &= b;    a.s7 &= b;     }
+inline __device__ void operator &= (u32x &a, const u32x b) { a.s0 &= b.s0; a.s1 &= b.s1; a.s2 &= b.s2; a.s3 &= b.s3; a.s4 &= b.s4; a.s5 &= b.s5; a.s6 &= b.s6; a.s7 &= b.s7;  }
+
+inline __device__ void operator += (u32x &a, const u32  b) { a.s0 += b;    a.s1 += b;    a.s2 += b;    a.s3 += b;    a.s4 += b;    a.s5 += b;    a.s6 += b;    a.s7 += b;     }
+inline __device__ void operator += (u32x &a, const u32x b) { a.s0 += b.s0; a.s1 += b.s1; a.s2 += b.s2; a.s3 += b.s3; a.s4 += b.s4; a.s5 += b.s5; a.s6 += b.s6; a.s7 += b.s7;  }
+
+inline __device__ void operator -= (u32x &a, const u32  b) { a.s0 -= b;    a.s1 -= b;    a.s2 -= b;    a.s3 -= b;    a.s4 -= b;    a.s5 -= b;    a.s6 -= b;    a.s7 -= b;     }
+inline __device__ void operator -= (u32x &a, const u32x b) { a.s0 -= b.s0; a.s1 -= b.s1; a.s2 -= b.s2; a.s3 -= b.s3; a.s4 -= b.s4; a.s5 -= b.s5; a.s6 -= b.s6; a.s7 -= b.s7;  }
+
+inline __device__ void operator *= (u32x &a, const u32  b) { a.s0 *= b;    a.s1 *= b;    a.s2 *= b;    a.s3 *= b;    a.s4 *= b;    a.s5 *= b;    a.s6 *= b;    a.s7 *= b;     }
+inline __device__ void operator *= (u32x &a, const u32x b) { a.s0 *= b.s0; a.s1 *= b.s1; a.s2 *= b.s2; a.s3 *= b.s3; a.s4 *= b.s4; a.s5 *= b.s5; a.s6 *= b.s6; a.s7 *= b.s7;  }
+
+inline __device__ void operator >>= (u32x &a, const u32  b) { a.s0 >>= b;    a.s1 >>= b;    a.s2 >>= b;    a.s3 >>= b;    a.s4 >>= b;    a.s5 >>= b;    a.s6 >>= b;    a.s7 >>= b;     }
+inline __device__ void operator >>= (u32x &a, const u32x b) { a.s0 >>= b.s0; a.s1 >>= b.s1; a.s2 >>= b.s2; a.s3 >>= b.s3; a.s4 >>= b.s4; a.s5 >>= b.s5; a.s6 >>= b.s6; a.s7 >>= b.s7;  }
+
+inline __device__ void operator <<= (u32x &a, const u32  b) { a.s0 <<= b;    a.s1 <<= b;    a.s2 <<= b;    a.s3 <<= b;    a.s4 <<= b;    a.s5 <<= b;    a.s6 <<= b;    a.s7 <<= b;     }
+inline __device__ void operator <<= (u32x &a, const u32x b) { a.s0 <<= b.s0; a.s1 <<= b.s1; a.s2 <<= b.s2; a.s3 <<= b.s3; a.s4 <<= b.s4; a.s5 <<= b.s5; a.s6 <<= b.s6; a.s7 <<= b.s7;  }
+
+inline __device__ u32x operator << (const u32x a, const u32  b) { return u32x ((a.s0 << b),    (a.s1 << b)   , (a.s2 << b),    (a.s3 << b)   , (a.s4 << b),    (a.s5 << b)   , (a.s6 << b),    (a.s7 << b)   );  }
+inline __device__ u32x operator << (const u32x a, const u32x b) { return u32x ((a.s0 << b.s0), (a.s1 << b.s1), (a.s2 << b.s2), (a.s3 << b.s3), (a.s4 << b.s4), (a.s5 << b.s5), (a.s6 << b.s6), (a.s7 << b.s7));  }
+
+inline __device__ u32x operator >> (const u32x a, const u32  b) { return u32x ((a.s0 >> b),    (a.s1 >> b)   , (a.s2 >> b),    (a.s3 >> b)   , (a.s4 >> b),    (a.s5 >> b)   , (a.s6 >> b),    (a.s7 >> b)   );  }
+inline __device__ u32x operator >> (const u32x a, const u32x b) { return u32x ((a.s0 >> b.s0), (a.s1 >> b.s1), (a.s2 >> b.s2), (a.s3 >> b.s3), (a.s4 >> b.s4), (a.s5 >> b.s5), (a.s6 >> b.s6), (a.s7 >> b.s7));  }
+
+inline __device__ u32x operator ^  (const u32x a, const u32  b) { return u32x ((a.s0 ^  b),    (a.s1 ^  b)   , (a.s2 ^  b),    (a.s3 ^  b)   , (a.s4 ^  b),    (a.s5 ^  b)   , (a.s6 ^  b),    (a.s7 ^  b)   );  }
+inline __device__ u32x operator ^  (const u32x a, const u32x b) { return u32x ((a.s0 ^  b.s0), (a.s1 ^  b.s1), (a.s2 ^  b.s2), (a.s3 ^  b.s3), (a.s4 ^  b.s4), (a.s5 ^  b.s5), (a.s6 ^  b.s6), (a.s7 ^  b.s7));  }
+
+inline __device__ u32x operator |  (const u32x a, const u32  b) { return u32x ((a.s0 |  b),    (a.s1 |  b)   , (a.s2 |  b),    (a.s3 |  b)   , (a.s4 |  b),    (a.s5 |  b)   , (a.s6 |  b),    (a.s7 |  b)   );  }
+inline __device__ u32x operator |  (const u32x a, const u32x b) { return u32x ((a.s0 |  b.s0), (a.s1 |  b.s1), (a.s2 |  b.s2), (a.s3 |  b.s3), (a.s4 |  b.s4), (a.s5 |  b.s5), (a.s6 |  b.s6), (a.s7 |  b.s7));  }
+
+inline __device__ u32x operator &  (const u32x a, const u32  b) { return u32x ((a.s0 &  b),    (a.s1 &  b)   , (a.s2 &  b),    (a.s3 &  b)   , (a.s4 &  b),    (a.s5 &  b)   , (a.s6 &  b),    (a.s7 &  b)   );  }
+inline __device__ u32x operator &  (const u32x a, const u32x b) { return u32x ((a.s0 &  b.s0), (a.s1 &  b.s1), (a.s2 &  b.s2), (a.s3 &  b.s3), (a.s4 &  b.s4), (a.s5 &  b.s5), (a.s6 &  b.s6), (a.s7 &  b.s7));  }
+
+inline __device__ u32x operator +  (const u32x a, const u32  b) { return u32x ((a.s0 +  b),    (a.s1 +  b)   , (a.s2 +  b),    (a.s3 +  b)   , (a.s4 +  b),    (a.s5 +  b)   , (a.s6 +  b),    (a.s7 +  b)   );  }
+inline __device__ u32x operator +  (const u32x a, const u32x b) { return u32x ((a.s0 +  b.s0), (a.s1 +  b.s1), (a.s2 +  b.s2), (a.s3 +  b.s3), (a.s4 +  b.s4), (a.s5 +  b.s5), (a.s6 +  b.s6), (a.s7 +  b.s7));  }
+
+inline __device__ u32x operator -  (const u32x a, const u32  b) { return u32x ((a.s0 -  b),    (a.s1 -  b)   , (a.s2 -  b),    (a.s3 -  b)   , (a.s4 -  b),    (a.s5 -  b)   , (a.s6 -  b),    (a.s7 -  b)   );  }
+inline __device__ u32x operator -  (const u32x a, const u32x b) { return u32x ((a.s0 -  b.s0), (a.s1 -  b.s1), (a.s2 -  b.s2), (a.s3 -  b.s3), (a.s4 -  b.s4), (a.s5 -  b.s5), (a.s6 -  b.s6), (a.s7 -  b.s7));  }
+
+inline __device__ u32x operator *  (const u32x a, const u32  b) { return u32x ((a.s0 *  b),    (a.s1 *  b)   , (a.s2 *  b),    (a.s3 *  b)   , (a.s4 *  b),    (a.s5 *  b)   , (a.s6 *  b),    (a.s7 *  b)   );  }
+inline __device__ u32x operator *  (const u32x a, const u32x b) { return u32x ((a.s0 *  b.s0), (a.s1 *  b.s1), (a.s2 *  b.s2), (a.s3 *  b.s3), (a.s4 *  b.s4), (a.s5 *  b.s5), (a.s6 *  b.s6), (a.s7 *  b.s7));  }
+
+inline __device__ u32x operator %  (const u32x a, const u32  b) { return u32x ((a.s0 %  b),    (a.s1 %  b)   , (a.s2 %  b),    (a.s3 %  b)   , (a.s4 %  b),    (a.s5 %  b)   , (a.s6 %  b),    (a.s7 %  b)   );  }
+inline __device__ u32x operator %  (const u32x a, const u32x b) { return u32x ((a.s0 %  b.s0), (a.s1 %  b.s1), (a.s2 %  b.s2), (a.s3 %  b.s3), (a.s4 %  b.s4), (a.s5 %  b.s5), (a.s6 %  b.s6), (a.s7 %  b.s7));  }
+
+inline __device__ u32x operator ~  (const u32x a) { return u32x (~a.s0, ~a.s1, ~a.s2, ~a.s3, ~a.s4, ~a.s5, ~a.s6, ~a.s7); }
+
+inline __device__ bool operator != (const u64x a, const u64  b) { return ((a.s0 != b)    && (a.s1 != b)    && (a.s2 != b)    && (a.s3 != b)    && (a.s4 != b)    && (a.s5 != b)    && (a.s6 != b)    && (a.s7 != b)   ); }
+inline __device__ bool operator != (const u64x a, const u64x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1) && (a.s2 != b.s2) && (a.s3 != b.s3) && (a.s4 != b.s4) && (a.s5 != b.s5) && (a.s6 != b.s6) && (a.s7 != b.s7)); }
+
+inline __device__ void operator ^= (u64x &a, const u64  b) { a.s0 ^= b;    a.s1 ^= b;    a.s2 ^= b;    a.s3 ^= b;    a.s4 ^= b;    a.s5 ^= b;    a.s6 ^= b;    a.s7 ^= b;     }
+inline __device__ void operator ^= (u64x &a, const u64x b) { a.s0 ^= b.s0; a.s1 ^= b.s1; a.s2 ^= b.s2; a.s3 ^= b.s3; a.s4 ^= b.s4; a.s5 ^= b.s5; a.s6 ^= b.s6; a.s7 ^= b.s7;  }
+
+inline __device__ void operator |= (u64x &a, const u64  b) { a.s0 |= b;    a.s1 |= b;    a.s2 |= b;    a.s3 |= b;    a.s4 |= b;    a.s5 |= b;    a.s6 |= b;    a.s7 |= b;     }
+inline __device__ void operator |= (u64x &a, const u64x b) { a.s0 |= b.s0; a.s1 |= b.s1; a.s2 |= b.s2; a.s3 |= b.s3; a.s4 |= b.s4; a.s5 |= b.s5; a.s6 |= b.s6; a.s7 |= b.s7;  }
+
+inline __device__ void operator &= (u64x &a, const u64  b) { a.s0 &= b;    a.s1 &= b;    a.s2 &= b;    a.s3 &= b;    a.s4 &= b;    a.s5 &= b;    a.s6 &= b;    a.s7 &= b;     }
+inline __device__ void operator &= (u64x &a, const u64x b) { a.s0 &= b.s0; a.s1 &= b.s1; a.s2 &= b.s2; a.s3 &= b.s3; a.s4 &= b.s4; a.s5 &= b.s5; a.s6 &= b.s6; a.s7 &= b.s7;  }
+
+inline __device__ void operator += (u64x &a, const u64  b) { a.s0 += b;    a.s1 += b;    a.s2 += b;    a.s3 += b;    a.s4 += b;    a.s5 += b;    a.s6 += b;    a.s7 += b;     }
+inline __device__ void operator += (u64x &a, const u64x b) { a.s0 += b.s0; a.s1 += b.s1; a.s2 += b.s2; a.s3 += b.s3; a.s4 += b.s4; a.s5 += b.s5; a.s6 += b.s6; a.s7 += b.s7;  }
+
+inline __device__ void operator -= (u64x &a, const u64  b) { a.s0 -= b;    a.s1 -= b;    a.s2 -= b;    a.s3 -= b;    a.s4 -= b;    a.s5 -= b;    a.s6 -= b;    a.s7 -= b;     }
+inline __device__ void operator -= (u64x &a, const u64x b) { a.s0 -= b.s0; a.s1 -= b.s1; a.s2 -= b.s2; a.s3 -= b.s3; a.s4 -= b.s4; a.s5 -= b.s5; a.s6 -= b.s6; a.s7 -= b.s7;  }
+
+inline __device__ void operator *= (u64x &a, const u64  b) { a.s0 *= b;    a.s1 *= b;    a.s2 *= b;    a.s3 *= b;    a.s4 *= b;    a.s5 *= b;    a.s6 *= b;    a.s7 *= b;     }
+inline __device__ void operator *= (u64x &a, const u64x b) { a.s0 *= b.s0; a.s1 *= b.s1; a.s2 *= b.s2; a.s3 *= b.s3; a.s4 *= b.s4; a.s5 *= b.s5; a.s6 *= b.s6; a.s7 *= b.s7;  }
+
+inline __device__ void operator >>= (u64x &a, const u64  b) { a.s0 >>= b;    a.s1 >>= b;    a.s2 >>= b;    a.s3 >>= b;    a.s4 >>= b;    a.s5 >>= b;    a.s6 >>= b;    a.s7 >>= b;     }
+inline __device__ void operator >>= (u64x &a, const u64x b) { a.s0 >>= b.s0; a.s1 >>= b.s1; a.s2 >>= b.s2; a.s3 >>= b.s3; a.s4 >>= b.s4; a.s5 >>= b.s5; a.s6 >>= b.s6; a.s7 >>= b.s7;  }
+
+inline __device__ void operator <<= (u64x &a, const u64  b) { a.s0 <<= b;    a.s1 <<= b;    a.s2 <<= b;    a.s3 <<= b;    a.s4 <<= b;    a.s5 <<= b;    a.s6 <<= b;    a.s7 <<= b;     }
+inline __device__ void operator <<= (u64x &a, const u64x b) { a.s0 <<= b.s0; a.s1 <<= b.s1; a.s2 <<= b.s2; a.s3 <<= b.s3; a.s4 <<= b.s4; a.s5 <<= b.s5; a.s6 <<= b.s6; a.s7 <<= b.s7;  }
+
+inline __device__ u64x operator << (const u64x a, const u64  b) { return u64x ((a.s0 << b),    (a.s1 << b)   , (a.s2 << b),    (a.s3 << b)   , (a.s4 << b),    (a.s5 << b)   , (a.s6 << b),    (a.s7 << b)   );  }
+inline __device__ u64x operator << (const u64x a, const u64x b) { return u64x ((a.s0 << b.s0), (a.s1 << b.s1), (a.s2 << b.s2), (a.s3 << b.s3), (a.s4 << b.s4), (a.s5 << b.s5), (a.s6 << b.s6), (a.s7 << b.s7));  }
+
+inline __device__ u64x operator >> (const u64x a, const u64  b) { return u64x ((a.s0 >> b),    (a.s1 >> b)   , (a.s2 >> b),    (a.s3 >> b)   , (a.s4 >> b),    (a.s5 >> b)   , (a.s6 >> b),    (a.s7 >> b)   );  }
+inline __device__ u64x operator >> (const u64x a, const u64x b) { return u64x ((a.s0 >> b.s0), (a.s1 >> b.s1), (a.s2 >> b.s2), (a.s3 >> b.s3), (a.s4 >> b.s4), (a.s5 >> b.s5), (a.s6 >> b.s6), (a.s7 >> b.s7));  }
+
+inline __device__ u64x operator ^  (const u64x a, const u64  b) { return u64x ((a.s0 ^  b),    (a.s1 ^  b)   , (a.s2 ^  b),    (a.s3 ^  b)   , (a.s4 ^  b),    (a.s5 ^  b)   , (a.s6 ^  b),    (a.s7 ^  b)   );  }
+inline __device__ u64x operator ^  (const u64x a, const u64x b) { return u64x ((a.s0 ^  b.s0), (a.s1 ^  b.s1), (a.s2 ^  b.s2), (a.s3 ^  b.s3), (a.s4 ^  b.s4), (a.s5 ^  b.s5), (a.s6 ^  b.s6), (a.s7 ^  b.s7));  }
+
+inline __device__ u64x operator |  (const u64x a, const u64  b) { return u64x ((a.s0 |  b),    (a.s1 |  b)   , (a.s2 |  b),    (a.s3 |  b)   , (a.s4 |  b),    (a.s5 |  b)   , (a.s6 |  b),    (a.s7 |  b)   );  }
+inline __device__ u64x operator |  (const u64x a, const u64x b) { return u64x ((a.s0 |  b.s0), (a.s1 |  b.s1), (a.s2 |  b.s2), (a.s3 |  b.s3), (a.s4 |  b.s4), (a.s5 |  b.s5), (a.s6 |  b.s6), (a.s7 |  b.s7));  }
+
+inline __device__ u64x operator &  (const u64x a, const u64  b) { return u64x ((a.s0 &  b),    (a.s1 &  b)   , (a.s2 &  b),    (a.s3 &  b)   , (a.s4 &  b),    (a.s5 &  b)   , (a.s6 &  b),    (a.s7 &  b)   );  }
+inline __device__ u64x operator &  (const u64x a, const u64x b) { return u64x ((a.s0 &  b.s0), (a.s1 &  b.s1), (a.s2 &  b.s2), (a.s3 &  b.s3), (a.s4 &  b.s4), (a.s5 &  b.s5), (a.s6 &  b.s6), (a.s7 &  b.s7));  }
+
+inline __device__ u64x operator +  (const u64x a, const u64  b) { return u64x ((a.s0 +  b),    (a.s1 +  b)   , (a.s2 +  b),    (a.s3 +  b)   , (a.s4 +  b),    (a.s5 +  b)   , (a.s6 +  b),    (a.s7 +  b)   );  }
+inline __device__ u64x operator +  (const u64x a, const u64x b) { return u64x ((a.s0 +  b.s0), (a.s1 +  b.s1), (a.s2 +  b.s2), (a.s3 +  b.s3), (a.s4 +  b.s4), (a.s5 +  b.s5), (a.s6 +  b.s6), (a.s7 +  b.s7));  }
+
+inline __device__ u64x operator -  (const u64x a, const u64  b) { return u64x ((a.s0 -  b),    (a.s1 -  b)   , (a.s2 -  b),    (a.s3 -  b)   , (a.s4 -  b),    (a.s5 -  b)   , (a.s6 -  b),    (a.s7 -  b)   );  }
+inline __device__ u64x operator -  (const u64x a, const u64x b) { return u64x ((a.s0 -  b.s0), (a.s1 -  b.s1), (a.s2 -  b.s2), (a.s3 -  b.s3), (a.s4 -  b.s4), (a.s5 -  b.s5), (a.s6 -  b.s6), (a.s7 -  b.s7));  }
+
+inline __device__ u64x operator *  (const u64x a, const u64  b) { return u64x ((a.s0 *  b),    (a.s1 *  b)   , (a.s2 *  b),    (a.s3 *  b)   , (a.s4 *  b),    (a.s5 *  b)   , (a.s6 *  b),    (a.s7 *  b)   );  }
+inline __device__ u64x operator *  (const u64x a, const u64x b) { return u64x ((a.s0 *  b.s0), (a.s1 *  b.s1), (a.s2 *  b.s2), (a.s3 *  b.s3), (a.s4 *  b.s4), (a.s5 *  b.s5), (a.s6 *  b.s6), (a.s7 *  b.s7));  }
+
+inline __device__ u64x operator %  (const u64x a, const u64  b) { return u64x ((a.s0 %  b),    (a.s1 %  b)   , (a.s2 %  b),    (a.s3 %  b)   , (a.s4 %  b),    (a.s5 %  b)   , (a.s6 %  b),    (a.s7 %  b)   );  }
+inline __device__ u64x operator %  (const u64x a, const u64x b) { return u64x ((a.s0 %  b.s0), (a.s1 %  b.s1), (a.s2 %  b.s2), (a.s3 %  b.s3), (a.s4 %  b.s4), (a.s5 %  b.s5), (a.s6 %  b.s6), (a.s7 %  b.s7));  }
+
+inline __device__ u64x operator ~  (const u64x a) { return u64x (~a.s0, ~a.s1, ~a.s2, ~a.s3, ~a.s4, ~a.s5, ~a.s6, ~a.s7); }
+
+#endif
+
+#if VECT_SIZE == 16
+
+struct __device_builtin__ __builtin_align__(16) u8x
+{
+  u8 s0;
+  u8 s1;
+  u8 s2;
+  u8 s3;
+  u8 s4;
+  u8 s5;
+  u8 s6;
+  u8 s7;
+  u8 s8;
+  u8 s9;
+  u8 sa;
+  u8 sb;
+  u8 sc;
+  u8 sd;
+  u8 se;
+  u8 sf;
+
+  inline __device__  u8x (const u8 a, const u8 b, const u8 c, const u8 d, const u8 e, const u8 f, const u8 g, const u8 h, const u8 i, const u8 j, const u8 k, const u8 l, const u8 m, const u8 n, const u8 o, const u8 p) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h), s8(i), s9(j), sa(k), sb(l), sc(m), sd(n), se(o), sf(p) { }
+  inline __device__  u8x (const u8 a)                                                                                                                                                                                     : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a), s8(a), s9(a), sa(a), sb(a), sc(a), sd(a), se(a), sf(a) { }
+
+  inline __device__  u8x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0), s8(0), s9(0), sa(0), sb(0), sc(0), sd(0), se(0), sf(0) { }
+  inline __device__ ~u8x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(32) u16x
+{
+  u16 s0;
+  u16 s1;
+  u16 s2;
+  u16 s3;
+  u16 s4;
+  u16 s5;
+  u16 s6;
+  u16 s7;
+  u16 s8;
+  u16 s9;
+  u16 sa;
+  u16 sb;
+  u16 sc;
+  u16 sd;
+  u16 se;
+  u16 sf;
+
+  inline __device__  u16x (const u16 a, const u16 b, const u16 c, const u16 d, const u16 e, const u16 f, const u16 g, const u16 h, const u16 i, const u16 j, const u16 k, const u16 l, const u16 m, const u16 n, const u16 o, const u16 p) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h), s8(i), s9(j), sa(k), sb(l), sc(m), sd(n), se(o), sf(p) { }
+  inline __device__  u16x (const u16 a)                                                                                                                                                                                     : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a), s8(a), s9(a), sa(a), sb(a), sc(a), sd(a), se(a), sf(a) { }
+
+  inline __device__  u16x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0), s8(0), s9(0), sa(0), sb(0), sc(0), sd(0), se(0), sf(0){ }
+  inline __device__ ~u16x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(64) u32x
+{
+  u32 s0;
+  u32 s1;
+  u32 s2;
+  u32 s3;
+  u32 s4;
+  u32 s5;
+  u32 s6;
+  u32 s7;
+  u32 s8;
+  u32 s9;
+  u32 sa;
+  u32 sb;
+  u32 sc;
+  u32 sd;
+  u32 se;
+  u32 sf;
+
+  inline __device__  u32x (const u32 a, const u32 b, const u32 c, const u32 d, const u32 e, const u32 f, const u32 g, const u32 h, const u32 i, const u32 j, const u32 k, const u32 l, const u32 m, const u32 n, const u32 o, const u32 p) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h), s8(i), s9(j), sa(k), sb(l), sc(m), sd(n), se(o), sf(p) { }
+  inline __device__  u32x (const u32 a)                                                                                                                                                                                     : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a), s8(a), s9(a), sa(a), sb(a), sc(a), sd(a), se(a), sf(a) { }
+
+  inline __device__  u32x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0), s8(0), s9(0), sa(0), sb(0), sc(0), sd(0), se(0), sf(0){ }
+  inline __device__ ~u32x (void) { }
+};
+
+struct __device_builtin__ __builtin_align__(128) u64x
+{
+  u64 s0;
+  u64 s1;
+  u64 s2;
+  u64 s3;
+  u64 s4;
+  u64 s5;
+  u64 s6;
+  u64 s7;
+  u64 s8;
+  u64 s9;
+  u64 sa;
+  u64 sb;
+  u64 sc;
+  u64 sd;
+  u64 se;
+  u64 sf;
+
+  inline __device__  u64x (const u64 a, const u64 b, const u64 c, const u64 d, const u64 e, const u64 f, const u64 g, const u64 h, const u64 i, const u64 j, const u64 k, const u64 l, const u64 m, const u64 n, const u64 o, const u64 p) : s0(a), s1(b), s2(c), s3(d), s4(e), s5(f), s6(g), s7(h), s8(i), s9(j), sa(k), sb(l), sc(m), sd(n), se(o), sf(p) { }
+  inline __device__  u64x (const u64 a)                                                                                                                                                                                     : s0(a), s1(a), s2(a), s3(a), s4(a), s5(a), s6(a), s7(a), s8(a), s9(a), sa(a), sb(a), sc(a), sd(a), se(a), sf(a) { }
+
+  inline __device__  u64x (void) : s0(0), s1(0), s2(0), s3(0), s4(0), s5(0), s6(0), s7(0), s8(0), s9(0), sa(0), sb(0), sc(0), sd(0), se(0), sf(0) { }
+  inline __device__ ~u64x (void) { }
+};
+
+inline __device__ bool operator != (const u32x a, const u32  b) { return ((a.s0 != b)    && (a.s1 != b)    && (a.s2 != b)    && (a.s3 != b)    && (a.s4 != b)    && (a.s5 != b)    && (a.s6 != b)    && (a.s7 != b)    && (a.s8 != b)    && (a.s9 != b)    && (a.sa != b)    && (a.sb != b)    && (a.sc != b)    && (a.sd != b)    && (a.se != b)    && (a.sf != b)   ); }
+inline __device__ bool operator != (const u32x a, const u32x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1) && (a.s2 != b.s2) && (a.s3 != b.s3) && (a.s4 != b.s4) && (a.s5 != b.s5) && (a.s6 != b.s6) && (a.s7 != b.s7) && (a.s8 != b.s8) && (a.s9 != b.s9) && (a.sa != b.sa) && (a.sb != b.sb) && (a.sc != b.sc) && (a.sd != b.sd) && (a.se != b.se) && (a.sf != b.sf)); }
+
+inline __device__ void operator ^= (u32x &a, const u32  b) { a.s0 ^= b;    a.s1 ^= b;    a.s2 ^= b;    a.s3 ^= b;    a.s4 ^= b;    a.s5 ^= b;    a.s6 ^= b;    a.s7 ^= b;    a.s8 ^= b;    a.s9 ^= b;    a.sa ^= b;    a.sb ^= b;    a.sc ^= b;    a.sd ^= b;    a.se ^= b;    a.sf ^= b;    }
+inline __device__ void operator ^= (u32x &a, const u32x b) { a.s0 ^= b.s0; a.s1 ^= b.s1; a.s2 ^= b.s2; a.s3 ^= b.s3; a.s4 ^= b.s4; a.s5 ^= b.s5; a.s6 ^= b.s6; a.s7 ^= b.s7; a.s8 ^= b.s8; a.s9 ^= b.s9; a.sa ^= b.sa; a.sb ^= b.sb; a.sc ^= b.sc; a.sd ^= b.sd; a.se ^= b.se; a.sf ^= b.sf; }
+
+inline __device__ void operator |= (u32x &a, const u32  b) { a.s0 |= b;    a.s1 |= b;    a.s2 |= b;    a.s3 |= b;    a.s4 |= b;    a.s5 |= b;    a.s6 |= b;    a.s7 |= b;    a.s8 |= b;    a.s9 |= b;    a.sa |= b;    a.sb |= b;    a.sc |= b;    a.sd |= b;    a.se |= b;    a.sf |= b;    }
+inline __device__ void operator |= (u32x &a, const u32x b) { a.s0 |= b.s0; a.s1 |= b.s1; a.s2 |= b.s2; a.s3 |= b.s3; a.s4 |= b.s4; a.s5 |= b.s5; a.s6 |= b.s6; a.s7 |= b.s7; a.s8 |= b.s8; a.s9 |= b.s9; a.sa |= b.sa; a.sb |= b.sb; a.sc |= b.sc; a.sd |= b.sd; a.se |= b.se; a.sf |= b.sf; }
+
+inline __device__ void operator &= (u32x &a, const u32  b) { a.s0 &= b;    a.s1 &= b;    a.s2 &= b;    a.s3 &= b;    a.s4 &= b;    a.s5 &= b;    a.s6 &= b;    a.s7 &= b;    a.s8 &= b;    a.s9 &= b;    a.sa &= b;    a.sb &= b;    a.sc &= b;    a.sd &= b;    a.se &= b;    a.sf &= b;    }
+inline __device__ void operator &= (u32x &a, const u32x b) { a.s0 &= b.s0; a.s1 &= b.s1; a.s2 &= b.s2; a.s3 &= b.s3; a.s4 &= b.s4; a.s5 &= b.s5; a.s6 &= b.s6; a.s7 &= b.s7; a.s8 &= b.s8; a.s9 &= b.s9; a.sa &= b.sa; a.sb &= b.sb; a.sc &= b.sc; a.sd &= b.sd; a.se &= b.se; a.sf &= b.sf; }
+
+inline __device__ void operator += (u32x &a, const u32  b) { a.s0 += b;    a.s1 += b;    a.s2 += b;    a.s3 += b;    a.s4 += b;    a.s5 += b;    a.s6 += b;    a.s7 += b;    a.s8 += b;    a.s9 += b;    a.sa += b;    a.sb += b;    a.sc += b;    a.sd += b;    a.se += b;    a.sf += b;    }
+inline __device__ void operator += (u32x &a, const u32x b) { a.s0 += b.s0; a.s1 += b.s1; a.s2 += b.s2; a.s3 += b.s3; a.s4 += b.s4; a.s5 += b.s5; a.s6 += b.s6; a.s7 += b.s7; a.s8 += b.s8; a.s9 += b.s9; a.sa += b.sa; a.sb += b.sb; a.sc += b.sc; a.sd += b.sd; a.se += b.se; a.sf += b.sf; }
+
+inline __device__ void operator -= (u32x &a, const u32  b) { a.s0 -= b;    a.s1 -= b;    a.s2 -= b;    a.s3 -= b;    a.s4 -= b;    a.s5 -= b;    a.s6 -= b;    a.s7 -= b;    a.s8 -= b;    a.s9 -= b;    a.sa -= b;    a.sb -= b;    a.sc -= b;    a.sd -= b;    a.se -= b;    a.sf -= b;    }
+inline __device__ void operator -= (u32x &a, const u32x b) { a.s0 -= b.s0; a.s1 -= b.s1; a.s2 -= b.s2; a.s3 -= b.s3; a.s4 -= b.s4; a.s5 -= b.s5; a.s6 -= b.s6; a.s7 -= b.s7; a.s8 -= b.s8; a.s9 -= b.s9; a.sa -= b.sa; a.sb -= b.sb; a.sc -= b.sc; a.sd -= b.sd; a.se -= b.se; a.sf -= b.sf; }
+
+inline __device__ void operator *= (u32x &a, const u32  b) { a.s0 *= b;    a.s1 *= b;    a.s2 *= b;    a.s3 *= b;    a.s4 *= b;    a.s5 *= b;    a.s6 *= b;    a.s7 *= b;    a.s8 *= b;    a.s9 *= b;    a.sa *= b;    a.sb *= b;    a.sc *= b;    a.sd *= b;    a.se *= b;    a.sf *= b;    }
+inline __device__ void operator *= (u32x &a, const u32x b) { a.s0 *= b.s0; a.s1 *= b.s1; a.s2 *= b.s2; a.s3 *= b.s3; a.s4 *= b.s4; a.s5 *= b.s5; a.s6 *= b.s6; a.s7 *= b.s7; a.s8 *= b.s8; a.s9 *= b.s9; a.sa *= b.sa; a.sb *= b.sb; a.sc *= b.sc; a.sd *= b.sd; a.se *= b.se; a.sf *= b.sf; }
+
+inline __device__ void operator >>= (u32x &a, const u32  b) { a.s0 >>= b;    a.s1 >>= b;    a.s2 >>= b;    a.s3 >>= b;    a.s4 >>= b;    a.s5 >>= b;    a.s6 >>= b;    a.s7 >>= b;    a.s8 >>= b;    a.s9 >>= b;    a.sa >>= b;    a.sb >>= b;    a.sc >>= b;    a.sd >>= b;    a.se >>= b;    a.sf >>= b;    }
+inline __device__ void operator >>= (u32x &a, const u32x b) { a.s0 >>= b.s0; a.s1 >>= b.s1; a.s2 >>= b.s2; a.s3 >>= b.s3; a.s4 >>= b.s4; a.s5 >>= b.s5; a.s6 >>= b.s6; a.s7 >>= b.s7; a.s8 >>= b.s8; a.s9 >>= b.s9; a.sa >>= b.sa; a.sb >>= b.sb; a.sc >>= b.sc; a.sd >>= b.sd; a.se >>= b.se; a.sf >>= b.sf; }
+
+inline __device__ void operator <<= (u32x &a, const u32  b) { a.s0 <<= b;    a.s1 <<= b;    a.s2 <<= b;    a.s3 <<= b;    a.s4 <<= b;    a.s5 <<= b;    a.s6 <<= b;    a.s7 <<= b;    a.s8 <<= b;    a.s9 <<= b;    a.sa <<= b;    a.sb <<= b;    a.sc <<= b;    a.sd <<= b;    a.se <<= b;    a.sf <<= b;    }
+inline __device__ void operator <<= (u32x &a, const u32x b) { a.s0 <<= b.s0; a.s1 <<= b.s1; a.s2 <<= b.s2; a.s3 <<= b.s3; a.s4 <<= b.s4; a.s5 <<= b.s5; a.s6 <<= b.s6; a.s7 <<= b.s7; a.s8 <<= b.s8; a.s9 <<= b.s9; a.sa <<= b.sa; a.sb <<= b.sb; a.sc <<= b.sc; a.sd <<= b.sd; a.se <<= b.se; a.sf <<= b.sf; }
+
+inline __device__ u32x operator << (const u32x a, const u32  b) { return u32x ((a.s0 << b),    (a.s1 << b)   , (a.s2 << b),    (a.s3 << b)   , (a.s4 << b),    (a.s5 << b)   , (a.s6 << b),    (a.s7 << b),    (a.s8 << b),    (a.s9 << b)   , (a.sa << b),    (a.sb << b)   , (a.sc << b),    (a.sd << b)   , (a.se << b),    (a.sf << b)   );  }
+inline __device__ u32x operator << (const u32x a, const u32x b) { return u32x ((a.s0 << b.s0), (a.s1 << b.s1), (a.s2 << b.s2), (a.s3 << b.s3), (a.s4 << b.s4), (a.s5 << b.s5), (a.s6 << b.s6), (a.s7 << b.s7), (a.s8 << b.s8), (a.s9 << b.s9), (a.sa << b.sa), (a.sb << b.sb), (a.sc << b.sc), (a.sd << b.sd), (a.se << b.se), (a.sf << b.sf));  }
+
+inline __device__ u32x operator >> (const u32x a, const u32  b) { return u32x ((a.s0 >> b),    (a.s1 >> b)   , (a.s2 >> b),    (a.s3 >> b)   , (a.s4 >> b),    (a.s5 >> b)   , (a.s6 >> b),    (a.s7 >> b),    (a.s8 >> b),    (a.s9 >> b)   , (a.sa >> b),    (a.sb >> b)   , (a.sc >> b),    (a.sd >> b)   , (a.se >> b),    (a.sf >> b)   );  }
+inline __device__ u32x operator >> (const u32x a, const u32x b) { return u32x ((a.s0 >> b.s0), (a.s1 >> b.s1), (a.s2 >> b.s2), (a.s3 >> b.s3), (a.s4 >> b.s4), (a.s5 >> b.s5), (a.s6 >> b.s6), (a.s7 >> b.s7), (a.s8 >> b.s8), (a.s9 >> b.s9), (a.sa >> b.sa), (a.sb >> b.sb), (a.sc >> b.sc), (a.sd >> b.sd), (a.se >> b.se), (a.sf >> b.sf));  }
+
+inline __device__ u32x operator ^  (const u32x a, const u32  b) { return u32x ((a.s0 ^  b),    (a.s1 ^  b)   , (a.s2 ^  b),    (a.s3 ^  b)   , (a.s4 ^  b),    (a.s5 ^  b)   , (a.s6 ^  b),    (a.s7 ^  b),    (a.s8 ^  b),    (a.s9 ^  b)   , (a.sa ^  b),    (a.sb ^  b)   , (a.sc ^  b),    (a.sd ^  b)   , (a.se ^  b),    (a.sf ^  b)   );  }
+inline __device__ u32x operator ^  (const u32x a, const u32x b) { return u32x ((a.s0 ^  b.s0), (a.s1 ^  b.s1), (a.s2 ^  b.s2), (a.s3 ^  b.s3), (a.s4 ^  b.s4), (a.s5 ^  b.s5), (a.s6 ^  b.s6), (a.s7 ^  b.s7), (a.s8 ^  b.s8), (a.s9 ^  b.s9), (a.sa ^  b.sa), (a.sb ^  b.sb), (a.sc ^  b.sc), (a.sd ^  b.sd), (a.se ^  b.se), (a.sf ^  b.sf));  }
+
+inline __device__ u32x operator |  (const u32x a, const u32  b) { return u32x ((a.s0 |  b),    (a.s1 |  b)   , (a.s2 |  b),    (a.s3 |  b)   , (a.s4 |  b),    (a.s5 |  b)   , (a.s6 |  b),    (a.s7 |  b),    (a.s8 |  b),    (a.s9 |  b)   , (a.sa |  b),    (a.sb |  b)   , (a.sc |  b),    (a.sd |  b)   , (a.se |  b),    (a.sf |  b)   );  }
+inline __device__ u32x operator |  (const u32x a, const u32x b) { return u32x ((a.s0 |  b.s0), (a.s1 |  b.s1), (a.s2 |  b.s2), (a.s3 |  b.s3), (a.s4 |  b.s4), (a.s5 |  b.s5), (a.s6 |  b.s6), (a.s7 |  b.s7), (a.s8 |  b.s8), (a.s9 |  b.s9), (a.sa |  b.sa), (a.sb |  b.sb), (a.sc |  b.sc), (a.sd |  b.sd), (a.se |  b.se), (a.sf |  b.sf));  }
+
+inline __device__ u32x operator &  (const u32x a, const u32  b) { return u32x ((a.s0 &  b),    (a.s1 &  b)   , (a.s2 &  b),    (a.s3 &  b)   , (a.s4 &  b),    (a.s5 &  b)   , (a.s6 &  b),    (a.s7 &  b),    (a.s8 &  b),    (a.s9 &  b)   , (a.sa &  b),    (a.sb &  b)   , (a.sc &  b),    (a.sd &  b)   , (a.se &  b),    (a.sf &  b)   );  }
+inline __device__ u32x operator &  (const u32x a, const u32x b) { return u32x ((a.s0 &  b.s0), (a.s1 &  b.s1), (a.s2 &  b.s2), (a.s3 &  b.s3), (a.s4 &  b.s4), (a.s5 &  b.s5), (a.s6 &  b.s6), (a.s7 &  b.s7), (a.s8 &  b.s8), (a.s9 &  b.s9), (a.sa &  b.sa), (a.sb &  b.sb), (a.sc &  b.sc), (a.sd &  b.sd), (a.se &  b.se), (a.sf &  b.sf));  }
+
+inline __device__ u32x operator +  (const u32x a, const u32  b) { return u32x ((a.s0 +  b),    (a.s1 +  b)   , (a.s2 +  b),    (a.s3 +  b)   , (a.s4 +  b),    (a.s5 +  b)   , (a.s6 +  b),    (a.s7 +  b),    (a.s8 +  b),    (a.s9 +  b)   , (a.sa +  b),    (a.sb +  b)   , (a.sc +  b),    (a.sd +  b)   , (a.se +  b),    (a.sf +  b)   );  }
+inline __device__ u32x operator +  (const u32x a, const u32x b) { return u32x ((a.s0 +  b.s0), (a.s1 +  b.s1), (a.s2 +  b.s2), (a.s3 +  b.s3), (a.s4 +  b.s4), (a.s5 +  b.s5), (a.s6 +  b.s6), (a.s7 +  b.s7), (a.s8 +  b.s8), (a.s9 +  b.s9), (a.sa +  b.sa), (a.sb +  b.sb), (a.sc +  b.sc), (a.sd +  b.sd), (a.se +  b.se), (a.sf +  b.sf));  }
+
+inline __device__ u32x operator -  (const u32x a, const u32  b) { return u32x ((a.s0 -  b),    (a.s1 -  b)   , (a.s2 -  b),    (a.s3 -  b)   , (a.s4 -  b),    (a.s5 -  b)   , (a.s6 -  b),    (a.s7 -  b),    (a.s8 -  b),    (a.s9 -  b)   , (a.sa -  b),    (a.sb -  b)   , (a.sc -  b),    (a.sd -  b)   , (a.se -  b),    (a.sf -  b)   );  }
+inline __device__ u32x operator -  (const u32x a, const u32x b) { return u32x ((a.s0 -  b.s0), (a.s1 -  b.s1), (a.s2 -  b.s2), (a.s3 -  b.s3), (a.s4 -  b.s4), (a.s5 -  b.s5), (a.s6 -  b.s6), (a.s7 -  b.s7), (a.s8 -  b.s8), (a.s9 -  b.s9), (a.sa -  b.sa), (a.sb -  b.sb), (a.sc -  b.sc), (a.sd -  b.sd), (a.se -  b.se), (a.sf -  b.sf));  }
+
+inline __device__ u32x operator *  (const u32x a, const u32  b) { return u32x ((a.s0 *  b),    (a.s1 *  b)   , (a.s2 *  b),    (a.s3 *  b)   , (a.s4 *  b),    (a.s5 *  b)   , (a.s6 *  b),    (a.s7 *  b),    (a.s8 *  b),    (a.s9 *  b)   , (a.sa *  b),    (a.sb *  b)   , (a.sc *  b),    (a.sd *  b)   , (a.se *  b),    (a.sf *  b)   );  }
+inline __device__ u32x operator *  (const u32x a, const u32x b) { return u32x ((a.s0 *  b.s0), (a.s1 *  b.s1), (a.s2 *  b.s2), (a.s3 *  b.s3), (a.s4 *  b.s4), (a.s5 *  b.s5), (a.s6 *  b.s6), (a.s7 *  b.s7), (a.s8 *  b.s8), (a.s9 *  b.s9), (a.sa *  b.sa), (a.sb *  b.sb), (a.sc *  b.sc), (a.sd *  b.sd), (a.se *  b.se), (a.sf *  b.sf));  }
+
+inline __device__ u32x operator %  (const u32x a, const u32  b) { return u32x ((a.s0 %  b),    (a.s1 %  b)   , (a.s2 %  b),    (a.s3 %  b)   , (a.s4 %  b),    (a.s5 %  b)   , (a.s6 %  b),    (a.s7 %  b),    (a.s8 %  b),    (a.s9 %  b)   , (a.sa %  b),    (a.sb %  b)   , (a.sc %  b),    (a.sd %  b)   , (a.se %  b),    (a.sf %  b)   );  }
+inline __device__ u32x operator %  (const u32x a, const u32x b) { return u32x ((a.s0 %  b.s0), (a.s1 %  b.s1), (a.s2 %  b.s2), (a.s3 %  b.s3), (a.s4 %  b.s4), (a.s5 %  b.s5), (a.s6 %  b.s6), (a.s7 %  b.s7), (a.s8 %  b.s8), (a.s9 %  b.s9), (a.sa %  b.sa), (a.sb %  b.sb), (a.sc %  b.sc), (a.sd %  b.sd), (a.se %  b.se), (a.sf %  b.sf));  }
+
+inline __device__ u32x operator ~  (const u32x a) { return u32x (~a.s0, ~a.s1, ~a.s2, ~a.s3, ~a.s4, ~a.s5, ~a.s6, ~a.s7, ~a.s8, ~a.s9, ~a.sa, ~a.sb, ~a.sc, ~a.sd, ~a.se, ~a.sf); }
+
+inline __device__ bool operator != (const u64x a, const u64  b) { return ((a.s0 != b)    && (a.s1 != b)    && (a.s2 != b)    && (a.s3 != b)    && (a.s4 != b)    && (a.s5 != b)    && (a.s6 != b)    && (a.s7 != b)    && (a.s8 != b)    && (a.s9 != b)    && (a.sa != b)    && (a.sb != b)    && (a.sc != b)    && (a.sd != b)    && (a.se != b)    && (a.sf != b)   ); }
+inline __device__ bool operator != (const u64x a, const u64x b) { return ((a.s0 != b.s0) && (a.s1 != b.s1) && (a.s2 != b.s2) && (a.s3 != b.s3) && (a.s4 != b.s4) && (a.s5 != b.s5) && (a.s6 != b.s6) && (a.s7 != b.s7) && (a.s8 != b.s8) && (a.s9 != b.s9) && (a.sa != b.sa) && (a.sb != b.sb) && (a.sc != b.sc) && (a.sd != b.sd) && (a.se != b.se) && (a.sf != b.sf)); }
+
+inline __device__ void operator ^= (u64x &a, const u64  b) { a.s0 ^= b;    a.s1 ^= b;    a.s2 ^= b;    a.s3 ^= b;    a.s4 ^= b;    a.s5 ^= b;    a.s6 ^= b;    a.s7 ^= b;    a.s8 ^= b;    a.s9 ^= b;    a.sa ^= b;    a.sb ^= b;    a.sc ^= b;    a.sd ^= b;    a.se ^= b;    a.sf ^= b;    }
+inline __device__ void operator ^= (u64x &a, const u64x b) { a.s0 ^= b.s0; a.s1 ^= b.s1; a.s2 ^= b.s2; a.s3 ^= b.s3; a.s4 ^= b.s4; a.s5 ^= b.s5; a.s6 ^= b.s6; a.s7 ^= b.s7; a.s8 ^= b.s8; a.s9 ^= b.s9; a.sa ^= b.sa; a.sb ^= b.sb; a.sc ^= b.sc; a.sd ^= b.sd; a.se ^= b.se; a.sf ^= b.sf; }
+
+inline __device__ void operator |= (u64x &a, const u64  b) { a.s0 |= b;    a.s1 |= b;    a.s2 |= b;    a.s3 |= b;    a.s4 |= b;    a.s5 |= b;    a.s6 |= b;    a.s7 |= b;    a.s8 |= b;    a.s9 |= b;    a.sa |= b;    a.sb |= b;    a.sc |= b;    a.sd |= b;    a.se |= b;    a.sf |= b;    }
+inline __device__ void operator |= (u64x &a, const u64x b) { a.s0 |= b.s0; a.s1 |= b.s1; a.s2 |= b.s2; a.s3 |= b.s3; a.s4 |= b.s4; a.s5 |= b.s5; a.s6 |= b.s6; a.s7 |= b.s7; a.s8 |= b.s8; a.s9 |= b.s9; a.sa |= b.sa; a.sb |= b.sb; a.sc |= b.sc; a.sd |= b.sd; a.se |= b.se; a.sf |= b.sf; }
+
+inline __device__ void operator &= (u64x &a, const u64  b) { a.s0 &= b;    a.s1 &= b;    a.s2 &= b;    a.s3 &= b;    a.s4 &= b;    a.s5 &= b;    a.s6 &= b;    a.s7 &= b;    a.s8 &= b;    a.s9 &= b;    a.sa &= b;    a.sb &= b;    a.sc &= b;    a.sd &= b;    a.se &= b;    a.sf &= b;    }
+inline __device__ void operator &= (u64x &a, const u64x b) { a.s0 &= b.s0; a.s1 &= b.s1; a.s2 &= b.s2; a.s3 &= b.s3; a.s4 &= b.s4; a.s5 &= b.s5; a.s6 &= b.s6; a.s7 &= b.s7; a.s8 &= b.s8; a.s9 &= b.s9; a.sa &= b.sa; a.sb &= b.sb; a.sc &= b.sc; a.sd &= b.sd; a.se &= b.se; a.sf &= b.sf; }
+
+inline __device__ void operator += (u64x &a, const u64  b) { a.s0 += b;    a.s1 += b;    a.s2 += b;    a.s3 += b;    a.s4 += b;    a.s5 += b;    a.s6 += b;    a.s7 += b;    a.s8 += b;    a.s9 += b;    a.sa += b;    a.sb += b;    a.sc += b;    a.sd += b;    a.se += b;    a.sf += b;    }
+inline __device__ void operator += (u64x &a, const u64x b) { a.s0 += b.s0; a.s1 += b.s1; a.s2 += b.s2; a.s3 += b.s3; a.s4 += b.s4; a.s5 += b.s5; a.s6 += b.s6; a.s7 += b.s7; a.s8 += b.s8; a.s9 += b.s9; a.sa += b.sa; a.sb += b.sb; a.sc += b.sc; a.sd += b.sd; a.se += b.se; a.sf += b.sf; }
+
+inline __device__ void operator -= (u64x &a, const u64  b) { a.s0 -= b;    a.s1 -= b;    a.s2 -= b;    a.s3 -= b;    a.s4 -= b;    a.s5 -= b;    a.s6 -= b;    a.s7 -= b;    a.s8 -= b;    a.s9 -= b;    a.sa -= b;    a.sb -= b;    a.sc -= b;    a.sd -= b;    a.se -= b;    a.sf -= b;    }
+inline __device__ void operator -= (u64x &a, const u64x b) { a.s0 -= b.s0; a.s1 -= b.s1; a.s2 -= b.s2; a.s3 -= b.s3; a.s4 -= b.s4; a.s5 -= b.s5; a.s6 -= b.s6; a.s7 -= b.s7; a.s8 -= b.s8; a.s9 -= b.s9; a.sa -= b.sa; a.sb -= b.sb; a.sc -= b.sc; a.sd -= b.sd; a.se -= b.se; a.sf -= b.sf; }
+
+inline __device__ void operator *= (u64x &a, const u64  b) { a.s0 *= b;    a.s1 *= b;    a.s2 *= b;    a.s3 *= b;    a.s4 *= b;    a.s5 *= b;    a.s6 *= b;    a.s7 *= b;    a.s8 *= b;    a.s9 *= b;    a.sa *= b;    a.sb *= b;    a.sc *= b;    a.sd *= b;    a.se *= b;    a.sf *= b;    }
+inline __device__ void operator *= (u64x &a, const u64x b) { a.s0 *= b.s0; a.s1 *= b.s1; a.s2 *= b.s2; a.s3 *= b.s3; a.s4 *= b.s4; a.s5 *= b.s5; a.s6 *= b.s6; a.s7 *= b.s7; a.s8 *= b.s8; a.s9 *= b.s9; a.sa *= b.sa; a.sb *= b.sb; a.sc *= b.sc; a.sd *= b.sd; a.se *= b.se; a.sf *= b.sf; }
+
+inline __device__ void operator >>= (u64x &a, const u64  b) { a.s0 >>= b;    a.s1 >>= b;    a.s2 >>= b;    a.s3 >>= b;    a.s4 >>= b;    a.s5 >>= b;    a.s6 >>= b;    a.s7 >>= b;    a.s8 >>= b;    a.s9 >>= b;    a.sa >>= b;    a.sb >>= b;    a.sc >>= b;    a.sd >>= b;    a.se >>= b;    a.sf >>= b;    }
+inline __device__ void operator >>= (u64x &a, const u64x b) { a.s0 >>= b.s0; a.s1 >>= b.s1; a.s2 >>= b.s2; a.s3 >>= b.s3; a.s4 >>= b.s4; a.s5 >>= b.s5; a.s6 >>= b.s6; a.s7 >>= b.s7; a.s8 >>= b.s8; a.s9 >>= b.s9; a.sa >>= b.sa; a.sb >>= b.sb; a.sc >>= b.sc; a.sd >>= b.sd; a.se >>= b.se; a.sf >>= b.sf; }
+
+inline __device__ void operator <<= (u64x &a, const u64  b) { a.s0 <<= b;    a.s1 <<= b;    a.s2 <<= b;    a.s3 <<= b;    a.s4 <<= b;    a.s5 <<= b;    a.s6 <<= b;    a.s7 <<= b;    a.s8 <<= b;    a.s9 <<= b;    a.sa <<= b;    a.sb <<= b;    a.sc <<= b;    a.sd <<= b;    a.se <<= b;    a.sf <<= b;    }
+inline __device__ void operator <<= (u64x &a, const u64x b) { a.s0 <<= b.s0; a.s1 <<= b.s1; a.s2 <<= b.s2; a.s3 <<= b.s3; a.s4 <<= b.s4; a.s5 <<= b.s5; a.s6 <<= b.s6; a.s7 <<= b.s7; a.s8 <<= b.s8; a.s9 <<= b.s9; a.sa <<= b.sa; a.sb <<= b.sb; a.sc <<= b.sc; a.sd <<= b.sd; a.se <<= b.se; a.sf <<= b.sf; }
+
+inline __device__ u64x operator << (const u64x a, const u64  b) { return u64x ((a.s0 << b),    (a.s1 << b)   , (a.s2 << b),    (a.s3 << b)   , (a.s4 << b),    (a.s5 << b)   , (a.s6 << b),    (a.s7 << b),    (a.s8 << b),    (a.s9 << b)   , (a.sa << b),    (a.sb << b)   , (a.sc << b),    (a.sd << b)   , (a.se << b),    (a.sf << b)   );  }
+inline __device__ u64x operator << (const u64x a, const u64x b) { return u64x ((a.s0 << b.s0), (a.s1 << b.s1), (a.s2 << b.s2), (a.s3 << b.s3), (a.s4 << b.s4), (a.s5 << b.s5), (a.s6 << b.s6), (a.s7 << b.s7), (a.s8 << b.s8), (a.s9 << b.s9), (a.sa << b.sa), (a.sb << b.sb), (a.sc << b.sc), (a.sd << b.sd), (a.se << b.se), (a.sf << b.sf));  }
+
+inline __device__ u64x operator >> (const u64x a, const u64  b) { return u64x ((a.s0 >> b),    (a.s1 >> b)   , (a.s2 >> b),    (a.s3 >> b)   , (a.s4 >> b),    (a.s5 >> b)   , (a.s6 >> b),    (a.s7 >> b),    (a.s8 >> b),    (a.s9 >> b)   , (a.sa >> b),    (a.sb >> b)   , (a.sc >> b),    (a.sd >> b)   , (a.se >> b),    (a.sf >> b)   );  }
+inline __device__ u64x operator >> (const u64x a, const u64x b) { return u64x ((a.s0 >> b.s0), (a.s1 >> b.s1), (a.s2 >> b.s2), (a.s3 >> b.s3), (a.s4 >> b.s4), (a.s5 >> b.s5), (a.s6 >> b.s6), (a.s7 >> b.s7), (a.s8 >> b.s8), (a.s9 >> b.s9), (a.sa >> b.sa), (a.sb >> b.sb), (a.sc >> b.sc), (a.sd >> b.sd), (a.se >> b.se), (a.sf >> b.sf));  }
+
+inline __device__ u64x operator ^  (const u64x a, const u64  b) { return u64x ((a.s0 ^  b),    (a.s1 ^  b)   , (a.s2 ^  b),    (a.s3 ^  b)   , (a.s4 ^  b),    (a.s5 ^  b)   , (a.s6 ^  b),    (a.s7 ^  b),    (a.s8 ^  b),    (a.s9 ^  b)   , (a.sa ^  b),    (a.sb ^  b)   , (a.sc ^  b),    (a.sd ^  b)   , (a.se ^  b),    (a.sf ^  b)   );  }
+inline __device__ u64x operator ^  (const u64x a, const u64x b) { return u64x ((a.s0 ^  b.s0), (a.s1 ^  b.s1), (a.s2 ^  b.s2), (a.s3 ^  b.s3), (a.s4 ^  b.s4), (a.s5 ^  b.s5), (a.s6 ^  b.s6), (a.s7 ^  b.s7), (a.s8 ^  b.s8), (a.s9 ^  b.s9), (a.sa ^  b.sa), (a.sb ^  b.sb), (a.sc ^  b.sc), (a.sd ^  b.sd), (a.se ^  b.se), (a.sf ^  b.sf));  }
+
+inline __device__ u64x operator |  (const u64x a, const u64  b) { return u64x ((a.s0 |  b),    (a.s1 |  b)   , (a.s2 |  b),    (a.s3 |  b)   , (a.s4 |  b),    (a.s5 |  b)   , (a.s6 |  b),    (a.s7 |  b),    (a.s8 |  b),    (a.s9 |  b)   , (a.sa |  b),    (a.sb |  b)   , (a.sc |  b),    (a.sd |  b)   , (a.se |  b),    (a.sf |  b)   );  }
+inline __device__ u64x operator |  (const u64x a, const u64x b) { return u64x ((a.s0 |  b.s0), (a.s1 |  b.s1), (a.s2 |  b.s2), (a.s3 |  b.s3), (a.s4 |  b.s4), (a.s5 |  b.s5), (a.s6 |  b.s6), (a.s7 |  b.s7), (a.s8 |  b.s8), (a.s9 |  b.s9), (a.sa |  b.sa), (a.sb |  b.sb), (a.sc |  b.sc), (a.sd |  b.sd), (a.se |  b.se), (a.sf |  b.sf));  }
+
+inline __device__ u64x operator &  (const u64x a, const u64  b) { return u64x ((a.s0 &  b),    (a.s1 &  b)   , (a.s2 &  b),    (a.s3 &  b)   , (a.s4 &  b),    (a.s5 &  b)   , (a.s6 &  b),    (a.s7 &  b),    (a.s8 &  b),    (a.s9 &  b)   , (a.sa &  b),    (a.sb &  b)   , (a.sc &  b),    (a.sd &  b)   , (a.se &  b),    (a.sf &  b)   );  }
+inline __device__ u64x operator &  (const u64x a, const u64x b) { return u64x ((a.s0 &  b.s0), (a.s1 &  b.s1), (a.s2 &  b.s2), (a.s3 &  b.s3), (a.s4 &  b.s4), (a.s5 &  b.s5), (a.s6 &  b.s6), (a.s7 &  b.s7), (a.s8 &  b.s8), (a.s9 &  b.s9), (a.sa &  b.sa), (a.sb &  b.sb), (a.sc &  b.sc), (a.sd &  b.sd), (a.se &  b.se), (a.sf &  b.sf));  }
+
+inline __device__ u64x operator +  (const u64x a, const u64  b) { return u64x ((a.s0 +  b),    (a.s1 +  b)   , (a.s2 +  b),    (a.s3 +  b)   , (a.s4 +  b),    (a.s5 +  b)   , (a.s6 +  b),    (a.s7 +  b),    (a.s8 +  b),    (a.s9 +  b)   , (a.sa +  b),    (a.sb +  b)   , (a.sc +  b),    (a.sd +  b)   , (a.se +  b),    (a.sf +  b)   );  }
+inline __device__ u64x operator +  (const u64x a, const u64x b) { return u64x ((a.s0 +  b.s0), (a.s1 +  b.s1), (a.s2 +  b.s2), (a.s3 +  b.s3), (a.s4 +  b.s4), (a.s5 +  b.s5), (a.s6 +  b.s6), (a.s7 +  b.s7), (a.s8 +  b.s8), (a.s9 +  b.s9), (a.sa +  b.sa), (a.sb +  b.sb), (a.sc +  b.sc), (a.sd +  b.sd), (a.se +  b.se), (a.sf +  b.sf));  }
+
+inline __device__ u64x operator -  (const u64x a, const u64  b) { return u64x ((a.s0 -  b),    (a.s1 -  b)   , (a.s2 -  b),    (a.s3 -  b)   , (a.s4 -  b),    (a.s5 -  b)   , (a.s6 -  b),    (a.s7 -  b),    (a.s8 -  b),    (a.s9 -  b)   , (a.sa -  b),    (a.sb -  b)   , (a.sc -  b),    (a.sd -  b)   , (a.se -  b),    (a.sf -  b)   );  }
+inline __device__ u64x operator -  (const u64x a, const u64x b) { return u64x ((a.s0 -  b.s0), (a.s1 -  b.s1), (a.s2 -  b.s2), (a.s3 -  b.s3), (a.s4 -  b.s4), (a.s5 -  b.s5), (a.s6 -  b.s6), (a.s7 -  b.s7), (a.s8 -  b.s8), (a.s9 -  b.s9), (a.sa -  b.sa), (a.sb -  b.sb), (a.sc -  b.sc), (a.sd -  b.sd), (a.se -  b.se), (a.sf -  b.sf));  }
+
+inline __device__ u64x operator *  (const u64x a, const u64  b) { return u64x ((a.s0 *  b),    (a.s1 *  b)   , (a.s2 *  b),    (a.s3 *  b)   , (a.s4 *  b),    (a.s5 *  b)   , (a.s6 *  b),    (a.s7 *  b),    (a.s8 *  b),    (a.s9 *  b)   , (a.sa *  b),    (a.sb *  b)   , (a.sc *  b),    (a.sd *  b)   , (a.se *  b),    (a.sf *  b)   );  }
+inline __device__ u64x operator *  (const u64x a, const u64x b) { return u64x ((a.s0 *  b.s0), (a.s1 *  b.s1), (a.s2 *  b.s2), (a.s3 *  b.s3), (a.s4 *  b.s4), (a.s5 *  b.s5), (a.s6 *  b.s6), (a.s7 *  b.s7), (a.s8 *  b.s8), (a.s9 *  b.s9), (a.sa *  b.sa), (a.sb *  b.sb), (a.sc *  b.sc), (a.sd *  b.sd), (a.se *  b.se), (a.sf *  b.sf));  }
+
+inline __device__ u64x operator %  (const u64x a, const u64  b) { return u64x ((a.s0 %  b),    (a.s1 %  b)   , (a.s2 %  b),    (a.s3 %  b)   , (a.s4 %  b),    (a.s5 %  b)   , (a.s6 %  b),    (a.s7 %  b),    (a.s8 %  b),    (a.s9 %  b)   , (a.sa %  b),    (a.sb %  b)   , (a.sc %  b),    (a.sd %  b)   , (a.se %  b),    (a.sf %  b)   );  }
+inline __device__ u64x operator %  (const u64x a, const u64x b) { return u64x ((a.s0 %  b.s0), (a.s1 %  b.s1), (a.s2 %  b.s2), (a.s3 %  b.s3), (a.s4 %  b.s4), (a.s5 %  b.s5), (a.s6 %  b.s6), (a.s7 %  b.s7), (a.s8 %  b.s8), (a.s9 %  b.s9), (a.sa %  b.sa), (a.sb %  b.sb), (a.sc %  b.sc), (a.sd %  b.sd), (a.se %  b.se), (a.sf %  b.sf));  }
+
+inline __device__ u64x operator ~  (const u64x a) { return u64x (~a.s0, ~a.s1, ~a.s2, ~a.s3, ~a.s4, ~a.s5, ~a.s6, ~a.s7, ~a.s8, ~a.s9, ~a.sa, ~a.sb, ~a.sc, ~a.sd, ~a.se, ~a.sf); }
+
+#endif
+
+typedef __device_builtin__ struct u8x  u8x;
+typedef __device_builtin__ struct u16x u16x;
+typedef __device_builtin__ struct u32x u32x;
+typedef __device_builtin__ struct u64x u64x;
+
+#define make_u8x  u8x
+#define make_u16x u16x
+#define make_u32x u32x
+#define make_u64x u64x
+
+#else
+typedef VTYPE(uchar,  VECT_SIZE) u8x;
+typedef VTYPE(ushort, VECT_SIZE) u16x;
+typedef VTYPE(uint,   VECT_SIZE) u32x;
+typedef VTYPE(ullong, VECT_SIZE) u64x;
+
+#ifndef IS_METAL
+#define make_u8x  (u8x)
+#define make_u16x (u16x)
+#define make_u32x (u32x)
+#define make_u64x (u64x)
+#else
+#define make_u8x  u8x
+#define make_u16x u16x
+#define make_u32x u32x
+#define make_u64x u64x
+#endif
+
+#endif
+#endif
+
+// unions
+
+typedef union vconv32
+{
+  u64 v32;
+
+  struct
+  {
+    u16 a;
+    u16 b;
+
+  } v16;
+
+  struct
+  {
+    u8 a;
+    u8 b;
+    u8 c;
+    u8 d;
+
+  } v8;
+
+} vconv32_t;
+
+typedef union vconv64
+{
+  u64 v64;
+
+  struct
+  {
+    u32 a;
+    u32 b;
+
+  } v32;
+
+  struct
+  {
+    u16 a;
+    u16 b;
+    u16 c;
+    u16 d;
+
+  } v16;
+
+  struct
+  {
+    u8 a;
+    u8 b;
+    u8 c;
+    u8 d;
+    u8 e;
+    u8 f;
+    u8 g;
+    u8 h;
+
+  } v8;
+
+} vconv64_t;
+
+/**
+ * Author......: See docs/credits.txt
+ * License.....: MIT
+ */
+
+typedef enum siphash_constants
+{
+  SIPHASHM_0=0x736f6d6570736575UL,
+  SIPHASHM_1=0x646f72616e646f6dUL,
+  SIPHASHM_2=0x6c7967656e657261UL,
+  SIPHASHM_3=0x7465646279746573UL
+
+} siphash_constants_t;
+
+typedef enum bcrypt_constants
+{
+  BCRYPTM_0=0x4f727068U,
+  BCRYPTM_1=0x65616e42U,
+  BCRYPTM_2=0x65686f6cU,
+  BCRYPTM_3=0x64657253U,
+  BCRYPTM_4=0x63727944U,
+  BCRYPTM_5=0x6f756274U
+
+} bcrypt_constants_t;
+
+typedef enum md4_constants
+{
+  MD4M_A=0x67452301U,
+  MD4M_B=0xefcdab89U,
+  MD4M_C=0x98badcfeU,
+  MD4M_D=0x10325476U,
+
+  MD4S00=3,
+  MD4S01=7,
+  MD4S02=11,
+  MD4S03=19,
+  MD4S10=3,
+  MD4S11=5,
+  MD4S12=9,
+  MD4S13=13,
+  MD4S20=3,
+  MD4S21=9,
+  MD4S22=11,
+  MD4S23=15,
+
+  MD4C00=0x00000000U,
+  MD4C01=0x5a827999U,
+  MD4C02=0x6ed9eba1U
+
+} md4_constants_t;
+
+typedef enum md5_constants
+{
+  MD5M_A=0x67452301U,
+  MD5M_B=0xefcdab89U,
+  MD5M_C=0x98badcfeU,
+  MD5M_D=0x10325476U,
+
+  MD5S00=7,
+  MD5S01=12,
+  MD5S02=17,
+  MD5S03=22,
+  MD5S10=5,
+  MD5S11=9,
+  MD5S12=14,
+  MD5S13=20,
+  MD5S20=4,
+  MD5S21=11,
+  MD5S22=16,
+  MD5S23=23,
+  MD5S30=6,
+  MD5S31=10,
+  MD5S32=15,
+  MD5S33=21,
+
+  MD5C00=0xd76aa478U,
+  MD5C01=0xe8c7b756U,
+  MD5C02=0x242070dbU,
+  MD5C03=0xc1bdceeeU,
+  MD5C04=0xf57c0fafU,
+  MD5C05=0x4787c62aU,
+  MD5C06=0xa8304613U,
+  MD5C07=0xfd469501U,
+  MD5C08=0x698098d8U,
+  MD5C09=0x8b44f7afU,
+  MD5C0a=0xffff5bb1U,
+  MD5C0b=0x895cd7beU,
+  MD5C0c=0x6b901122U,
+  MD5C0d=0xfd987193U,
+  MD5C0e=0xa679438eU,
+  MD5C0f=0x49b40821U,
+  MD5C10=0xf61e2562U,
+  MD5C11=0xc040b340U,
+  MD5C12=0x265e5a51U,
+  MD5C13=0xe9b6c7aaU,
+  MD5C14=0xd62f105dU,
+  MD5C15=0x02441453U,
+  MD5C16=0xd8a1e681U,
+  MD5C17=0xe7d3fbc8U,
+  MD5C18=0x21e1cde6U,
+  MD5C19=0xc33707d6U,
+  MD5C1a=0xf4d50d87U,
+  MD5C1b=0x455a14edU,
+  MD5C1c=0xa9e3e905U,
+  MD5C1d=0xfcefa3f8U,
+  MD5C1e=0x676f02d9U,
+  MD5C1f=0x8d2a4c8aU,
+  MD5C20=0xfffa3942U,
+  MD5C21=0x8771f681U,
+  MD5C22=0x6d9d6122U,
+  MD5C23=0xfde5380cU,
+  MD5C24=0xa4beea44U,
+  MD5C25=0x4bdecfa9U,
+  MD5C26=0xf6bb4b60U,
+  MD5C27=0xbebfbc70U,
+  MD5C28=0x289b7ec6U,
+  MD5C29=0xeaa127faU,
+  MD5C2a=0xd4ef3085U,
+  MD5C2b=0x04881d05U,
+  MD5C2c=0xd9d4d039U,
+  MD5C2d=0xe6db99e5U,
+  MD5C2e=0x1fa27cf8U,
+  MD5C2f=0xc4ac5665U,
+  MD5C30=0xf4292244U,
+  MD5C31=0x432aff97U,
+  MD5C32=0xab9423a7U,
+  MD5C33=0xfc93a039U,
+  MD5C34=0x655b59c3U,
+  MD5C35=0x8f0ccc92U,
+  MD5C36=0xffeff47dU,
+  MD5C37=0x85845dd1U,
+  MD5C38=0x6fa87e4fU,
+  MD5C39=0xfe2ce6e0U,
+  MD5C3a=0xa3014314U,
+  MD5C3b=0x4e0811a1U,
+  MD5C3c=0xf7537e82U,
+  MD5C3d=0xbd3af235U,
+  MD5C3e=0x2ad7d2bbU,
+  MD5C3f=0xeb86d391U
+
+} md5_constants_t;
+
+typedef enum sha1_constants
+{
+  SHA1M_A=0x67452301U,
+  SHA1M_B=0xefcdab89U,
+  SHA1M_C=0x98badcfeU,
+  SHA1M_D=0x10325476U,
+  SHA1M_E=0xc3d2e1f0U,
+
+  SHA1C00=0x5a827999U,
+  SHA1C01=0x6ed9eba1U,
+  SHA1C02=0x8f1bbcdcU,
+  SHA1C03=0xca62c1d6U
+
+} sha1_constants_t;
+
+typedef enum sha2_32_constants
+{
+  // SHA-224 Initial Hash Values
+  SHA224M_A=0xc1059ed8U,
+  SHA224M_B=0x367cd507U,
+  SHA224M_C=0x3070dd17U,
+  SHA224M_D=0xf70e5939U,
+  SHA224M_E=0xffc00b31U,
+  SHA224M_F=0x68581511U,
+  SHA224M_G=0x64f98fa7U,
+  SHA224M_H=0xbefa4fa4U,
+
+  // SHA-224 Constants
+  SHA224C00=0x428a2f98U,
+  SHA224C01=0x71374491U,
+  SHA224C02=0xb5c0fbcfU,
+  SHA224C03=0xe9b5dba5U,
+  SHA224C04=0x3956c25bU,
+  SHA224C05=0x59f111f1U,
+  SHA224C06=0x923f82a4U,
+  SHA224C07=0xab1c5ed5U,
+  SHA224C08=0xd807aa98U,
+  SHA224C09=0x12835b01U,
+  SHA224C0a=0x243185beU,
+  SHA224C0b=0x550c7dc3U,
+  SHA224C0c=0x72be5d74U,
+  SHA224C0d=0x80deb1feU,
+  SHA224C0e=0x9bdc06a7U,
+  SHA224C0f=0xc19bf174U,
+  SHA224C10=0xe49b69c1U,
+  SHA224C11=0xefbe4786U,
+  SHA224C12=0x0fc19dc6U,
+  SHA224C13=0x240ca1ccU,
+  SHA224C14=0x2de92c6fU,
+  SHA224C15=0x4a7484aaU,
+  SHA224C16=0x5cb0a9dcU,
+  SHA224C17=0x76f988daU,
+  SHA224C18=0x983e5152U,
+  SHA224C19=0xa831c66dU,
+  SHA224C1a=0xb00327c8U,
+  SHA224C1b=0xbf597fc7U,
+  SHA224C1c=0xc6e00bf3U,
+  SHA224C1d=0xd5a79147U,
+  SHA224C1e=0x06ca6351U,
+  SHA224C1f=0x14292967U,
+  SHA224C20=0x27b70a85U,
+  SHA224C21=0x2e1b2138U,
+  SHA224C22=0x4d2c6dfcU,
+  SHA224C23=0x53380d13U,
+  SHA224C24=0x650a7354U,
+  SHA224C25=0x766a0abbU,
+  SHA224C26=0x81c2c92eU,
+  SHA224C27=0x92722c85U,
+  SHA224C28=0xa2bfe8a1U,
+  SHA224C29=0xa81a664bU,
+  SHA224C2a=0xc24b8b70U,
+  SHA224C2b=0xc76c51a3U,
+  SHA224C2c=0xd192e819U,
+  SHA224C2d=0xd6990624U,
+  SHA224C2e=0xf40e3585U,
+  SHA224C2f=0x106aa070U,
+  SHA224C30=0x19a4c116U,
+  SHA224C31=0x1e376c08U,
+  SHA224C32=0x2748774cU,
+  SHA224C33=0x34b0bcb5U,
+  SHA224C34=0x391c0cb3U,
+  SHA224C35=0x4ed8aa4aU,
+  SHA224C36=0x5b9cca4fU,
+  SHA224C37=0x682e6ff3U,
+  SHA224C38=0x748f82eeU,
+  SHA224C39=0x78a5636fU,
+  SHA224C3a=0x84c87814U,
+  SHA224C3b=0x8cc70208U,
+  SHA224C3c=0x90befffaU,
+  SHA224C3d=0xa4506cebU,
+  SHA224C3e=0xbef9a3f7U,
+  SHA224C3f=0xc67178f2U,
+
+  // SHA-256 Initial Hash Values
+  SHA256M_A=0x6a09e667U,
+  SHA256M_B=0xbb67ae85U,
+  SHA256M_C=0x3c6ef372U,
+  SHA256M_D=0xa54ff53aU,
+  SHA256M_E=0x510e527fU,
+  SHA256M_F=0x9b05688cU,
+  SHA256M_G=0x1f83d9abU,
+  SHA256M_H=0x5be0cd19U,
+
+  // SHA-256 Constants
+  SHA256C00=0x428a2f98U,
+  SHA256C01=0x71374491U,
+  SHA256C02=0xb5c0fbcfU,
+  SHA256C03=0xe9b5dba5U,
+  SHA256C04=0x3956c25bU,
+  SHA256C05=0x59f111f1U,
+  SHA256C06=0x923f82a4U,
+  SHA256C07=0xab1c5ed5U,
+  SHA256C08=0xd807aa98U,
+  SHA256C09=0x12835b01U,
+  SHA256C0a=0x243185beU,
+  SHA256C0b=0x550c7dc3U,
+  SHA256C0c=0x72be5d74U,
+  SHA256C0d=0x80deb1feU,
+  SHA256C0e=0x9bdc06a7U,
+  SHA256C0f=0xc19bf174U,
+  SHA256C10=0xe49b69c1U,
+  SHA256C11=0xefbe4786U,
+  SHA256C12=0x0fc19dc6U,
+  SHA256C13=0x240ca1ccU,
+  SHA256C14=0x2de92c6fU,
+  SHA256C15=0x4a7484aaU,
+  SHA256C16=0x5cb0a9dcU,
+  SHA256C17=0x76f988daU,
+  SHA256C18=0x983e5152U,
+  SHA256C19=0xa831c66dU,
+  SHA256C1a=0xb00327c8U,
+  SHA256C1b=0xbf597fc7U,
+  SHA256C1c=0xc6e00bf3U,
+  SHA256C1d=0xd5a79147U,
+  SHA256C1e=0x06ca6351U,
+  SHA256C1f=0x14292967U,
+  SHA256C20=0x27b70a85U,
+  SHA256C21=0x2e1b2138U,
+  SHA256C22=0x4d2c6dfcU,
+  SHA256C23=0x53380d13U,
+  SHA256C24=0x650a7354U,
+  SHA256C25=0x766a0abbU,
+  SHA256C26=0x81c2c92eU,
+  SHA256C27=0x92722c85U,
+  SHA256C28=0xa2bfe8a1U,
+  SHA256C29=0xa81a664bU,
+  SHA256C2a=0xc24b8b70U,
+  SHA256C2b=0xc76c51a3U,
+  SHA256C2c=0xd192e819U,
+  SHA256C2d=0xd6990624U,
+  SHA256C2e=0xf40e3585U,
+  SHA256C2f=0x106aa070U,
+  SHA256C30=0x19a4c116U,
+  SHA256C31=0x1e376c08U,
+  SHA256C32=0x2748774cU,
+  SHA256C33=0x34b0bcb5U,
+  SHA256C34=0x391c0cb3U,
+  SHA256C35=0x4ed8aa4aU,
+  SHA256C36=0x5b9cca4fU,
+  SHA256C37=0x682e6ff3U,
+  SHA256C38=0x748f82eeU,
+  SHA256C39=0x78a5636fU,
+  SHA256C3a=0x84c87814U,
+  SHA256C3b=0x8cc70208U,
+  SHA256C3c=0x90befffaU,
+  SHA256C3d=0xa4506cebU,
+  SHA256C3e=0xbef9a3f7U,
+  SHA256C3f=0xc67178f2U,
+
+} sha2_32_constants_t;
+
+typedef enum sha2_64_constants
+{
+  // SHA-384 Initial Hash Values
+  SHA384M_A=0xcbbb9d5dc1059ed8UL,
+  SHA384M_B=0x629a292a367cd507UL,
+  SHA384M_C=0x9159015a3070dd17UL,
+  SHA384M_D=0x152fecd8f70e5939UL,
+  SHA384M_E=0x67332667ffc00b31UL,
+  SHA384M_F=0x8eb44a8768581511UL,
+  SHA384M_G=0xdb0c2e0d64f98fa7UL,
+  SHA384M_H=0x47b5481dbefa4fa4UL,
+
+  // SHA-512 Initial Hash Values
+  SHA512M_A=0x6a09e667f3bcc908UL,
+  SHA512M_B=0xbb67ae8584caa73bUL,
+  SHA512M_C=0x3c6ef372fe94f82bUL,
+  SHA512M_D=0xa54ff53a5f1d36f1UL,
+  SHA512M_E=0x510e527fade682d1UL,
+  SHA512M_F=0x9b05688c2b3e6c1fUL,
+  SHA512M_G=0x1f83d9abfb41bd6bUL,
+  SHA512M_H=0x5be0cd19137e2179UL,
+
+  // SHA-384/512 Constants
+  SHA512C00=0x428a2f98d728ae22UL,
+  SHA512C01=0x7137449123ef65cdUL,
+  SHA512C02=0xb5c0fbcfec4d3b2fUL,
+  SHA512C03=0xe9b5dba58189dbbcUL,
+  SHA512C04=0x3956c25bf348b538UL,
+  SHA512C05=0x59f111f1b605d019UL,
+  SHA512C06=0x923f82a4af194f9bUL,
+  SHA512C07=0xab1c5ed5da6d8118UL,
+  SHA512C08=0xd807aa98a3030242UL,
+  SHA512C09=0x12835b0145706fbeUL,
+  SHA512C0a=0x243185be4ee4b28cUL,
+  SHA512C0b=0x550c7dc3d5ffb4e2UL,
+  SHA512C0c=0x72be5d74f27b896fUL,
+  SHA512C0d=0x80deb1fe3b1696b1UL,
+  SHA512C0e=0x9bdc06a725c71235UL,
+  SHA512C0f=0xc19bf174cf692694UL,
+  SHA512C10=0xe49b69c19ef14ad2UL,
+  SHA512C11=0xefbe4786384f25e3UL,
+  SHA512C12=0x0fc19dc68b8cd5b5UL,
+  SHA512C13=0x240ca1cc77ac9c65UL,
+  SHA512C14=0x2de92c6f592b0275UL,
+  SHA512C15=0x4a7484aa6ea6e483UL,
+  SHA512C16=0x5cb0a9dcbd41fbd4UL,
+  SHA512C17=0x76f988da831153b5UL,
+  SHA512C18=0x983e5152ee66dfabUL,
+  SHA512C19=0xa831c66d2db43210UL,
+  SHA512C1a=0xb00327c898fb213fUL,
+  SHA512C1b=0xbf597fc7beef0ee4UL,
+  SHA512C1c=0xc6e00bf33da88fc2UL,
+  SHA512C1d=0xd5a79147930aa725UL,
+  SHA512C1e=0x06ca6351e003826fUL,
+  SHA512C1f=0x142929670a0e6e70UL,
+  SHA512C20=0x27b70a8546d22ffcUL,
+  SHA512C21=0x2e1b21385c26c926UL,
+  SHA512C22=0x4d2c6dfc5ac42aedUL,
+  SHA512C23=0x53380d139d95b3dfUL,
+  SHA512C24=0x650a73548baf63deUL,
+  SHA512C25=0x766a0abb3c77b2a8UL,
+  SHA512C26=0x81c2c92e47edaee6UL,
+  SHA512C27=0x92722c851482353bUL,
+  SHA512C28=0xa2bfe8a14cf10364UL,
+  SHA512C29=0xa81a664bbc423001UL,
+  SHA512C2a=0xc24b8b70d0f89791UL,
+  SHA512C2b=0xc76c51a30654be30UL,
+  SHA512C2c=0xd192e819d6ef5218UL,
+  SHA512C2d=0xd69906245565a910UL,
+  SHA512C2e=0xf40e35855771202aUL,
+  SHA512C2f=0x106aa07032bbd1b8UL,
+  SHA512C30=0x19a4c116b8d2d0c8UL,
+  SHA512C31=0x1e376c085141ab53UL,
+  SHA512C32=0x2748774cdf8eeb99UL,
+  SHA512C33=0x34b0bcb5e19b48a8UL,
+  SHA512C34=0x391c0cb3c5c95a63UL,
+  SHA512C35=0x4ed8aa4ae3418acbUL,
+  SHA512C36=0x5b9cca4f7763e373UL,
+  SHA512C37=0x682e6ff3d6b2b8a3UL,
+  SHA512C38=0x748f82ee5defb2fcUL,
+  SHA512C39=0x78a5636f43172f60UL,
+  SHA512C3a=0x84c87814a1f0ab72UL,
+  SHA512C3b=0x8cc702081a6439ecUL,
+  SHA512C3c=0x90befffa23631e28UL,
+  SHA512C3d=0xa4506cebde82bde9UL,
+  SHA512C3e=0xbef9a3f7b2c67915UL,
+  SHA512C3f=0xc67178f2e372532bUL,
+  SHA512C40=0xca273eceea26619cUL,
+  SHA512C41=0xd186b8c721c0c207UL,
+  SHA512C42=0xeada7dd6cde0eb1eUL,
+  SHA512C43=0xf57d4f7fee6ed178UL,
+  SHA512C44=0x06f067aa72176fbaUL,
+  SHA512C45=0x0a637dc5a2c898a6UL,
+  SHA512C46=0x113f9804bef90daeUL,
+  SHA512C47=0x1b710b35131c471bUL,
+  SHA512C48=0x28db77f523047d84UL,
+  SHA512C49=0x32caab7b40c72493UL,
+  SHA512C4a=0x3c9ebe0a15c9bebcUL,
+  SHA512C4b=0x431d67c49c100d4cUL,
+  SHA512C4c=0x4cc5d4becb3e42b6UL,
+  SHA512C4d=0x597f299cfc657e2aUL,
+  SHA512C4e=0x5fcb6fab3ad6faecUL,
+  SHA512C4f=0x6c44198c4a475817UL
+
+} sha2_64_constants_t;
+
+typedef enum ripemd160_constants
+{
+  RIPEMD160M_A=0x67452301U,
+  RIPEMD160M_B=0xefcdab89U,
+  RIPEMD160M_C=0x98badcfeU,
+  RIPEMD160M_D=0x10325476U,
+  RIPEMD160M_E=0xc3d2e1f0U,
+
+  RIPEMD160C00=0x00000000U,
+  RIPEMD160C10=0x5a827999U,
+  RIPEMD160C20=0x6ed9eba1U,
+  RIPEMD160C30=0x8f1bbcdcU,
+  RIPEMD160C40=0xa953fd4eU,
+  RIPEMD160C50=0x50a28be6U,
+  RIPEMD160C60=0x5c4dd124U,
+  RIPEMD160C70=0x6d703ef3U,
+  RIPEMD160C80=0x7a6d76e9U,
+  RIPEMD160C90=0x00000000U,
+
+  RIPEMD160S00=11,
+  RIPEMD160S01=14,
+  RIPEMD160S02=15,
+  RIPEMD160S03=12,
+  RIPEMD160S04=5,
+  RIPEMD160S05=8,
+  RIPEMD160S06=7,
+  RIPEMD160S07=9,
+  RIPEMD160S08=11,
+  RIPEMD160S09=13,
+  RIPEMD160S0A=14,
+  RIPEMD160S0B=15,
+  RIPEMD160S0C=6,
+  RIPEMD160S0D=7,
+  RIPEMD160S0E=9,
+  RIPEMD160S0F=8,
+
+  RIPEMD160S10=7,
+  RIPEMD160S11=6,
+  RIPEMD160S12=8,
+  RIPEMD160S13=13,
+  RIPEMD160S14=11,
+  RIPEMD160S15=9,
+  RIPEMD160S16=7,
+  RIPEMD160S17=15,
+  RIPEMD160S18=7,
+  RIPEMD160S19=12,
+  RIPEMD160S1A=15,
+  RIPEMD160S1B=9,
+  RIPEMD160S1C=11,
+  RIPEMD160S1D=7,
+  RIPEMD160S1E=13,
+  RIPEMD160S1F=12,
+
+  RIPEMD160S20=11,
+  RIPEMD160S21=13,
+  RIPEMD160S22=6,
+  RIPEMD160S23=7,
+  RIPEMD160S24=14,
+  RIPEMD160S25=9,
+  RIPEMD160S26=13,
+  RIPEMD160S27=15,
+  RIPEMD160S28=14,
+  RIPEMD160S29=8,
+  RIPEMD160S2A=13,
+  RIPEMD160S2B=6,
+  RIPEMD160S2C=5,
+  RIPEMD160S2D=12,
+  RIPEMD160S2E=7,
+  RIPEMD160S2F=5,
+
+  RIPEMD160S30=11,
+  RIPEMD160S31=12,
+  RIPEMD160S32=14,
+  RIPEMD160S33=15,
+  RIPEMD160S34=14,
+  RIPEMD160S35=15,
+  RIPEMD160S36=9,
+  RIPEMD160S37=8,
+  RIPEMD160S38=9,
+  RIPEMD160S39=14,
+  RIPEMD160S3A=5,
+  RIPEMD160S3B=6,
+  RIPEMD160S3C=8,
+  RIPEMD160S3D=6,
+  RIPEMD160S3E=5,
+  RIPEMD160S3F=12,
+
+  RIPEMD160S40=9,
+  RIPEMD160S41=15,
+  RIPEMD160S42=5,
+  RIPEMD160S43=11,
+  RIPEMD160S44=6,
+  RIPEMD160S45=8,
+  RIPEMD160S46=13,
+  RIPEMD160S47=12,
+  RIPEMD160S48=5,
+  RIPEMD160S49=12,
+  RIPEMD160S4A=13,
+  RIPEMD160S4B=14,
+  RIPEMD160S4C=11,
+  RIPEMD160S4D=8,
+  RIPEMD160S4E=5,
+  RIPEMD160S4F=6,
+
+  RIPEMD160S50=8,
+  RIPEMD160S51=9,
+  RIPEMD160S52=9,
+  RIPEMD160S53=11,
+  RIPEMD160S54=13,
+  RIPEMD160S55=15,
+  RIPEMD160S56=15,
+  RIPEMD160S57=5,
+  RIPEMD160S58=7,
+  RIPEMD160S59=7,
+  RIPEMD160S5A=8,
+  RIPEMD160S5B=11,
+  RIPEMD160S5C=14,
+  RIPEMD160S5D=14,
+  RIPEMD160S5E=12,
+  RIPEMD160S5F=6,
+
+  RIPEMD160S60=9,
+  RIPEMD160S61=13,
+  RIPEMD160S62=15,
+  RIPEMD160S63=7,
+  RIPEMD160S64=12,
+  RIPEMD160S65=8,
+  RIPEMD160S66=9,
+  RIPEMD160S67=11,
+  RIPEMD160S68=7,
+  RIPEMD160S69=7,
+  RIPEMD160S6A=12,
+  RIPEMD160S6B=7,
+  RIPEMD160S6C=6,
+  RIPEMD160S6D=15,
+  RIPEMD160S6E=13,
+  RIPEMD160S6F=11,
+
+  RIPEMD160S70=9,
+  RIPEMD160S71=7,
+  RIPEMD160S72=15,
+  RIPEMD160S73=11,
+  RIPEMD160S74=8,
+  RIPEMD160S75=6,
+  RIPEMD160S76=6,
+  RIPEMD160S77=14,
+  RIPEMD160S78=12,
+  RIPEMD160S79=13,
+  RIPEMD160S7A=5,
+  RIPEMD160S7B=14,
+  RIPEMD160S7C=13,
+  RIPEMD160S7D=13,
+  RIPEMD160S7E=7,
+  RIPEMD160S7F=5,
+
+  RIPEMD160S80=15,
+  RIPEMD160S81=5,
+  RIPEMD160S82=8,
+  RIPEMD160S83=11,
+  RIPEMD160S84=14,
+  RIPEMD160S85=14,
+  RIPEMD160S86=6,
+  RIPEMD160S87=14,
+  RIPEMD160S88=6,
+  RIPEMD160S89=9,
+  RIPEMD160S8A=12,
+  RIPEMD160S8B=9,
+  RIPEMD160S8C=12,
+  RIPEMD160S8D=5,
+  RIPEMD160S8E=15,
+  RIPEMD160S8F=8,
+
+  RIPEMD160S90=8,
+  RIPEMD160S91=5,
+  RIPEMD160S92=12,
+  RIPEMD160S93=9,
+  RIPEMD160S94=12,
+  RIPEMD160S95=5,
+  RIPEMD160S96=14,
+  RIPEMD160S97=6,
+  RIPEMD160S98=8,
+  RIPEMD160S99=13,
+  RIPEMD160S9A=6,
+  RIPEMD160S9B=5,
+  RIPEMD160S9C=15,
+  RIPEMD160S9D=13,
+  RIPEMD160S9E=11,
+  RIPEMD160S9F=11
+
+} ripemd160_constants_t;
+
+typedef enum ripemd320_constants
+{
+  RIPEMD320M_A=0x67452301U,
+  RIPEMD320M_B=0xefcdab89U,
+  RIPEMD320M_C=0x98badcfeU,
+  RIPEMD320M_D=0x10325476U,
+  RIPEMD320M_E=0xc3d2e1f0U,
+  RIPEMD320M_F=0x76543210U,
+  RIPEMD320M_G=0xfedcba98U,
+  RIPEMD320M_H=0x89abcdefU,
+  RIPEMD320M_I=0x01234567U,
+  RIPEMD320M_L=0x3c2d1e0fU,
+
+  RIPEMD320C00=0x00000000U,
+  RIPEMD320C10=0x5a827999U,
+  RIPEMD320C20=0x6ed9eba1U,
+  RIPEMD320C30=0x8f1bbcdcU,
+  RIPEMD320C40=0xa953fd4eU,
+  RIPEMD320C50=0x50a28be6U,
+  RIPEMD320C60=0x5c4dd124U,
+  RIPEMD320C70=0x6d703ef3U,
+  RIPEMD320C80=0x7a6d76e9U,
+  RIPEMD320C90=0x00000000U,
+
+  RIPEMD320S00=11,
+  RIPEMD320S01=14,
+  RIPEMD320S02=15,
+  RIPEMD320S03=12,
+  RIPEMD320S04=5,
+  RIPEMD320S05=8,
+  RIPEMD320S06=7,
+  RIPEMD320S07=9,
+  RIPEMD320S08=11,
+  RIPEMD320S09=13,
+  RIPEMD320S0A=14,
+  RIPEMD320S0B=15,
+  RIPEMD320S0C=6,
+  RIPEMD320S0D=7,
+  RIPEMD320S0E=9,
+  RIPEMD320S0F=8,
+
+  RIPEMD320S10=7,
+  RIPEMD320S11=6,
+  RIPEMD320S12=8,
+  RIPEMD320S13=13,
+  RIPEMD320S14=11,
+  RIPEMD320S15=9,
+  RIPEMD320S16=7,
+  RIPEMD320S17=15,
+  RIPEMD320S18=7,
+  RIPEMD320S19=12,
+  RIPEMD320S1A=15,
+  RIPEMD320S1B=9,
+  RIPEMD320S1C=11,
+  RIPEMD320S1D=7,
+  RIPEMD320S1E=13,
+  RIPEMD320S1F=12,
+
+  RIPEMD320S20=11,
+  RIPEMD320S21=13,
+  RIPEMD320S22=6,
+  RIPEMD320S23=7,
+  RIPEMD320S24=14,
+  RIPEMD320S25=9,
+  RIPEMD320S26=13,
+  RIPEMD320S27=15,
+  RIPEMD320S28=14,
+  RIPEMD320S29=8,
+  RIPEMD320S2A=13,
+  RIPEMD320S2B=6,
+  RIPEMD320S2C=5,
+  RIPEMD320S2D=12,
+  RIPEMD320S2E=7,
+  RIPEMD320S2F=5,
+
+  RIPEMD320S30=11,
+  RIPEMD320S31=12,
+  RIPEMD320S32=14,
+  RIPEMD320S33=15,
+  RIPEMD320S34=14,
+  RIPEMD320S35=15,
+  RIPEMD320S36=9,
+  RIPEMD320S37=8,
+  RIPEMD320S38=9,
+  RIPEMD320S39=14,
+  RIPEMD320S3A=5,
+  RIPEMD320S3B=6,
+  RIPEMD320S3C=8,
+  RIPEMD320S3D=6,
+  RIPEMD320S3E=5,
+  RIPEMD320S3F=12,
+
+  RIPEMD320S40=9,
+  RIPEMD320S41=15,
+  RIPEMD320S42=5,
+  RIPEMD320S43=11,
+  RIPEMD320S44=6,
+  RIPEMD320S45=8,
+  RIPEMD320S46=13,
+  RIPEMD320S47=12,
+  RIPEMD320S48=5,
+  RIPEMD320S49=12,
+  RIPEMD320S4A=13,
+  RIPEMD320S4B=14,
+  RIPEMD320S4C=11,
+  RIPEMD320S4D=8,
+  RIPEMD320S4E=5,
+  RIPEMD320S4F=6,
+
+  RIPEMD320S50=8,
+  RIPEMD320S51=9,
+  RIPEMD320S52=9,
+  RIPEMD320S53=11,
+  RIPEMD320S54=13,
+  RIPEMD320S55=15,
+  RIPEMD320S56=15,
+  RIPEMD320S57=5,
+  RIPEMD320S58=7,
+  RIPEMD320S59=7,
+  RIPEMD320S5A=8,
+  RIPEMD320S5B=11,
+  RIPEMD320S5C=14,
+  RIPEMD320S5D=14,
+  RIPEMD320S5E=12,
+  RIPEMD320S5F=6,
+
+  RIPEMD320S60=9,
+  RIPEMD320S61=13,
+  RIPEMD320S62=15,
+  RIPEMD320S63=7,
+  RIPEMD320S64=12,
+  RIPEMD320S65=8,
+  RIPEMD320S66=9,
+  RIPEMD320S67=11,
+  RIPEMD320S68=7,
+  RIPEMD320S69=7,
+  RIPEMD320S6A=12,
+  RIPEMD320S6B=7,
+  RIPEMD320S6C=6,
+  RIPEMD320S6D=15,
+  RIPEMD320S6E=13,
+  RIPEMD320S6F=11,
+
+  RIPEMD320S70=9,
+  RIPEMD320S71=7,
+  RIPEMD320S72=15,
+  RIPEMD320S73=11,
+  RIPEMD320S74=8,
+  RIPEMD320S75=6,
+  RIPEMD320S76=6,
+  RIPEMD320S77=14,
+  RIPEMD320S78=12,
+  RIPEMD320S79=13,
+  RIPEMD320S7A=5,
+  RIPEMD320S7B=14,
+  RIPEMD320S7C=13,
+  RIPEMD320S7D=13,
+  RIPEMD320S7E=7,
+  RIPEMD320S7F=5,
+
+  RIPEMD320S80=15,
+  RIPEMD320S81=5,
+  RIPEMD320S82=8,
+  RIPEMD320S83=11,
+  RIPEMD320S84=14,
+  RIPEMD320S85=14,
+  RIPEMD320S86=6,
+  RIPEMD320S87=14,
+  RIPEMD320S88=6,
+  RIPEMD320S89=9,
+  RIPEMD320S8A=12,
+  RIPEMD320S8B=9,
+  RIPEMD320S8C=12,
+  RIPEMD320S8D=5,
+  RIPEMD320S8E=15,
+  RIPEMD320S8F=8,
+
+  RIPEMD320S90=8,
+  RIPEMD320S91=5,
+  RIPEMD320S92=12,
+  RIPEMD320S93=9,
+  RIPEMD320S94=12,
+  RIPEMD320S95=5,
+  RIPEMD320S96=14,
+  RIPEMD320S97=6,
+  RIPEMD320S98=8,
+  RIPEMD320S99=13,
+  RIPEMD320S9A=6,
+  RIPEMD320S9B=5,
+  RIPEMD320S9C=15,
+  RIPEMD320S9D=13,
+  RIPEMD320S9E=11,
+  RIPEMD320S9F=11
+
+} ripemd320_constants_t;
+
+typedef enum keccak_constants
+{
+  KECCAK_RNDC_00=0x0000000000000001UL,
+  KECCAK_RNDC_01=0x0000000000008082UL,
+  KECCAK_RNDC_02=0x800000000000808aUL,
+  KECCAK_RNDC_03=0x8000000080008000UL,
+  KECCAK_RNDC_04=0x000000000000808bUL,
+  KECCAK_RNDC_05=0x0000000080000001UL,
+  KECCAK_RNDC_06=0x8000000080008081UL,
+  KECCAK_RNDC_07=0x8000000000008009UL,
+  KECCAK_RNDC_08=0x000000000000008aUL,
+  KECCAK_RNDC_09=0x0000000000000088UL,
+  KECCAK_RNDC_10=0x0000000080008009UL,
+  KECCAK_RNDC_11=0x000000008000000aUL,
+  KECCAK_RNDC_12=0x000000008000808bUL,
+  KECCAK_RNDC_13=0x800000000000008bUL,
+  KECCAK_RNDC_14=0x8000000000008089UL,
+  KECCAK_RNDC_15=0x8000000000008003UL,
+  KECCAK_RNDC_16=0x8000000000008002UL,
+  KECCAK_RNDC_17=0x8000000000000080UL,
+  KECCAK_RNDC_18=0x000000000000800aUL,
+  KECCAK_RNDC_19=0x800000008000000aUL,
+  KECCAK_RNDC_20=0x8000000080008081UL,
+  KECCAK_RNDC_21=0x8000000000008080UL,
+  KECCAK_RNDC_22=0x0000000080000001UL,
+  KECCAK_RNDC_23=0x8000000080008008UL,
+
+  KECCAK_PILN_00=10,
+  KECCAK_PILN_01=7,
+  KECCAK_PILN_02=11,
+  KECCAK_PILN_03=17,
+  KECCAK_PILN_04=18,
+  KECCAK_PILN_05=3,
+  KECCAK_PILN_06=5,
+  KECCAK_PILN_07=16,
+  KECCAK_PILN_08=8,
+  KECCAK_PILN_09=21,
+  KECCAK_PILN_10=24,
+  KECCAK_PILN_11=4,
+  KECCAK_PILN_12=15,
+  KECCAK_PILN_13=23,
+  KECCAK_PILN_14=19,
+  KECCAK_PILN_15=13,
+  KECCAK_PILN_16=12,
+  KECCAK_PILN_17=2,
+  KECCAK_PILN_18=20,
+  KECCAK_PILN_19=14,
+  KECCAK_PILN_20=22,
+  KECCAK_PILN_21=9,
+  KECCAK_PILN_22=6,
+  KECCAK_PILN_23=1,
+
+  KECCAK_ROTC_00=1,
+  KECCAK_ROTC_01=3,
+  KECCAK_ROTC_02=6,
+  KECCAK_ROTC_03=10,
+  KECCAK_ROTC_04=15,
+  KECCAK_ROTC_05=21,
+  KECCAK_ROTC_06=28,
+  KECCAK_ROTC_07=36,
+  KECCAK_ROTC_08=45,
+  KECCAK_ROTC_09=55,
+  KECCAK_ROTC_10=2,
+  KECCAK_ROTC_11=14,
+  KECCAK_ROTC_12=27,
+  KECCAK_ROTC_13=41,
+  KECCAK_ROTC_14=56,
+  KECCAK_ROTC_15=8,
+  KECCAK_ROTC_16=25,
+  KECCAK_ROTC_17=43,
+  KECCAK_ROTC_18=62,
+  KECCAK_ROTC_19=18,
+  KECCAK_ROTC_20=39,
+  KECCAK_ROTC_21=61,
+  KECCAK_ROTC_22=20,
+  KECCAK_ROTC_23=44,
+
+} keccak_constants_t;
+
+typedef enum mysql323_constants
+{
+  MYSQL323_A=0x50305735U,
+  MYSQL323_B=0x12345671U
+
+} mysql323_constants_t;
+
+typedef enum fortigate_constants
+{
+  FORTIGATE_A=0x2eba88a3U,
+  FORTIGATE_B=0x4ab04c42U,
+  FORTIGATE_C=0xc1307953U,
+  FORTIGATE_D=0x3fcc0731U,
+  FORTIGATE_E=0x299032a1U,
+  FORTIGATE_F=0x705b81a9U
+
+} fortigate_constants_t;
+
+typedef enum blake2b_constants
+{
+  BLAKE2B_IV_00=0x6a09e667f3bcc908UL,
+  BLAKE2B_IV_01=0xbb67ae8584caa73bUL,
+  BLAKE2B_IV_02=0x3c6ef372fe94f82bUL,
+  BLAKE2B_IV_03=0xa54ff53a5f1d36f1UL,
+  BLAKE2B_IV_04=0x510e527fade682d1UL,
+  BLAKE2B_IV_05=0x9b05688c2b3e6c1fUL,
+  BLAKE2B_IV_06=0x1f83d9abfb41bd6bUL,
+  BLAKE2B_IV_07=0x5be0cd19137e2179UL
+
+} blake2b_constants_t;
+
+typedef enum blake2s_constants
+{
+  BLAKE2S_IV_00=0x6a09e667,
+  BLAKE2S_IV_01=0xbb67ae85,
+  BLAKE2S_IV_02=0x3c6ef372,
+  BLAKE2S_IV_03=0xa54ff53a,
+  BLAKE2S_IV_04=0x510e527f,
+  BLAKE2S_IV_05=0x9b05688c,
+  BLAKE2S_IV_06=0x1f83d9ab,
+  BLAKE2S_IV_07=0x5be0cd19
+
+} blake2s_constants_t;
+
+typedef enum sm3_constants
+{
+  // SM3 Initial Hash Values
+  SM3_IV_A=0x7380166fUL,
+  SM3_IV_B=0x4914b2b9UL,
+  SM3_IV_C=0x172442d7UL,
+  SM3_IV_D=0xda8a0600UL,
+  SM3_IV_E=0xa96f30bcUL,
+  SM3_IV_F=0x163138aaUL,
+  SM3_IV_G=0xe38dee4dUL,
+  SM3_IV_H=0xb0fb0e4eUL,
+
+  // SM3 Tj round constants
+  SM3_T00=0x79CC4519UL,
+  SM3_T01=0xF3988A32UL,
+  SM3_T02=0xE7311465UL,
+  SM3_T03=0xCE6228CBUL,
+  SM3_T04=0x9CC45197UL,
+  SM3_T05=0x3988A32FUL,
+  SM3_T06=0x7311465EUL,
+  SM3_T07=0xE6228CBCUL,
+  SM3_T08=0xCC451979UL,
+  SM3_T09=0x988A32F3UL,
+  SM3_T10=0x311465E7UL,
+  SM3_T11=0x6228CBCEUL,
+  SM3_T12=0xC451979CUL,
+  SM3_T13=0x88A32F39UL,
+  SM3_T14=0x11465E73UL,
+  SM3_T15=0x228CBCE6UL,
+  SM3_T16=0x9D8A7A87UL,
+  SM3_T17=0x3B14F50FUL,
+  SM3_T18=0x7629EA1EUL,
+  SM3_T19=0xEC53D43CUL,
+  SM3_T20=0xD8A7A879UL,
+  SM3_T21=0xB14F50F3UL,
+  SM3_T22=0x629EA1E7UL,
+  SM3_T23=0xC53D43CEUL,
+  SM3_T24=0x8A7A879DUL,
+  SM3_T25=0x14F50F3BUL,
+  SM3_T26=0x29EA1E76UL,
+  SM3_T27=0x53D43CECUL,
+  SM3_T28=0xA7A879D8UL,
+  SM3_T29=0x4F50F3B1UL,
+  SM3_T30=0x9EA1E762UL,
+  SM3_T31=0x3D43CEC5UL,
+  SM3_T32=0x7A879D8AUL,
+  SM3_T33=0xF50F3B14UL,
+  SM3_T34=0xEA1E7629UL,
+  SM3_T35=0xD43CEC53UL,
+  SM3_T36=0xA879D8A7UL,
+  SM3_T37=0x50F3B14FUL,
+  SM3_T38=0xA1E7629EUL,
+  SM3_T39=0x43CEC53DUL,
+  SM3_T40=0x879D8A7AUL,
+  SM3_T41=0x0F3B14F5UL,
+  SM3_T42=0x1E7629EAUL,
+  SM3_T43=0x3CEC53D4UL,
+  SM3_T44=0x79D8A7A8UL,
+  SM3_T45=0xF3B14F50UL,
+  SM3_T46=0xE7629EA1UL,
+  SM3_T47=0xCEC53D43UL,
+  SM3_T48=0x9D8A7A87UL,
+  SM3_T49=0x3B14F50FUL,
+  SM3_T50=0x7629EA1EUL,
+  SM3_T51=0xEC53D43CUL,
+  SM3_T52=0xD8A7A879UL,
+  SM3_T53=0xB14F50F3UL,
+  SM3_T54=0x629EA1E7UL,
+  SM3_T55=0xC53D43CEUL,
+  SM3_T56=0x8A7A879DUL,
+  SM3_T57=0x14F50F3BUL,
+  SM3_T58=0x29EA1E76UL,
+  SM3_T59=0x53D43CECUL,
+  SM3_T60=0xA7A879D8UL,
+  SM3_T61=0x4F50F3B1UL,
+  SM3_T62=0x9EA1E762UL,
+  SM3_T63=0x3D43CEC5UL
+
+} sm3_constants_t;
+
+typedef enum combinator_mode
+{
+  COMBINATOR_MODE_BASE_LEFT   = 10001,
+  COMBINATOR_MODE_BASE_RIGHT  = 10002,
+
+  // The base word sits between two amplifier pieces rather than beside one. combs_buf holds them as a
+  // pair, the piece in front of the word at index 0 and the piece behind it at index 1, and either is
+  // allowed to be empty. This is what -a 12 uses, and with an empty first piece it produces exactly
+  // what BASE_LEFT produces.
+
+  COMBINATOR_MODE_BASE_MIDDLE = 10003
+
+} combinator_mode_t;
+
+// How many pieces one amplifier item is cut into. Every attack mode but -a 12 uses one, the single
+// buffer that is appended to the base word. -a 12 uses four, and they arrive interleaved, so item
+// il_pos holds them at combs_buf[il_pos * COMBS_PIECE_CNT + 0 .. 3] in this fixed order.
+
+#define COMBS_PIECE_CNT 4
+
+#define COMBS_PIECE_PRE  0
+#define COMBS_PIECE_MID  1
+#define COMBS_PIECE_WORD 2
+#define COMBS_PIECE_POST 3
+
+// The four pieces of amplifier item il_pos. A kernel names them through these rather than indexing
+// combs_buf itself, so the layout is decided in one place instead of in every per mode kernel.
+
+#define COMBS_PIECE(il_pos, n) combs_buf[((il_pos) * COMBS_PIECE_CNT) + (n)]
+
+#define COMBS_PRE(il_pos)  COMBS_PIECE (il_pos, COMBS_PIECE_PRE)
+#define COMBS_MID(il_pos)  COMBS_PIECE (il_pos, COMBS_PIECE_MID)
+#define COMBS_WORD(il_pos) COMBS_PIECE (il_pos, COMBS_PIECE_WORD)
+
+// The same three lengths as numbers. A pure kernel reads them off the buffers because it walks the
+// pieces one at a time anyway, and an optimized kernel shifts by them, which wants a scalar.
+
+#define COMBS_PRE_LEN  kernel_param->pre_len
+#define COMBS_MID_LEN  kernel_param->mid_len
+#define COMBS_POST_LEN kernel_param->post_len
+#define COMBS_HAS_Q    kernel_param->has_q
+
+// How many bytes of assembled candidate a kernel that holds it as bytes has room for. It is the size
+// of one pw_t buffer, which is what those kernels declare.
+
+#define COMBS_BYTES_MAX 256
+
+// Is this launch the one that cuts an amplifier item into pieces? Only a mask with the base word
+// somewhere inside it does, and a run that holds no such mask has to pay nothing for an assembly it
+// never reaches, so the question is answered at compile time first and the whole block folds away.
+//
+// COMBS_MIDDLE is what the host says about the masks this run actually holds, not about the attack
+// mode. -a 1, -a 6 and -a 7 are rewritten into -a 12 masks whose word is at one end, so they build
+// the kernel they always built. Only a mask with something on both sides of the word, or a ?q behind
+// it, turns the block on.
+//
+// It is still a run time test inside such a build, and it has to be. The self test hands the kernel
+// one buffer at index zero the way -a 1 does, and combs_mode is what says so.
+//
+// backend.c puts this into the kernel cache key for that reason. Without it two runs would build
+// different source out of one file and then share the cached result.
+
+#if defined (COMBS_MIDDLE) && (COMBS_MIDDLE == 1)
+#define COMBS_IS_MIDDLE (COMBS_MODE == COMBINATOR_MODE_BASE_MIDDLE)
+#else
+#define COMBS_IS_MIDDLE 0
+#endif
+
+// The piece that follows the last word, which is the one buffer every layout but the five piece one
+// puts in combs_buf, and the amplifier length an optimized kernel adds to the base word length.
+
+#if defined (COMBS_MIDDLE) && (COMBS_MIDDLE == 1)
+#define COMBS_POST(il_pos)     combs_buf[COMBS_IS_MIDDLE ? (((il_pos) * COMBS_PIECE_CNT) + COMBS_PIECE_POST) : (il_pos)]
+#define COMBS_PW_R_LEN(il_pos) (COMBS_IS_MIDDLE ? pwlenx_create_combsum (combs_buf, il_pos) : pwlenx_create_combt (combs_buf, il_pos))
+#else
+#define COMBS_POST(il_pos)     combs_buf[il_pos]
+#define COMBS_PW_R_LEN(il_pos) pwlenx_create_combt (combs_buf, il_pos)
+#endif
+
+#ifdef KERNEL_STATIC
+typedef struct digest
+{
+  u32 digest_buf[DGST_ELEM];
+
+} digest_t;
+#endif
+
+typedef struct kernel_param
+{
+  // We can only move attributes into this struct which do not use special declarations like __global
+
+  u32 bitmap_mask;          // 24
+  u32 salt_pos_host;        // 25
+  u64 loop_pos;             // 26
+  u64 loop_cnt;             // 27
+  u64 il_cnt;               // 28
+  u32 digests_cnt;          // 29
+  u32 digests_offset_host;  // 30
+  u32 combs_mode;           // 31
+  u32 salt_repeat;          // 32
+  u64 pws_pos;              // 33
+  u64 gid_max;              // 34
+
+  // Bytes of mask that sit in front of the base word, so the position of ?w inside the mask. Zero
+  // puts the word first, which is what every attack mode other than -a 12 does. It replaces
+  // combs_mode for -a 12: zero is the -a 6 layout and a value equal to the mask length is -a 7.
+
+  u32 pre_len;              // 35
+
+  // The other two mask piece lengths and whether the mask has a ?q. All three are properties of the
+  // mask and do not change from one amplifier item to the next, which is what lets an optimized
+  // kernel shift by a scalar instead of by a per item length.
+
+  u32 mid_len;              // 36
+  u32 post_len;             // 37
+  u32 has_q;                // 38
+
+  // How many work items every cell gets, when the host has not laid the launch out. Zero means it has,
+  // and then the wave map says which cell a wave belongs to. It is not zero for the self-test, which
+  // runs the kernel before a cell exists at all, and the value is what the device engine gave every cell
+  // before there was a layout to carry.
+
+  u64 pcfg_lane_stride;     // 39
+
+  // Where each part of the device engine's pool begins, in words. Last, so that adding them does not
+  // renumber every field after them.
+
+  u32 pcfg_pool_at1;        // 40
+  u32 pcfg_pool_at2;        // 41
+  u32 pcfg_pool_at3;        // 42
+
+} kernel_param_t;
+
+typedef struct salt
+{
+  u32 salt_buf[64];
+  u32 salt_buf_pc[64];
+
+  u32 salt_len;
+  u32 salt_len_pc;
+  u32 salt_iter;
+  u32 salt_iter2;
+  u32 salt_dimy;
+  u32 salt_sign[2];
+  u32 salt_repeats;
+
+  u32 orig_pos;
+
+  u32 digests_cnt;
+  u32 digests_done;
+
+  u32 digests_offset;
+
+  u32 scrypt_N;
+  u32 scrypt_r;
+  u32 scrypt_p;
+
+} salt_t;
+
+typedef struct
+{
+  u32 key;
+  u64 val;
+
+} hcstat_table_t;
+
+typedef struct
+{
+  u32 cs_buf[0x100];
+  u32 cs_len;
+
+} cs_t;
+
+typedef struct
+{
+  u32 cmds[32];
+
+} kernel_rule_t;
+
+typedef struct pw
+{
+  u32 i[64];
+
+  u32 pw_len;
+
+} pw_t;
+
+typedef struct pw_idx
+{
+  u32 off;
+  u32 cnt;
+  u32 len;
+
+} pw_idx_t;
+
+// One slot of a PCFG cell, and the cell itself. See inc_pcfg.h for what a cell is and why its
+// rectangle is what the device engine's inner loop walks. They live here because the kernel parameter
+// list names the cell type and is assembled before inc_pcfg.h is reached.
+
+#define PCFG_DEV_MAXSLOT 8
+
+// How long a candidate the device engine handles, in words and in bytes. The kernel holds the candidate in
+// an array of this many words, and the array is addressed at a runtime byte offset, so it is scratch
+// rather than registers and every thread in flight carries one.
+//
+// That makes its size the largest single thing in the launch's memory traffic. The rules kernel's
+// pw_t, which this was inherited from, is two hundred and sixty bytes a thread and had the profiler
+// reporting ninety one per cent of L2 with a sixty per cent L1 hit rate, for a candidate ten bytes
+// long.
+//
+// **This has to be a whole number of hash blocks, and one is the right number.** The crypto library
+// reads its input one whole block at a time, the last one included: the tail read is sixteen words
+// wide however few of them the length makes meaningful, and nothing masks the rest off.
+// md5_update_64 () copies all sixteen words into the context and md5_final () writes only the 0x80
+// over the first byte behind the candidate, so the words behind it have to be zero and they have to be
+// there to be read. Twenty four words, which is what this was, is neither: a ninety five byte
+// candidate had words sixteen to thirty one read out of it, which compute-sanitizer reports as an
+// invalid __local__ read and which fails the launch on an RTX 4090 outright.
+//
+// One block is also the fastest, because every extra word is in every frame. What it costs is that a
+// grammar whose candidates run long gets fewer of them amplified.
+//
+// A structure whose candidates could reach past this is not amplified at all; see choose_cut (). Its
+// base word still arrives at the kernel at whatever length the grammar makes it, which is not bounded
+// by anything here, so the kernel hashes that case straight out of the pw_t rather than copying it in.
+
+// The value is a build option, because the right one is a property of the grammar and not of the
+// code. The host settles it in global_dev_init (), which runs ahead of the backend compiling
+// anything, and hands it to the kernel as -D PCFG_DEV_MAXWORD. This default is what a kernel built
+// without one gets, which is the self-test and nothing else.
+//
+// Whatever chooses it must also reach the kernel cache key. A cached kernel is named from a checksum
+// that covers build_options_module_buf and extra_value but not the general build options, so a value
+// that only appears in the latter would let two grammars share one compiled kernel. backend.c folds
+// it into extra_value for that reason.
+
+#ifndef PCFG_DEV_MAXWORD
+#define PCFG_DEV_MAXWORD 16
+#endif
+
+#define PCFG_DEV_MAXBYTE ((PCFG_DEV_MAXWORD * 4) - 1)
+
+// The two the host picks between, in whole hash blocks. One block is the smallest frame and the
+// fastest on a grammar that fits it; two runs on the device more of a grammar whose candidates run long.
+
+#define PCFG_DEV_MAXWORD_LO 16
+#define PCFG_DEV_MAXWORD_HI 32
+
+// And the width the array takes when the rules are applied inside the engine. apply_rules () says it
+// itself, above its own loop: an input shorter than 256 bytes is the contract every mangle_ function
+// is written to, so the array that holds a rule's output is the one a pw_t holds, PW_MAX over four.
+// At this width pcfg_hash () also leaves its 16 word specialisation and takes the general path, which
+// is what lifts the 63 byte ceiling the specialisation carries.
+
+#define PCFG_DEV_MAXWORD_RULES 64
+
+// The array is a whole number of blocks, and the rule above is what says it has to be. Kept as its own
+// name so that changing PCFG_DEV_MAXWORD to something that is not cannot go unnoticed.
+
+#define PCFG_DEV_WORDS   (((PCFG_DEV_MAXWORD + 15) / 16) * 16)
+
+// How many candidates one work item walks.
+//
+// A cell gets as many work items as its rectangle needs at this many candidates each, so no work item
+// runs longer than this. A rectangle spans six orders of magnitude, so a fixed number of work items
+// per cell instead would make the widest cell in a launch set the length of the whole launch.
+//
+// It is a curve with a maximum. A shorter run is a shorter tail; a longer one gives a work item more
+// candidates to spread its setup over, and the seed and the first write happen before any hashing
+// does. PCFG_BLOCK overrides it.
+
+#define PCFG_DEV_BLOCK 64
+
+// The work item budget a launch may spend, per base word. A batch of unusually wide cells raises the
+// block size until it fits rather than growing the launch past anything sized for it.
+
+#define PCFG_DEV_LANES 512
+
+// How many waves of wave map are held for every base word a batch can hold. A cell wide enough to want
+// more than the batch has left runs longer per work item instead. The map is a word a wave.
+
+#define PCFG_DEV_WMAP 24
+
+// The fewest waves a cell is given, whatever its rectangle.
+//
+// A cell that reaches one candidate needs one lane, so a floor wastes the rest of the wave. Removing
+// it is worse: what those idle work items buy is launch size, and the autotuner cannot make that up
+// because a base word's cost in work items falls by an order of magnitude without them.
+
+#define PCFG_DEV_FLOOR (PCFG_DEV_LANES / PCFG_DEV_WARP)
+
+// The largest work group the device engine's kernels are built for. They keep one odometer per work
+// item in shared memory and one cell descriptor per group of lanes, and both are sized by this, so the
+// host has to hold the group at or below it.
+
+#define PCFG_DEV_GROUP 64
+
+// The granularity a cell's work items are handed out in, which is the work group and not the wave.
+//
+// A wave is the smallest unit that can own a cell, but handing them out by the wave costs more than it
+// saves: a group holds two waves, so two cell descriptors instead of one, and that pushes the shared
+// memory per block over a step of the driver's shared and L1 split. Same instructions, same registers,
+// same occupancy, much worse L1 hit rate.
+//
+// By the group there is one descriptor again. The price is that a cell reaching one candidate costs a
+// whole group rather than a whole wave.
+
+#define PCFG_DEV_WARP PCFG_DEV_GROUP
+
+// Whether an entry is found by multiplying or by looking its offset up.
+//
+// A bucket is a run of terminals a slot draws from, and the device finds entry n of it at
+// pool_off + (n * ent_len). That multiply is the reason a bucket has to agree on byte length, and a
+// pcfg length is a count of characters, so a grammar with multi byte characters has entries of one
+// character length and several byte lengths and the loader has to cut a cost level into one bucket per
+// byte length. On a utf-8 name grammar that is 1159 buckets where 436 would do, and it is why that
+// grammar gets 3.8 candidates out of a work item where a latin one gets 8.
+//
+// With this set the pool carries a u32 offset for every entry of every list, a slot's pool_off is an
+// index into that table rather than a byte offset, and entry n is at pool[pool_off + n] and runs to
+// pool[pool_off + n + 1]. A bucket then has to agree on cost and nothing else.
+//
+// What it costs is that a candidate's length stops being a constant of the cell. Every slot behind a
+// slot whose width can change writes at a byte offset that depends on the digits, so the offsets are
+// carried per lane beside the digits, and pw_len changes under the inner loop rather than being
+// settled before it. That is why this is a build option: a grammar whose lists are already of one byte
+// length compiles the whole of it out.
+//
+// The host settles it in global_dev_init () from the grammar, the same way it settles
+// PCFG_DEV_MAXWORD, and hands it over as -D PCFG_DEV_VARLEN. It has to reach the kernel cache key for
+// the same reason that one does; backend.c folds both into extra_value.
+
+#ifndef PCFG_DEV_VARLEN
+#define PCFG_DEV_VARLEN 0
+#endif
+
+// Whether the rules are applied inside the device engine's kernel. The default belongs here rather
+// than beside the kernel's own options, because inc_common.h reads it to decide which of the two
+// pointers takes the constant address space, and that is settled before inc_pcfg_kernel.cl is read.
+
+#ifndef PCFG_DEV_RULES
+#define PCFG_DEV_RULES 0
+#endif
+
+// A lane's odometer word.
+//
+// It holds the digit alone when entries are of one byte length. When they are not it also holds the
+// byte offset the slot writes at, which is a running sum over the digits in front of it and therefore
+// per lane rather than per cell. It rides in the top byte of the same word instead of a row of its
+// own, because a second [PCFG_DEV_GROUP][PCFG_DEV_MAXSLOT + 1] row is 2304 bytes of shared memory per
+// work group and the kernel has about a hundred bytes of headroom before it crosses the step of the
+// driver's shared and L1 split, which costs both occupancy and L1 hit rate. An offset is at most
+// PCFG_DEV_MAXBYTE, which on the widest array there is comes to 255, and that is exactly what a byte
+// holds.
+//
+// What it costs is the top eight bits of the digit, so a bucket may hold 2^24 entries.
+// pcfg_bucket_cap () holds the loader to it.
+
+#define PCFG_ODO_DIGIT(x)     ((x) & 0x00ffffff)
+#define PCFG_ODO_POS(x)       ((x) >> 24)
+#define PCFG_ODO_PACK(d,p)    ((((u32) (p)) << 24) | ((u32) (d)))
+
+#define PCFG_ODO_MAXDIGIT     0x00ffffff
+
+#define PCFG_SLOT_KIND_BYTES 0
+#define PCFG_SLOT_KIND_CASE  1
+
+// A run of the base word, copied rather than looked up.
+//
+// The pool holds what a grammar or a table can produce, which is a fixed set known before the run.
+// A feed whose candidate also contains stretches of the base word itself has nothing in the pool to
+// write them from, and cannot put them there because they are whatever word is in hand. Such a slot
+// names an offset into the base word in pool_off instead, and has a radix of one because a run of a
+// word is not a choice.
+//
+// It reads the base word out of global memory rather than out of w, because w is being rewritten as
+// the odometer walks and a slot that grew has already overwritten what a later one would read. A whole
+// warp shares one cell and therefore one base word, so the read is a broadcast.
+
+#define PCFG_SLOT_KIND_COPY  2
+
+#define PCFG_SLOT_ENT_LEN(p) (((p) >>  0) & 0xff)
+#define PCFG_SLOT_DST_OFF(p) (((p) >>  8) & 0xff)
+#define PCFG_SLOT_KIND(p)    (((p) >> 16) & 0xff)
+
+// Which slot a carry landing on this one has to start writing from.
+//
+// A capitalisation slot rewrites the bytes of the token in front of it rather than contributing its
+// own, so a step that lands on a mask has to put that token back before the mask can be applied over
+// it. Which slot that is depends only on the kinds of the slots, which the host settles once per cell,
+// so it is settled once per cell rather than by walking backwards over the case slots on every carry.
+// PCFG_DEV_MAXSLOT is 8, so it fits in the byte the other three fields leave.
+
+#define PCFG_SLOT_FROM(p)    (((p) >> 24) & 0xff)
+
+typedef struct pcfg_slot
+{
+  // Where the slot's bucket begins.
+  //
+  // Without PCFG_DEV_VARLEN it is the byte offset of the bucket's first entry in the pool and entry n
+  // is at pool_off + (n * ent_len). With it, it is the index of the bucket's first entry in the pool's
+  // offset table and entry n is at pool[pool_off + n]. Both are one u32 and both are the only thing
+  // the device needs to reach an entry, which is why the field is shared rather than doubled.
+
+  u32 pool_off;
+  u32 radix;
+
+  // What a capitalisation slot has to know to reach the upper case image of the entry the slot it
+  // follows chose: that image's base in the pool without per entry offsets, and the distance to it
+  // with them. It means nothing on any other kind of slot and every feed leaves it zero there.
+  //
+  // It is NOT a starting digit. pcfg_odo_seed () decomposes il_pos on its own, so a slot cannot be
+  // told to begin part way along its bucket, and a host side rebuild that added a start here would
+  // name a different candidate than the card hashed. A cracked hash would then be written out with a
+  // plaintext that does not hash to it. Giving the odometer a start means changing pcfg_odo_seed (),
+  // pcfg_expand () and the two global_explain () copies together, and paying for it on every slot of
+  // every seed.
+
+  u32 digit;
+  u32 packed;
+
+} pcfg_slot_t;
+
+typedef struct pcfg_cell
+{
+  u32 slot_cnt;
+
+  // how many candidates the rectangle reaches, which the host already knows and the device would
+  // otherwise have to multiply out of the radices before it could decide anything
+
+  u32 rect;
+
+  // how many of them one lane takes, which is not simply the rectangle divided by the lanes.
+  //
+  // A step of the odometer rewrites every slot from the leftmost digit it changed onwards, and a warp
+  // runs one instruction at a time, so **one lane carrying costs the whole warp the write**. With
+  // radices around five and thirty two lanes at unrelated places in the rectangle, some lane carries
+  // on nearly every step and the warp writes two or three slots where a lane writes one.
+  //
+  // Rounding a lane's run up to a whole number of turns of the last digit puts every lane in the warp
+  // at the same place in that digit, so they carry together or not at all. It is a rounding rather
+  // than a free choice because the lanes still have to tile the rectangle exactly: the union of the
+  // runs is what the kernel enumerates and the plaintext count is what says it still is.
+  //
+  // The host works it out because it has the radices in hand and the kernel would need two more
+  // global reads before it could know, and those reads would land in front of the bounds check that
+  // makes an idle lane cheap.
+
+  u32 blk;
+
+  // Which wave of the launch this cell's first one is. A cell takes as many waves as its rectangle
+  // needs rather than a fixed number, so a work item cannot divide its own id to find its cell: it
+  // reads its cell out of pcfg_wmap, which is indexed by wave, and this is what turns that back into
+  // which part of the rectangle it owns.
+
+  u32 wave_base;
+
+  // What the slots mean, which the kernel knows at build time and the host does not.
+  //
+  // PCFG_DEV_VARLEN is a build option, so a kernel is compiled for one grammar and reads its slots one
+  // way. pcfg_expand_host () is ordinary host code compiled once for every grammar hashcat will ever
+  // run, and it has to produce the same bytes as whichever kernel is loaded, so it is told here rather
+  // than at build time. Bit 0 is set when pool_off is an index into the offset table.
+
+  u32 flags;
+
+  pcfg_slot_t slots[PCFG_DEV_MAXSLOT];
+
+} pcfg_cell_t;
+
+#define PCFG_CELL_VARLEN 1
+
+// An OMEN cell carries its level in slots[0].pool_off and the base word it opens on across radix
+// and digit, low half first.
+
+#define PCFG_CELL_OMEN   2
+
+// How many buffers the pool may be handed over in. inc_pcfg_pool.h says how a read finds its part.
+
+#define PCFG_POOL_PARTS 4
+
+// What the pool is aligned to and rounded up to, so a device whose memory is the host's can be handed
+// the feed's bytes instead of a copy. A multiple of every page size hashcat runs on.
+
+#define PCFG_POOL_ALIGN 65536
+
+// The highest OMEN cost level. The feed, pcfg_expand () and the kernel all count against it.
+
+#define PCFG_OMEN_MAXLVL 10
+
+// An OMEN candidate may be written this wide, which is what the walk's own buffer holds and what
+// pcfg_expand () has room for in the caller's plain buffer. The kernel has its own, narrower bound in
+// PCFG_DEV_MAXBYTE, because its array is sized by the hash block rather than by the model.
+
+#define PCFG_OMEN_MAXBYTE 256
+
+// One candidate can take this many transitions, which is the length the walk's own state is sized
+// for on both sides: the feed's pcfg_omen_walk_t and the kernel's.
+
+#define PCFG_OMEN_MAXK 56
+
+// Whether the walk keeps its deepest position in scalars instead of at the end of those arrays. Every
+// step tries that position first and the lanes of a wave are at positions that disagree, so the arrays
+// are read at scattered indices. backend.c settles it per device from the L2 the runtime reports, and
+// folds it into the kernel cache key like the others.
+
+#ifndef PCFG_OMEN_TOPREG
+#define PCFG_OMEN_TOPREG 0
+#endif
+
+// Three places have to agree on how an OMEN model is laid out inside the pool: the feed writes it in
+// global_dev_init (), the kernel reads it in pcfg_omen_model (), and the host reads it again in
+// pcfg_expand (). They agree by name rather than by remembering the same numbers.
+//
+// A directory comes first, then one block per model. Offsets inside a block are words from the start
+// of that block. A model is a Markov chain over n-gram contexts: the walk opens on a whole n-gram and
+// then takes one transition at a time, each adding a character and spending some of the budget.
+
+// DIR_AT says where model m's block begins, in words from the directory. The rest are offsets into
+// that block's header, and each names where one table begins. The names say which; what they do not
+// say is that CTX_AT holds ctx_cnt + 1 entries and START_LVL_AT holds MAXLVL + 2, that WEIGHT_AT and
+// STARTSUM_AT are two words to an entry because the host holds them as u64, and that WBIT_AT is one
+// bit an entry, whether that weight is not zero.
+
+#define PCFG_OMEN_DIR_AT(m)     (m)
+
+#define PCFG_OMEN_CTX_AT        0
+#define PCFG_OMEN_TRANS_AT      1
+#define PCFG_OMEN_CHARS_AT      2
+#define PCFG_OMEN_START_CTX_AT  3
+#define PCFG_OMEN_START_OFF_AT  4
+#define PCFG_OMEN_START_LEN_AT  5
+#define PCFG_OMEN_START_LVL_AT  6
+#define PCFG_OMEN_LEN_COST_AT   7
+#define PCFG_OMEN_LEN_STEPS_AT  8
+#define PCFG_OMEN_WEIGHT_AT     9
+#define PCFG_OMEN_STARTSUM_AT   10
+#define PCFG_OMEN_WBIT_AT       11
+
+#define PCFG_OMEN_CTX_CNT       12
+#define PCFG_OMEN_STEP_MAX      13
+#define PCFG_OMEN_BUDGET_MAX    14
+#define PCFG_OMEN_LEN_CNT       15
+
+#define PCFG_OMEN_HEADER_WORDS  16
+
+// A transition takes four words: the context it leaves the walk in, where its character begins, how
+// many bytes that character takes, and what it costs out of the budget.
+
+#define PCFG_OMEN_TRANS_WORDS   4
+#define PCFG_OMEN_TRANS_DST     0
+#define PCFG_OMEN_TRANS_OFF     1
+#define PCFG_OMEN_TRANS_LEN     2
+#define PCFG_OMEN_TRANS_COST    3
+
+typedef struct bf
+{
+  u32  i;
+
+} bf_t;
+
+typedef struct bs_word
+{
+  u32  b[32];
+
+} bs_word_t;
+
+typedef struct plain
+{
+  u64  gidvid;
+  u64  il_pos;
+  u32  salt_pos;
+  u32  digest_pos;
+  u32  hash_pos;
+  u32  extra1;
+  u32  extra2;
+
+} plain_t;
+
+typedef struct keyboard_layout_mapping
+{
+  u32 src_char;
+  int src_len;
+  u32 dst_char;
+  int dst_len;
+
+} keyboard_layout_mapping_t;
+
+typedef struct hc_enc
+{
+  int  pos;   // source offset
+
+  u32  cbuf;  // carry buffer
+  int  clen;  // carry length
+
+} hc_enc_t;
+
+#endif

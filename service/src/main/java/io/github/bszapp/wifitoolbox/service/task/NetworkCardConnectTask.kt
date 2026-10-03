@@ -43,8 +43,9 @@ internal class NetworkCardConnectTask(
                     null -> Unit
                     is Event.Exit -> { exited = true; error("网卡脚本在准备阶段退出：${event.code}") }
                     is Event.Line -> {
-                        context.log(event.text)
-                        if (parse(event.text)?.optString("event") == "ready") break
+                        logLine(context, event.text)
+                        // 初始 shell 提示可能紧挨第一条日志，准备提示使用固定英文文本。
+                        if (event.text.endsWith(SCRIPT_READY)) break
                     }
                 }
             }
@@ -106,23 +107,29 @@ internal class NetworkCardConnectTask(
     }
 
     private fun logLine(context: TaskContext, line: String) {
-        context.log(line)
-        val event = parse(line) ?: return
-        if (event.optString("event") == "stage") {
-            val stage = runCatching { ConnectWifiStage.valueOf(event.getString("stage")) }.getOrNull()
-                ?: return
-            context.updateProgress(TaskProgress.ConnectWifi(stage))
+        // 第一条准备提示可能紧接 shell 提示；其他脚本行按日志级别筛选。
+        val text = if (line.endsWith(SCRIPT_READY)) SCRIPT_READY else line.trimStart()
+        if (TASK_LOG_PREFIXES.none { text.startsWith(it) }) return
+        context.log(text)
+        val stage = when (text.trimEnd()) {
+            "[*] Stage: Communicating with router" -> ConnectWifiStage.ROUTER_COMMUNICATION
+            "[*] Stage: WPA handshake M1 (1/4)" -> ConnectWifiStage.WPA_HANDSHAKE_1_OF_4
+            "[*] Stage: WPA handshake M2 (2/4)" -> ConnectWifiStage.WPA_HANDSHAKE_2_OF_4
+            "[*] Stage: WPA handshake M3 (3/4)" -> ConnectWifiStage.WPA_HANDSHAKE_3_OF_4
+            "[*] Stage: WPA handshake M4 (4/4)" -> ConnectWifiStage.WPA_HANDSHAKE_4_OF_4
+            "[*] Stage: DHCP address acquisition" -> ConnectWifiStage.IP_NEGOTIATION
+            else -> return
         }
+        context.updateProgress(TaskProgress.ConnectWifi(stage))
     }
-
-    private fun parse(line: String): JSONObject? = runCatching {
-        // shell 初始提示可能与脚本第一条输出位于同一行。
-        val start = line.indexOf('{')
-        if (start < 0) null else JSONObject(line.substring(start))
-    }.getOrNull()
 
     private sealed interface Event {
         data class Line(val text: String) : Event
         data class Exit(val code: Int) : Event
+    }
+
+    private companion object {
+        const val SCRIPT_READY = "[*] Managed Wi-Fi diagnostic ready (protocol=1)"
+        val TASK_LOG_PREFIXES = listOf("[*] ", "[-] ", "[+] ")
     }
 }

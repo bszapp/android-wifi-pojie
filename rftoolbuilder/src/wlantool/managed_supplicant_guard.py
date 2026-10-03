@@ -46,7 +46,7 @@ def system_supplicants():
 def guard_main(request):
     timeout = request['timeoutMillis'] / 1000
     if timeout <= 0 or not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
-        raise RuntimeError('系统需支持 pidfd，才能安全暂停并恢复系统 wpa_supplicant')
+        raise RuntimeError('pidfd support is required to safely pause and restore system wpa_supplicant')
     deadline = time.monotonic() + timeout
     stopping = False
     targets = {}
@@ -100,7 +100,7 @@ def guard_main(request):
             targets[pid] = dict(fd=descriptor, identity=identity, resume=resume)
             if not resume:
                 emit('supplicantAlreadyPaused', pid=pid, executable=executable,
-                     message='进程原本已暂停，结束时保持原状')
+                     message='The process was already paused; preserve its original state')
                 continue
             signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
             pause_deadline = min(deadline, time.monotonic() + 1)
@@ -111,13 +111,13 @@ def guard_main(request):
                     break
                 current_state, current_identity = process_state(pid)
                 if current_identity != identity:
-                    raise RuntimeError('暂停期间进程身份变化：pid=%s' % pid)
+                    raise RuntimeError('Process identity changed while pausing: pid=%s' % pid)
                 if current_state in ('T', 't'):
                     emit('supplicantPaused', pid=pid, executable=executable,
-                         message='已确认系统 wpa_supplicant 暂停')
+                         message='System wpa_supplicant is confirmed paused')
                     break
                 if stopping or time.monotonic() >= pause_deadline:
-                    raise RuntimeError('无法确认系统 wpa_supplicant 暂停：pid=%s' % pid)
+                    raise RuntimeError('Could not confirm system wpa_supplicant pause: pid=%s' % pid)
                 time.sleep(.01)
 
     try:
@@ -127,7 +127,7 @@ def guard_main(request):
         while not stopping:
             now = time.monotonic()
             if now >= deadline:
-                emit('supplicantGuardTimeout', message='守护超时，恢复系统进程')
+                emit('supplicantGuardTimeout', message='Guard timed out; restoring system processes')
                 break
             if now >= next_scan:
                 pause_new_processes()
@@ -136,7 +136,7 @@ def guard_main(request):
                 continue
             data = os.read(sys.stdin.fileno(), 4096)
             if not data:
-                emit('supplicantOwnerExited', message='测试脚本的管道已关闭，恢复系统进程')
+                emit('supplicantOwnerExited', message='Diagnostic owner pipe closed; restoring system processes')
                 break
             input_buffer += data
             while b'\n' in input_buffer:
@@ -156,13 +156,13 @@ def guard_main(request):
                     while not select.select([item['fd']], [], [], 0)[0]:
                         state, identity = process_state(pid)
                         if identity != item['identity']:
-                            raise RuntimeError('恢复期间进程身份变化：pid=%s' % pid)
+                            raise RuntimeError('Process identity changed while restoring: pid=%s' % pid)
                         if state not in ('T', 't'):
                             break
                         if time.monotonic() >= resume_deadline:
-                            raise RuntimeError('无法确认系统 wpa_supplicant 恢复：pid=%s' % pid)
+                            raise RuntimeError('Could not confirm system wpa_supplicant resume: pid=%s' % pid)
                         time.sleep(.01)
-                    emit('supplicantResumed', pid=pid, message='系统 wpa_supplicant 已恢复或已退出')
+                    emit('supplicantResumed', pid=pid, message='System wpa_supplicant resumed or exited')
             except (ProcessLookupError, FileNotFoundError):
                 emit('supplicantExited', pid=pid)
             except BaseException as error:
@@ -213,12 +213,12 @@ class SupplicantPauseGuard:
             check_running()
             if self.process.poll() is not None:
                 self.receive(0)
-                raise RuntimeError('系统 wpa_supplicant 暂停守护进程未能启动')
+                raise RuntimeError('System supplicant pause guard could not start')
 
     def ensure_active(self):
         if self.process and self.ready and self.process.poll() is not None:
             self.receive(0)
-            raise RuntimeError('系统 wpa_supplicant 守护进程已结束，中止网卡测试')
+            raise RuntimeError('System supplicant guard exited; aborting interface test')
 
     def release(self):
         if self.process is None:

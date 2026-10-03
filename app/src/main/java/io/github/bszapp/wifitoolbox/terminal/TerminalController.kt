@@ -130,11 +130,12 @@ class TerminalController(
     }
 
     override fun createServiceTerminal() {
+        val operation = "新建服务 chroot 终端"
         val binding = synchronized(connectionLock) { activeBinding }
         if (binding == null) {
             reportError(
                 "App.TerminalController",
-                "新建服务 chroot 终端",
+                operation,
                 IllegalStateException("service 未连接"),
                 null,
             )
@@ -147,15 +148,13 @@ class TerminalController(
             val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
             runCatching {
                 binding.service.createServiceTerminal(
-                    rootfs.absolutePath,
-                    runtime.absolutePath,
-                    terminal.absolutePath,
+                    rootfs.absolutePath, runtime.absolutePath, terminal.absolutePath,
                 )
             }.onFailure { error ->
                 if (isCurrent(binding)) {
                     reportError(
                         "App.TerminalController",
-                        "新建服务 chroot 终端",
+                        operation,
                         error,
                         null,
                     )

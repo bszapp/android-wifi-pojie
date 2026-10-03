@@ -25,3 +25,5 @@ include(":app")
 include(":ui-default")
 include(":service")
 include(":contract")
+
+include(":scripta")

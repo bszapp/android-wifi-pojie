@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="dictionary_edit">编辑</string>
+    <string name="dictionary_resource_normal_desc">通用格式，一行一个密码</string>
+    <string name="dictionary_overwrite_resource">覆写资源</string>
+    <string name="dictionary_save">保存</string>
+    <string name="dictionary_btn_save_not">不保存</string>
+    <string name="dictionary_description">描述</string>
+    <string name="dictionary_label_name">名称</string>
+    <string name="dictionary_resources_nothing">¯\\_(ツ)_/¯\n暂无资源，点击 + 号添加</string>
+    <string name="dictionary_tag_script">脚本</string>
+    <string name="dictionary_resource_script_desc">使用JS脚本动态生成密码本</string>
+    <string name="dictionary_error_json_id_missing">信息缺少id</string>
+    <string name="dictionary_btn_ok">确定</string>
+    <string name="dictionary_error_script_header_not_found">未找到脚本声明头</string>
+    <string name="dictionary_import_external">导入</string>
+    <string name="dictionary_default_alert_title">提示</string>
+    <string name="dictionary_data_count_tip">当前包含 %1$d 条数据</string>
+    <string name="dictionary_edit_resource">编辑资源</string>
+    <string name="dictionary_edit_overwrite">编辑覆写</string>
+    <string name="dictionary_error_id_exists">ID“%1$s”已经存在</string>
+    <string name="dictionary_unsupported_file_format">不支持的文件格式</string>
+    <string name="dictionary_import_file">导入文件</string>
+    <string name="dictionary_builtin_resource">内置资源</string>
+    <string name="dictionary_local_path">本地路径</string>
+    <string name="dictionary_default_script_content" translatable="false">// ==ToolboxScript==\n// @id {ID}\n// @name 脚本名称\n// @description 脚本描述内容\n// @author 作者\n// @version 1.0.0\n// ==/ToolboxScript==\n\nconsole.log(\"先加一个密码…\") //输出使用console.log\ntask.addItem(\"12345678\") //添加使用task.addItem\nconsole.log(\"等一秒…\")\nawait wait(1000); //代码默认嵌套在async function内，可以使用await\nconsole.log(\"再来一个！\");\ntask.addItem(\"88888888\")\n\ntry {\n\tconsole.log(\"请求网络试试…\");\n\tconst response = await fetch(\'https://uapis.cn/api/v1/network/myip\'); //可以使用WebView自带的工具，但是有cors限制\n\tconst data = await response.json();\n\tconsole.log(\"本机IP: \" + data.ip);\n\tconsole.log(\"归属地: \" + data.region);\n} catch (err) {\n\tconsole.log(\"请求失败: \" + err.message);\n}\nconsole.log(\"完成\");</string>
+    <string name="dictionary_delete">删除</string>
+    <string name="dictionary_tag_builtin">内置</string>
+    <string name="dictionary_restore_builtin">还原内置</string>
+    <string name="dictionary_add_resource">添加资源</string>
+    <string name="dictionary_btn_cancel">取消</string>
+    <string name="dictionary_text_editor">文本编辑器</string>
+    <string name="dictionary_version">版本</string>
+    <string name="dictionary_new_resource">新建资源</string>
+    <string name="dictionary_error_id_format">id必须匹配/^[a-zA-Z][a-zA-Z0-9._-]+\$/</string>
+    <string name="dictionary_id_required">ID (必填)</string>
+    <string name="dictionary_none">-</string>
+    <string name="dictionary_import_failed">导入失败</string>
+    <string name="dictionary_error_json_content_missing">信息缺少content</string>
+    <string name="dictionary_resource_details">资源详情</string>
+    <string name="dictionary_id">ID</string>
+    <string name="dictionary_dialog_exit_confirm_text">文档已修改，是否保存？</string>
+    <string name="dictionary_parse_failed">解析失败</string>
+    <string name="dictionary_error_script_id_not_found">脚本声明中未找到id属性</string>
+    <string name="dictionary_continue_text">继续</string>
+    <string name="dictionary_save_failed">保存失败</string>
+    <string name="dictionary_code_editor">文本编辑器</string>
+    <string name="dictionary_developer">开发者</string>
+    <string name="dictionary_clipboard">剪贴板</string>
+    <string name="dictionary_resource_normal">普通</string>
+    <string name="dictionary_tag_overwrite">覆写内置</string>
+    <string name="dictionary_no_description">无描述</string>
+</resources>

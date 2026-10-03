@@ -2,6 +2,7 @@ package io.github.bszapp.wifitoolbox.logs
 
 import android.os.Process
 import android.util.Log
+import android.util.AtomicFile
 import io.github.bszapp.wifitoolbox.contract.log.ILogController
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogEntry
 import io.github.bszapp.wifitoolbox.service.LogcatRecorder
@@ -17,6 +18,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.min
+import java.io.File
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** App 进程拥有的日志来源；采集和解析复用服务的记录器，不绑定服务连接。 */
 class AppLogController(private val scope: CoroutineScope) : ILogController {
@@ -70,6 +75,57 @@ class AppLogController(private val scope: CoroutineScope) : ILogController {
         mutableRawViewEnabled.value = enabled
     }
 
+    /** Save the existing recorder's complete retained range, independently of UI sync. */
+    fun saveCapturedLogs(file: File) {
+        // Let the existing reader consume preceding logcat records before taking its
+        // snapshot. The second marker commits the first in logcat's long text format.
+        val boundary = UUID.randomUUID().toString()
+        val reachedBoundary = CountDownLatch(1)
+        val subscription = recorder.subscribeEntries { entry ->
+            if (entry.tag == CRASH_BOUNDARY_TAG && entry.rawLine.contains(boundary)) {
+                reachedBoundary.countDown()
+            }
+        }
+        try {
+            Log.i(CRASH_BOUNDARY_TAG, boundary)
+            Log.i(CRASH_BOUNDARY_TAG, "flush")
+            try {
+                reachedBoundary.await(1, TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        } finally {
+            subscription.close()
+        }
+
+        // The App clear action uses this same lock. Keep a fixed end ID while writing,
+        // without allocating a second full log list or imposing an export size limit.
+        synchronized(lock) {
+            val (oldest, latest) = recorder.visibleRange()
+            val cacheFile = AtomicFile(file)
+            val output = cacheFile.startWrite()
+            try {
+                val writer = output.bufferedWriter(Charsets.UTF_8)
+                var from = oldest
+                while (from <= latest) {
+                    val batch = recorder.getRange(from, min(from + FETCH_SIZE - 1L, latest))
+                    check(batch.entries.isNotEmpty() && batch.entries.first().id == from) {
+                        "保存应用日志时返回的日志范围不连续"
+                    }
+                    batch.entries.forEach { entry ->
+                        writer.append(entry.rawLine).append('\n')
+                    }
+                    from = batch.entries.last().id + 1L
+                }
+                writer.flush()
+                cacheFile.finishWrite(output)
+            } catch (error: Throwable) {
+                cacheFile.failWrite(output)
+                throw error
+            }
+        }
+    }
+
     private suspend fun syncTo(announcedRange: LogRange) {
         var oldest = announcedRange.oldestAvailableId
         var latest = announcedRange.latestId
@@ -111,5 +167,6 @@ class AppLogController(private val scope: CoroutineScope) : ILogController {
     private companion object {
         const val TAG = "AppLogController"
         const val FETCH_SIZE = 500L
+        const val CRASH_BOUNDARY_TAG = "AppCrashLogBoundary"
     }
 }

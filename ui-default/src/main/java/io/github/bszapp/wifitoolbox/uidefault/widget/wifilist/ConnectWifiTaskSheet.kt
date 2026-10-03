@@ -52,9 +52,6 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskExecutionState
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogEntry
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -879,7 +876,7 @@ private fun ConnectWifiTaskLogContent(
                         },
                     ) { entry ->
                         Text(
-                            text = entry.displayText(),
+                            text = entry.text,
                             color =
                                 MiuixTheme.colorScheme.onSurface,
                             style = MiuixTheme.textStyles.body2,
@@ -1097,25 +1094,7 @@ private fun ConnectWifiTaskType.displayName(): String = when (this) {
     ConnectWifiTaskType.CONNECT_TO_NETWORK -> "连接到网络"
 }
 
-private fun TaskLogEntry.displayText(): String {
-    val timestamp = requireNotNull(
-        TASK_TIME_FORMAT.get(),
-    ).format(
-        Date(timestampMillis),
-    )
-
-    return "$timestamp  $text"
-}
-
 private const val PAGE_TRANSITION_DURATION_MILLIS = 320
 private const val EXPAND_DURATION_MILLIS = 240
 
 private val TASK_LOG_HEIGHT = 240.dp
-
-private val TASK_TIME_FORMAT =
-    object : ThreadLocal<SimpleDateFormat>() {
-        override fun initialValue() = SimpleDateFormat(
-            "MM-dd HH:mm:ss.SSS",
-            Locale.getDefault(),
-        )
-    }

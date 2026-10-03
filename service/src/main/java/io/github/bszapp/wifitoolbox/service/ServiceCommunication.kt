@@ -681,15 +681,20 @@ class ServiceCommunication(
         Thread({
             Log.d(TAG, "启动 Binder 投递器")
             try {
-                var deliveredInCurrentAppRun = false
+                var deliveredAppProcessId: Int? = null
                 while (true) {
-                    if (isTrustedAppProcessRunning()) {
-                        if (!deliveredInCurrentAppRun && tryPushBinder()) {
-                            Log.d(TAG, "Binder 已投递到应用进程")
-                            deliveredInCurrentAppRun = true
+                    try {
+                        val appProcessId = getTrustedAppProcessId()
+                        if (appProcessId == null) {
+                            deliveredAppProcessId = null
+                        } else if (appProcessId != deliveredAppProcessId && tryPushBinder()) {
+                            Log.d(TAG, "Binder 已投递到应用主进程 pid=$appProcessId")
+                            deliveredAppProcessId = appProcessId
                         }
-                    } else {
-                        deliveredInCurrentAppRun = false
+                    } catch (e: Exception) {
+                        // A provider can die between process lookup and delivery.
+                        // Keep watching so the replacement App receives the Binder.
+                        Log.w(TAG, "Binder 投递暂时失败，将重新检查应用主进程", e)
                     }
                     Thread.sleep(500L)
                 }
@@ -725,18 +730,20 @@ class ServiceCommunication(
     private fun isLocalCall(callingUid: Int, callingPid: Int): Boolean =
         callingUid == Process.myUid() && callingPid == Process.myPid()
 
-    private fun isTrustedAppProcessRunning(): Boolean {
+    private fun getTrustedAppProcessId(): Int? {
         val trustedUid = startupInfoProvider().trustedUid
         val am = activityManager()
         val list = systemApi("getRunningAppProcesses") {
             am::class.java.getMethod("getRunningAppProcesses").invoke(am)
         } as? List<*> ?: throw IllegalStateException("getRunningAppProcesses 返回类型不是 List")
 
-        return list.any { item ->
+        for (item in list) {
             val info = item as? ActivityManager.RunningAppProcessInfo
                 ?: throw IllegalStateException("getRunningAppProcesses 返回了非 RunningAppProcessInfo 项：$item")
-            info.uid == trustedUid
+            // Auxiliary processes share the App UID but do not host its Provider.
+            if (info.uid == trustedUid && info.processName == APP_PACKAGE) return info.pid
         }
+        return null
     }
 
     @SuppressLint("NewApi")

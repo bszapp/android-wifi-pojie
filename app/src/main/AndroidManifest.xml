@@ -25,6 +25,9 @@
         android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.WifiToolbox"
         tools:targetApi="33">
+        <!-- Optional vendor compute drivers for hashcat; absent drivers do not block installation. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libGLES_mali.so" android:required="false" />
         <activity
             android:name=".MainActivity"
             android:allowTaskReparenting="true"
@@ -38,10 +41,29 @@
             </intent-filter>
         </activity>
 
+        <!-- Foreground handoff for restarting only the App, not the privileged service. -->
+        <activity
+            android:name=".error.AppRestartActivity"
+            android:exported="false"
+            android:process=":app_restart"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <provider
             android:name=".launcher.ToolboxServiceProvider"
             android:authorities="io.github.bszapp.wifitoolbox.provider"
             android:exported="true" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/dictionary_paths" />
+        </provider>
 
         <!-- Shizuku -->
         <provider

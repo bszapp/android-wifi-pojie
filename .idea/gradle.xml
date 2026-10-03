@@ -12,6 +12,7 @@
             <option value="$PROJECT_DIR$/app" />
             <option value="$PROJECT_DIR$/contract" />
             <option value="$PROJECT_DIR$/service" />
+            <option value="$PROJECT_DIR$/scripta" />
             <option value="$PROJECT_DIR$/ui-default" />
           </set>
         </option>
