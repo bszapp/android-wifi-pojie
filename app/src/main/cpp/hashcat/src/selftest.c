@@ -418,7 +418,12 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
       if (hc_dev_memcpy_h2d (hashcat_ctx, device_param, device_param->d_buf[HC_DEV_BUF_HOOKS], 0, device_param->hooks_buf, device_param->size_hooks) == -1) return -1;
     }
 
-    const u32 loop_step = hashconfig->kernel_loops_min + ((hashconfig->kernel_loops_max - hashconfig->kernel_loops_min) / 32);
+    u32 loop_step = hashconfig->kernel_loops_min + ((hashconfig->kernel_loops_max - hashconfig->kernel_loops_min) / 32);
+
+    #if defined (WLANTOOL_ANDROID_HASHCAT)
+    // One self-test candidate needs fewer launches, with every PBKDF2 iteration still executed.
+    if (hashconfig->kern_type == 22000) loop_step = MAX (hashconfig->kernel_loops_min, MIN (hashconfig->kernel_loops_max, 256));
+    #endif
 
     const u32 salt_pos = 0;
 
@@ -658,29 +663,45 @@ static int selftest_run_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *d
       device_param->kernel_param.loop_pos = 0;
       device_param->kernel_param.loop_cnt = 1;
 
-      if (hashconfig->opts_type & OPTS_TYPE_AUX1)
+      #if defined (WLANTOOL_ANDROID_HASHCAT)
+      if (hashconfig->kern_type == 22000)
       {
-        if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX1, 0, 1, false, 0, false) == -1) return -1;
-      }
+        hashes_t st_hashes = *hashes;
 
-      if (hashconfig->opts_type & OPTS_TYPE_AUX2)
-      {
-        if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX2, 0, 1, false, 0, false) == -1) return -1;
-      }
+        st_hashes.salts_buf  = hashes->st_salts_buf;
+        st_hashes.esalts_buf = hashes->st_esalts_buf;
 
-      if (hashconfig->opts_type & OPTS_TYPE_AUX3)
-      {
-        if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX3, 0, 1, false, 0, false) == -1) return -1;
-      }
+        const u32 kernel = module_ctx->module_deep_comp_kernel (&st_hashes, 0, 0);
 
-      if (hashconfig->opts_type & OPTS_TYPE_AUX4)
-      {
-        if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX4, 0, 1, false, 0, false) == -1) return -1;
+        if (run_kernel (hashcat_ctx, device_param, kernel, 0, 1, false, 0, false) == -1) return -1;
       }
-
-      if (hashconfig->opts_type & OPTS_TYPE_AUX5)
+      else
+      #endif
       {
-        if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX5, 0, 1, false, 0, false) == -1) return -1;
+        if (hashconfig->opts_type & OPTS_TYPE_AUX1)
+        {
+          if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX1, 0, 1, false, 0, false) == -1) return -1;
+        }
+
+        if (hashconfig->opts_type & OPTS_TYPE_AUX2)
+        {
+          if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX2, 0, 1, false, 0, false) == -1) return -1;
+        }
+
+        if (hashconfig->opts_type & OPTS_TYPE_AUX3)
+        {
+          if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX3, 0, 1, false, 0, false) == -1) return -1;
+        }
+
+        if (hashconfig->opts_type & OPTS_TYPE_AUX4)
+        {
+          if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX4, 0, 1, false, 0, false) == -1) return -1;
+        }
+
+        if (hashconfig->opts_type & OPTS_TYPE_AUX5)
+        {
+          if (run_kernel (hashcat_ctx, device_param, KERN_RUN_AUX5, 0, 1, false, 0, false) == -1) return -1;
+        }
       }
     }
 

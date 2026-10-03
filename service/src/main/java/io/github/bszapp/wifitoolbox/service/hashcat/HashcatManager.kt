@@ -27,12 +27,17 @@ internal class HashcatManager(
         @Volatile var backedUp = false
         var endState: HashcatTaskState? = null
         var lastNotify = 0L
+        var notifyPending = false
     }
     private val lock = Any()
     private val records = linkedMapOf<String, Record>()
     private val workers = Executors.newCachedThreadPool { Thread(it, "hashcat-task").apply { isDaemon = true } }
-    private val callbacks = Executors.newSingleThreadExecutor { Thread(it, "hashcat-callback").apply { isDaemon = true } }
+    private val callbacks = Executors.newSingleThreadScheduledExecutor { Thread(it, "hashcat-callback").apply { isDaemon = true } }
     @Volatile private var callback: IHashcatCallback? = null
+    private val kernelCompiler = HashcatKernelCompiler(
+        onChanged = { callbacks.execute { runCatching { callback?.onHashcatKernelChanged() } } },
+        onError = onError,
+    )
     private var exiting = false
     private val memorySampler = Executors.newSingleThreadScheduledExecutor {
         Thread(it, "hashcat-memory").apply { isDaemon = true }
@@ -52,14 +57,19 @@ internal class HashcatManager(
     fun memory(): HashcatMemorySnapshot = latestMemory?.takeIf {
         System.currentTimeMillis() - it.capturedAt in 0..1500
     } ?: readMemory().also { latestMemory = it }
-    private fun readMemory(): HashcatMemorySnapshot = synchronized(lock) {
-        HashcatMemoryReader.read(records.values.filter { it.snapshot.active }.map { record ->
+    private fun readMemory(): HashcatMemorySnapshot {
+        val tasks = synchronized(lock) { records.values.filter { it.snapshot.active }.map { record ->
             val (pid, running) = record.controller.memoryProcess()
             HashcatMemoryReader.Task(record.snapshot.id, pid, record.snapshot.memoryLimitMiB, running)
-        })
+        } }
+        return HashcatMemoryReader.read(tasks)
     }
 
     fun activeCount(): Int = synchronized(lock) { records.values.count { it.snapshot.active } }
+    fun kernelStatus(hash: String) = kernelCompiler.snapshot(hash)
+    fun compileKernels(hash: String, program: ParcelFileDescriptor) {
+        synchronized(lock) { check(!exiting) { "服务正在退出" }; kernelCompiler.start(hash, program) }
+    }
     fun ids(offset: Int): Array<String> = synchronized(lock) {
         require(offset >= 0)
         records.keys.drop(offset).take(64).toTypedArray()
@@ -120,6 +130,7 @@ internal class HashcatManager(
         val all = synchronized(lock) { exiting = true; records.values.toList() }
         all.forEach(::requestPause)
         return try {
+            kernelCompiler.awaitCompletion()
             all.map { pause(it.snapshot.id) }.all { it }.also { if (!it) synchronized(lock) { exiting = false } }
         } catch (error: Throwable) {
             synchronized(lock) { exiting = false }
@@ -141,7 +152,7 @@ internal class HashcatManager(
     private fun execute(record: Record, resume: Boolean, input: ParcelFileDescriptor) {
         val dir = record.directory
         try {
-            val incoming = File(dir, ".inputs")
+            val incoming = dir
             input.use { fd ->
                 HashcatFiles.unpack(ParcelFileDescriptor.AutoCloseInputStream(fd), incoming) { name, copied, total ->
                     change(record) { copy(step = "接收 $name", stepCompleted = copied, stepTotal = total, stepUnit = "BYTES") }
@@ -150,10 +161,9 @@ internal class HashcatManager(
             val saved = HashcatTaskSnapshot.fromJson(JSONObject(File(incoming, "snapshot.json").readText()))
             require(saved.id == record.snapshot.id)
             change(record) { copy(createdAt = saved.createdAt, dictionaryNames = saved.dictionaryNames, findings = saved.findings,
+                computeDurationMillis = saved.computeDurationMillis, averageSpeed = saved.averageSpeed,
                 revision = maxOf(revision, saved.revision)) }
-            listOf("session.restore", "result.txt", "run.log").forEach { name ->
-                File(incoming, name).takeIf { it.isFile }?.copyTo(File(dir, name), overwrite = true)
-            }
+            val previousDuration = saved.computeDurationMillis
             val result = record.controller.run(HashcatRequest(
                 executable = File(incoming, "libhashcat.so"), handshakeFile = File(incoming, "handshake.hc22000"),
                 dictionaryFile = File(incoming, "dictionary.txt"), runtimeDirectory = dir,
@@ -185,13 +195,22 @@ internal class HashcatManager(
                         HashcatPhase.RUNNING -> "正在评估密码"
                     }, stepCompleted = ((event.percent ?: 0.0) * 100).toLong(), stepTotal = if (event.percent == null) 0 else 10000, stepUnit = "PERCENT") }
                     is HashcatEvent.Status -> change(record) { copy(
+                        step = if (event.snapshot.status == HashcatStatus.RUNNING && state == HashcatTaskState.RUNNING) "正在评估密码" else step,
                         completed = event.snapshot.progressCompleted, total = event.snapshot.progressTotal,
                         progressUnit = "CANDIDATES", remainingSeconds = event.snapshot.remainingSeconds,
                         speed = event.snapshot.devices.sumOf { it.hashesPerSecond },
                         devices = event.snapshot.devices.joinToString { it.name },
                         candidates = event.snapshot.devices.mapNotNull { it.candidateRange }.joinToString("\n"),
+                        stepCompleted = if (state == HashcatTaskState.RUNNING) event.snapshot.devices.sumOf { it.pbkdf2Completed } else stepCompleted,
+                        stepTotal = if (state == HashcatTaskState.RUNNING) event.snapshot.devices.sumOf { it.pbkdf2Total } else stepTotal,
+                        stepUnit = if (state == HashcatTaskState.RUNNING) "PBKDF2" else stepUnit,
+                        computeDurationMillis = previousDuration + event.snapshot.runningMillis,
+                        averageSpeed = if (previousDuration + event.snapshot.runningMillis > 0)
+                            ((event.snapshot.progressCompleted - event.snapshot.rejectedCandidates).coerceAtLeast(0).toDouble() * 1000 /
+                                (previousDuration + event.snapshot.runningMillis)).toLong() else 0,
                     ) }
                     is HashcatEvent.ParseError -> File(dir, "run.log").appendText("\n解析错误：${event.message}\n")
+                    is HashcatEvent.KernelStep, HashcatEvent.KernelReady -> Unit
                 }
             }
             val state = when {
@@ -263,13 +282,19 @@ internal class HashcatManager(
         notify(record, false)
     }
     private fun notify(record: Record, force: Boolean) {
-        val publish = synchronized(lock) {
+        synchronized(lock) {
             val now = android.os.SystemClock.elapsedRealtime()
-            if (!force && now - record.lastNotify < 100) false else { record.lastNotify = now; true }
-        }
-        if (publish) callbacks.execute {
-            runCatching { callback?.onHashcatChanged(record.snapshot.id) }
-            onActivityChanged()
+            if (record.notifyPending) return
+            record.notifyPending = true
+            val delay = if (force) 0 else (50 - (now - record.lastNotify)).coerceAtLeast(0)
+            callbacks.schedule({
+                synchronized(lock) {
+                    record.notifyPending = false
+                    record.lastNotify = android.os.SystemClock.elapsedRealtime()
+                }
+                runCatching { callback?.onHashcatChanged(record.snapshot.id) }
+                onActivityChanged()
+            }, delay, TimeUnit.MILLISECONDS)
         }
     }
     private fun tail(file: File): String = java.io.RandomAccessFile(file, "r").use {

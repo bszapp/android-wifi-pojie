@@ -4,6 +4,7 @@ import android.util.Log
 import android.os.Process as AndroidProcess
 import androidx.annotation.WorkerThread
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -14,6 +15,8 @@ class HashcatController : AutoCloseable {
         var process: Process? = null
         var stopRequested = false
         var checkpointSent = false
+        var readyForCheckpoint = false
+        var preparationCheckpoint = false
     }
 
     private val lock = Any()
@@ -48,9 +51,13 @@ class HashcatController : AutoCloseable {
             val output = File(runtime, "result.txt")
             val restoreFile = File(runtime, "session.restore")
             if (request.restore) relocateRestore(restoreFile, runtime)
+            // Only rebuildable compute kernels are shared. Task inputs/results remain in the UUID directory.
+            val cache = kernelCacheDirectory()
+            check(cache.isDirectory || cache.mkdirs()) { "无法创建 Hashcat 内核缓存：$cache" }
             val command = mutableListOf(
                 executable.path, "-m", "22000", "-a", "0", "-D", "2",
                 "--status", "--status-json", "--status-timer=1",
+                "--cache-path=${cache.path}",
                 "--potfile-disable", "--session=$session",
                 "--outfile=${output.path}", "--outfile-format=3",
             )
@@ -67,12 +74,16 @@ class HashcatController : AutoCloseable {
                 onEvent(HashcatEvent.Output("$message\n"))
             }
             val parser = HashcatOutputParser(onEvent = { event ->
+                if ((event is HashcatEvent.Phase && event.phase == HashcatPhase.RUNNING) ||
+                    (event is HashcatEvent.Status && event.snapshot.status == HashcatStatus.RUNNING)) {
+                    synchronized(lock) {
+                        run.readyForCheckpoint = true
+                        if (checkpointRequested && !run.checkpointSent && sendKey('c')) run.checkpointSent = true
+                    }
+                }
                 onEvent(event)
                 if (event is HashcatEvent.Status) {
                     val snapshot = event.snapshot
-                    if (snapshot.status == HashcatStatus.RUNNING) synchronized(lock) {
-                        if (checkpointRequested && !run.checkpointSent && sendKey('c')) run.checkpointSent = true
-                    }
                     snapshot.devices.forEach { device ->
                         report("当前尝试密码批次：${device.candidateRange ?: "等待候选数据"}；" +
                             "进度：${snapshot.progressCompleted}/${snapshot.progressTotal} " +
@@ -83,25 +94,35 @@ class HashcatController : AutoCloseable {
             })
             val process = synchronized(lock) {
                 if (run.stopRequested) return HashcatResult(-1, emptyList(), null, true)
+                if (request.runtimeDirectory != null && checkpointRequested) return HashcatResult(10, emptyList(), null, false)
                 Log.i(TAG, "启动 Hashcat：session=$session runtime=$runtime uid=${AndroidProcess.myUid()} GPU-only=true deviceMemoryLimitMiB=${request.deviceMemoryLimitMiB} driver=$driver")
                 ProcessBuilder(command).directory(runtime).redirectErrorStream(true).apply {
                     environment()["HASHCAT_HOME"] = runtime.path
+                    environment()["HASHCAT_RESOURCE_HOME"] = cache.path
+                    environment()["HASHCAT_STATUS_INTERVAL_MS"] = "100"
+                    environment()["HASHCAT_FAST_CHECKPOINT"] = "1"
+                    if (request.precompile) environment()["HASHCAT_PRECOMPILE"] = "1"
                     request.deviceMemoryLimitMiB?.let {
                         environment()["HASHCAT_DEVICE_MEM_LIMIT"] = it.toString()
                     }
                     driver?.let { environment()["HASHCAT_OPENCL_LIBRARY"] = it.path }
                 }.start().also { run.process = it }
             }
-            process.inputStream.reader(Charsets.UTF_8).use { reader ->
-                val buffer = CharArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val count = reader.read(buffer)
-                    if (count < 0) break
-                    parser.consume(String(buffer, 0, count))
+            try {
+                process.inputStream.reader(Charsets.UTF_8).use { reader ->
+                    val buffer = CharArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        parser.consume(String(buffer, 0, count))
+                    }
                 }
+            } catch (error: IOException) {
+                // Android destroy() closes the reader on the pause caller's thread.
+                if (!synchronized(lock) { run.preparationCheckpoint }) throw error
             }
             parser.finish()
-            val exitCode = process.waitFor()
+            val nativeExitCode = process.waitFor()
             val passwords = if (output.isFile) output.readLines(Charsets.UTF_8)
                 .filter(String::isNotEmpty).map(::decodeHexPassword) else emptyList()
             val firstLines = mutableMapOf<String, Long>()
@@ -122,7 +143,8 @@ class HashcatController : AutoCloseable {
                 }
             }
             val stopped = synchronized(lock) { run.stopRequested }
-            Log.i(TAG, "Hashcat 已退出：session=$session exitCode=$exitCode recovered=${passwords.size} stopRequested=$stopped")
+            val exitCode = if (nativeExitCode != 0 && nativeExitCode != 1 && synchronized(lock) { run.preparationCheckpoint }) 10 else nativeExitCode
+            Log.i(TAG, "Hashcat 已退出：session=$session exitCode=$exitCode nativeExitCode=$nativeExitCode recovered=${passwords.size} stopRequested=$stopped")
             return HashcatResult(exitCode, passwords, parser.lastStatus, stopped, firstLines)
         } finally {
             try {
@@ -163,9 +185,17 @@ class HashcatController : AutoCloseable {
     fun pause(): Boolean = sendKey('p')
     fun resume(): Boolean = sendKey('r')
 
-    /** 等下一恢复点写完后退出，RUNNING 状态到来时才发送 c，准备阶段也可排队请求。 */
+    /** 计算中在内核分段边界保存恢复点；准备阶段保留已有恢复点并结束子进程。 */
     fun checkpointAndStop() = synchronized(lock) {
         checkpointRequested = true
+        current?.let { run ->
+            if (run.readyForCheckpoint) {
+                if (!run.checkpointSent && sendKey('c')) run.checkpointSent = true
+            } else {
+                run.preparationCheckpoint = true
+                run.process?.destroy()
+            }
+        }
     }
 
     fun stop() = synchronized(lock) {
@@ -255,6 +285,8 @@ class HashcatController : AutoCloseable {
 
     companion object {
         private const val TAG = "HashcatController"
+
+        internal fun kernelCacheDirectory() = File(runtimeBaseDirectory(), "hashcat-cache-${AndroidProcess.myUid()}")
 
         /** system 使用 Android 系统应用的缓存，shell/root 使用设备 /tmp。 */
         internal fun runtimeBaseDirectory(): File = if (AndroidProcess.myUid() == 1000) {

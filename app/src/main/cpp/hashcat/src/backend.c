@@ -2485,6 +2485,27 @@ int choose_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, 
 
             pipe_acc (device_param, PIPE_LAUNCH, &timer_stage);
 
+            #if defined (WLANTOOL_ANDROID_HASHCAT)
+            if ((hashconfig->kern_type == 22000) && (is_autotune == false))
+            {
+              hc_thread_mutex_lock (status_ctx->mux_display);
+
+              device_param->android_loop_done = loop_pos + loop_left;
+              device_param->android_loop_total = iter;
+
+              hc_thread_mutex_unlock (status_ctx->mux_display);
+
+              if ((status_ctx->checkpoint_shutdown == true) && (getenv ("HASHCAT_FAST_CHECKPOINT") != NULL))
+              {
+                // Leave the incomplete batch uncommitted so restoring replays every untested word.
+                status_ctx->checkpoint_taken = true;
+                status_ctx->run_thread_level2 = false;
+
+                return 0;
+              }
+            }
+            #endif
+
             if (hashconfig->bridge_type & BRIDGE_TYPE_LAUNCH_LOOP)
             {
               // only let the bridge write the exec_msec ring when it replaced the loop kernel.
@@ -12922,7 +12943,14 @@ static bool load_kernel_program (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *
     {
       if (hc_clCreateProgramWithBinary (hashcat_ctx, device_param->opencl_context, 1, &device_param->opencl_device, kernel_lengths, (const unsigned char **) kernel_sources, NULL, &device_param->opencl_program[program]) == -1) return false;
 
-      if (hc_clBuildProgram (hashcat_ctx, device_param->opencl_program[program], 1, &device_param->opencl_device, build_options_buf, NULL, NULL) == -1) return false;
+      const char *binary_options = build_options_buf;
+
+      #if defined (WLANTOOL_ANDROID_HASHCAT)
+      // The cache key already includes the compiler options used for this executable binary.
+      binary_options = NULL;
+      #endif
+
+      if (hc_clBuildProgram (hashcat_ctx, device_param->opencl_program[program], 1, &device_param->opencl_device, binary_options, NULL, NULL) == -1) return false;
     }
   }
 
@@ -12931,6 +12959,87 @@ static bool load_kernel_program (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *
 
 // The source buffer is owned here rather than inside the function above. That function leaves by 36
 // different returns once it holds the buffer, so it has no single exit to free it on.
+
+#if defined (WLANTOOL_ANDROID_HASHCAT)
+static u32 android_aux_kernel_mask (hashcat_ctx_t *hashcat_ctx)
+{
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL) return 0x1f;
+  if (hashcat_ctx->user_options->attack_mode == ATTACK_MODE_ASSOCIATION) return 0x1f;
+
+  const hashes_t *hashes = hashcat_ctx->hashes;
+  const module_ctx_t *module_ctx = hashcat_ctx->module_ctx;
+
+  u32 mask = 0;
+
+  for (u32 salt = 0; salt < hashes->salts_cnt; salt++)
+  {
+    for (u32 digest = 0; digest < hashes->salts_buf[salt].digests_cnt; digest++)
+    {
+      const u32 kernel = module_ctx->module_deep_comp_kernel (hashes, salt, digest);
+
+      if ((kernel >= KERN_RUN_AUX1) && (kernel <= KERN_RUN_AUX5)) mask |= 1U << (kernel - KERN_RUN_AUX1);
+    }
+  }
+
+  if ((hashcat_ctx->user_options->self_test == true) && (hashes->st_esalts_buf != NULL))
+  {
+    hashes_t st_hashes = *hashes;
+
+    st_hashes.salts_buf  = hashes->st_salts_buf;
+    st_hashes.esalts_buf = hashes->st_esalts_buf;
+
+    const u32 kernel = module_ctx->module_deep_comp_kernel (&st_hashes, 0, 0);
+
+    if ((kernel >= KERN_RUN_AUX1) && (kernel <= KERN_RUN_AUX5)) mask |= 1U << (kernel - KERN_RUN_AUX1);
+  }
+
+  return mask;
+}
+
+static bool android_final_kernel_filename (hashcat_ctx_t *hashcat_ctx, const char *cached_file, const hc_dev_program_t program, char *final_file)
+{
+  // Keep the upstream device/driver/compiler key, plus the lazily compiled helper set.
+  if (strlen (cached_file) >= 230) return false;
+
+  const u32 mask = (program == HC_DEV_PROGRAM_MAIN) ? android_aux_kernel_mask (hashcat_ctx) : 0;
+
+  snprintf (final_file, 256, "%s.android-final-%02x", cached_file, mask);
+
+  return true;
+}
+
+static void android_finalize_kernel_cache (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const hc_dev_program_t program, const char *cached_file)
+{
+  char final_file[256] = { 0 };
+
+  if (android_final_kernel_filename (hashcat_ctx, cached_file, program, final_file) == false) return;
+
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|CACHE|%s|START", device_param->device_id + 1, final_file);
+
+  if (kernel_is_cached (final_file, false) == true)
+  {
+    if (getenv ("HASHCAT_PRECOMPILE") != NULL) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|CACHE|%s|DONE", device_param->device_id + 1, final_file);
+
+    return;
+  }
+
+  size_t binary_size = 0;
+
+  if (hc_clGetProgramInfo (hashcat_ctx, device_param->opencl_program[program], CL_PROGRAM_BINARY_SIZES, sizeof (size_t), &binary_size, NULL) == -1) return;
+  if (binary_size == 0) return;
+
+  char *binary = (char *) hcmalloc (binary_size);
+
+  if (hc_clGetProgramInfo (hashcat_ctx, device_param->opencl_program[program], CL_PROGRAM_BINARIES, sizeof (char *), &binary, NULL) == 0)
+  {
+    write_kernel_binary (hashcat_ctx, final_file, binary, binary_size);
+  }
+
+  hcfree (binary);
+
+  if ((getenv ("HASHCAT_PRECOMPILE") != NULL) && (kernel_is_cached (final_file, false) == true)) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|CACHE|%s|DONE", device_param->device_id + 1, final_file);
+}
+#endif
 
 static bool load_kernel_build (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const char *kernel_name, char *source_file, char *cached_file, const char *build_options_buf, const bool cache_disable, const hc_dev_program_t program)
 {
@@ -12942,7 +13051,39 @@ static bool load_kernel_build (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *de
 
   char **kernel_sources = &kernel_sources_buf;
 
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  hc_timer_t android_load_timer;
+
+  hc_timer_set (&android_load_timer);
+
+  char final_file[256] = { 0 };
+
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|PROGRAM|%s|START", device_param->device_id + 1, kernel_name);
+
+  if ((device_param->is_opencl == true) && (hashcat_ctx->hashconfig->kern_type == 22000) && (cache_disable == false))
+  {
+    if (android_final_kernel_filename (hashcat_ctx, cached_file, program, final_file) == true)
+    {
+      if (program == HC_DEV_PROGRAM_MAIN)
+      {
+        char full_file[256] = { 0 };
+
+        snprintf (full_file, sizeof (full_file), "%s.android-final-1f", cached_file);
+
+        if (kernel_is_cached (full_file, false) == true) snprintf (final_file, sizeof (final_file), "%s", full_file);
+      }
+
+      if (kernel_is_cached (final_file, false) == true) cached_file = final_file;
+    }
+  }
+  #endif
+
   const bool rc = load_kernel_program (hashcat_ctx, device_param, kernel_name, source_file, cached_file, build_options_buf, cache_disable, program, kernel_lengths, kernel_sources);
+
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  if (getenv ("HASHCAT_STAGE_TIMINGS") != NULL) event_log_info (hashcat_ctx, "Android kernel program %s: %.3f ms", kernel_name, hc_timer_get (android_load_timer));
+  if ((getenv ("HASHCAT_PRECOMPILE") != NULL) && (rc == true)) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|PROGRAM|%s|DONE", device_param->device_id + 1, kernel_name);
+  #endif
 
   hcfree (kernel_sources[0]);
 
@@ -12995,6 +13136,13 @@ static bool load_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_p
 
 static int backend_session_setup_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param, const hc_dev_kern_t slot, const hc_dev_program_t program, const char *kernel_name)
 {
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  hc_timer_t android_kernel_timer;
+
+  hc_timer_set (&android_kernel_timer);
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|KERNEL|%s|START", device_param->device_id + 1, kernel_name);
+  #endif
+
   if (device_param->is_cuda == true)
   {
     if (hc_cuModuleGetFunction (hashcat_ctx, &device_param->cuda_function[slot], device_param->cuda_module[program], kernel_name) == -1)
@@ -13079,6 +13227,11 @@ static int backend_session_setup_kernel (hashcat_ctx_t *hashcat_ctx, hc_device_p
     if (get_opencl_kernel_preferred_wgs_multiple (hashcat_ctx, device_param, device_param->opencl_kernel[slot], &device_param->kernel_preferred_wgs_multiple[slot]) == -1) return -1;
   }
 
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  if (getenv ("HASHCAT_STAGE_TIMINGS") != NULL) event_log_info (hashcat_ctx, "Android kernel handle %s: %.3f ms", kernel_name, hc_timer_get (android_kernel_timer));
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL) event_log_info (hashcat_ctx, "Hashcat kernel step: %u|KERNEL|%s|DONE", device_param->device_id + 1, kernel_name);
+  #endif
+
   return 0;
 }
 
@@ -13114,6 +13267,12 @@ static int backend_session_setup_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_de
 {
   const hashconfig_t   *hashconfig   = hashcat_ctx->hashconfig;
   const user_options_t *user_options = hashcat_ctx->user_options;
+
+  u32 aux_mask = 0x1f;
+
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  if (kern_type == 22000) aux_mask = android_aux_kernel_mask (hashcat_ctx);
+  #endif
 
   if (device_param->is_opencl == true)
   {
@@ -13299,7 +13458,7 @@ static int backend_session_setup_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_de
 
     // aux1
 
-    if (hashconfig->opts_type & OPTS_TYPE_AUX1)
+    if ((hashconfig->opts_type & OPTS_TYPE_AUX1) && (aux_mask & (1U << 0)))
     {
       snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux1", kern_type);
 
@@ -13308,7 +13467,7 @@ static int backend_session_setup_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_de
 
     // aux2
 
-    if (hashconfig->opts_type & OPTS_TYPE_AUX2)
+    if ((hashconfig->opts_type & OPTS_TYPE_AUX2) && (aux_mask & (1U << 1)))
     {
       snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux2", kern_type);
 
@@ -13317,7 +13476,7 @@ static int backend_session_setup_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_de
 
     // aux3
 
-    if (hashconfig->opts_type & OPTS_TYPE_AUX3)
+    if ((hashconfig->opts_type & OPTS_TYPE_AUX3) && (aux_mask & (1U << 2)))
     {
       snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux3", kern_type);
 
@@ -13326,7 +13485,7 @@ static int backend_session_setup_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_de
 
     // aux4
 
-    if (hashconfig->opts_type & OPTS_TYPE_AUX4)
+    if ((hashconfig->opts_type & OPTS_TYPE_AUX4) && (aux_mask & (1U << 3)))
     {
       snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux4", kern_type);
 
@@ -13335,7 +13494,7 @@ static int backend_session_setup_kernel_types (hashcat_ctx_t *hashcat_ctx, hc_de
 
     // aux5
 
-    if (hashconfig->opts_type & OPTS_TYPE_AUX5)
+    if ((hashconfig->opts_type & OPTS_TYPE_AUX5) && (aux_mask & (1U << 4)))
     {
       snprintf (kernel_name, sizeof (kernel_name), "m%05u_aux5", kern_type);
 
@@ -13907,6 +14066,12 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
     }
 
     EVENT_DATA (EVENT_BACKEND_DEVICE_INIT_PRE, &backend_devices_idx, sizeof (int));
+
+    #if defined (WLANTOOL_ANDROID_HASHCAT)
+    hc_timer_t android_setup_timer;
+
+    hc_timer_set (&android_setup_timer);
+    #endif
 
     const int device_id = device_param->device_id;
 
@@ -15820,6 +15985,10 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
     const int rc = backend_session_setup_kernel_types (hashcat_ctx, device_param, kern_type);
 
+    #if defined (WLANTOOL_ANDROID_HASHCAT)
+    if (getenv ("HASHCAT_STAGE_TIMINGS") != NULL) event_log_info (hashcat_ctx, "Android kernel setup and fixed buffers: %.3f ms", hc_timer_get (android_setup_timer));
+    #endif
+
     if (rc == -2)
     {
       backend_kernel_create_warnings++;
@@ -15828,6 +15997,34 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
     }
 
     if (rc == -1) return -1;
+
+    #if defined (WLANTOOL_ANDROID_HASHCAT)
+    if ((kern_type == 22000) && (device_param->is_opencl == true))
+    {
+      char cached_file[256] = { 0 };
+
+      if (cache_disable == false)
+      {
+        generate_cached_kernel_shared_filename (folder_config->cache_dir, device_param->opencl_chksum_amp_mp, cached_file, false);
+
+        android_finalize_kernel_cache (hashcat_ctx, device_param, HC_DEV_PROGRAM_SHARED, cached_file);
+
+        if (device_param->opencl_program[HC_DEV_PROGRAM_AMP] != NULL)
+        {
+          generate_cached_kernel_amp_filename (user_options_extra->attack_kern, folder_config->cache_dir, device_param->opencl_chksum_amp_mp, cached_file, false);
+
+          android_finalize_kernel_cache (hashcat_ctx, device_param, HC_DEV_PROGRAM_AMP, cached_file);
+        }
+      }
+
+      if (cache_disable_main == false)
+      {
+        generate_cached_kernel_filename (user_options->slow_candidates, hashconfig->attack_exec, user_options_extra->attack_kern, kern_type, hashconfig->opti_type, folder_config->cache_dir, device_param->opencl_chksum, cached_file, false);
+
+        android_finalize_kernel_cache (hashcat_ctx, device_param, HC_DEV_PROGRAM_MAIN, cached_file);
+      }
+    }
+    #endif
 
     // Everything below is the same work on every backend. The three argument binds are not: OpenCL
     // binds them to the kernel object once, where the other three pass them at launch.
@@ -16149,6 +16346,18 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
 
     u32 kernel_accel_min = device_param->kernel_accel_min;
     u32 kernel_accel_max = device_param->kernel_accel_max;
+
+    #if defined (WLANTOOL_ANDROID_HASHCAT)
+    const generic_ctx_t *android_feed = hashcat_ctx->generic_ctx + GENERIC_ROLE_BASE;
+
+    if ((hashconfig->kern_type == 22000) && (user_options_extra->attack_kern == ATTACK_KERN_STRAIGHT) && (android_feed->enabled == true) && (android_feed->keyspace > 0) && (android_feed->keyspace < GENERIC_KEYSPACE_ERROR) && (user_options->kernel_accel_chgd == false))
+    {
+      const u64 power = (u64) MAX (1, device_param->device_processors) * MAX (1, kernel_threads_max);
+      const u64 needed = MAX ((u64) kernel_accel_min, CEILDIV (android_feed->keyspace, power));
+
+      kernel_accel_max = (u32) MIN ((u64) kernel_accel_max, needed);
+    }
+    #endif
 
     // check if there's enough host memory left for upcoming allocations, otherwise reduce skip device and present user an option to deal with
 
@@ -17042,6 +17251,10 @@ int backend_session_begin (hashcat_ctx_t *hashcat_ctx)
     }
 
     hardware_power_all += hardware_power_max;
+
+    #if defined (WLANTOOL_ANDROID_HASHCAT)
+    if (getenv ("HASHCAT_STAGE_TIMINGS") != NULL) event_log_info (hashcat_ctx, "Android device setup total: %.3f ms", hc_timer_get (android_setup_timer));
+    #endif
 
     EVENT_DATA (EVENT_BACKEND_DEVICE_INIT_POST, &backend_devices_idx, sizeof (int));
   }

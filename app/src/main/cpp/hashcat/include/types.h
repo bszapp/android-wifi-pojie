@@ -1515,6 +1515,7 @@ typedef struct pw_batch
   u32      *pws_comp;
   u64       pws_cnt;
 
+
   // The device engine's cells, one per candidate in this batch. They belong to the batch for the same
   // reason the candidates do: the next batch is built while this one runs.
 
@@ -1928,6 +1929,14 @@ typedef struct hc_device_param
   u64       pws_cnt;
 
   pw_batch_t pws_slot[PW_PIPE_SLOTS];
+
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  pw_t      android_candidate_first;
+  pw_t      android_candidate_last;
+  bool      android_candidates_valid;
+  u32       android_loop_done;
+  u32       android_loop_total;
+  #endif
 
   pw_pre_t *pws_pre_buf;  // for slow candidates
   u64       pws_pre_cnt;

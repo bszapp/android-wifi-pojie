@@ -1659,6 +1659,10 @@ static int outer_loop (hashcat_ctx_t *hashcat_ctx, const int iteration)
 
   EVENT (EVENT_BACKEND_SESSION_POST);
 
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL) event_log_info (hashcat_ctx, "Hashcat kernel step: 0|SELFTEST|GPU self-test|START");
+  #endif
+
   /**
    * create self-test threads
    */
@@ -1727,6 +1731,23 @@ static int outer_loop (hashcat_ctx_t *hashcat_ctx, const int iteration)
 
     EVENT (EVENT_SELFTEST_FINISHED);
   }
+
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  if (getenv ("HASHCAT_PRECOMPILE") != NULL)
+  {
+    event_log_info (hashcat_ctx, "Hashcat kernel step: 0|SELFTEST|GPU self-test|DONE");
+
+    backend_session_destroy (hashcat_ctx);
+
+    outer_loop_destroy (hashcat_ctx);
+
+    status_ctx->devices_status = STATUS_EXHAUSTED;
+
+    event_log_info (hashcat_ctx, "Hashcat kernel preparation complete");
+
+    return 0;
+  }
+  #endif
 
   /**
    * (old) weak hash check is the first to write to potfile, so open it for writing from here

@@ -25,6 +25,7 @@ object HashcatFiles {
 
     fun pack(output: OutputStream, files: Map<String, File>) {
         ZipOutputStream(output).use { zip ->
+            zip.setLevel(java.util.zip.Deflater.NO_COMPRESSION)
             files.forEach { (name, file) ->
                 require(name in allowed)
                 if (file.isFile) {

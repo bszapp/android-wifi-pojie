@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -74,6 +75,8 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
+import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -87,6 +90,7 @@ private enum class DeviceSheetPage {
 private enum class Hc22000Action {
     SAVE,
     COPY,
+    RUN,
 }
 
 internal enum class MonitorHandshakeAction {
@@ -112,6 +116,7 @@ internal fun MonitorDeviceDetailSheet(
     onInitialActionFinished: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val navigator = LocalNavigator.current
     val clipboardManager = LocalClipboardManager.current
     val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val expandedGroups = remember(accessPoint.bssid, device.mac) {
@@ -387,6 +392,13 @@ internal fun MonitorDeviceDetailSheet(
                                     tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
                                 )
                             }
+                            IconButton(onClick = {
+                                hc22000ActionConsent = false
+                                hc22000Action = Hc22000Action.RUN
+                            }) {
+                                Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = "运行 WPA Hashcat",
+                                    modifier = Modifier.size(22.dp), tint = MiuixTheme.colorScheme.onSurfaceVariantActions)
+                            }
                         }
                     }
                     TextField(
@@ -433,8 +445,8 @@ internal fun MonitorDeviceDetailSheet(
     }
     OverlayDialog(
         show = hc22000ActionTarget != null,
-        title = if (hc22000Action == Hc22000Action.SAVE) "确认保存" else "确认复制",
-        summary = "将要${if (hc22000Action == Hc22000Action.SAVE) "保存" else "复制"}" +
+        title = when (hc22000Action) { Hc22000Action.SAVE -> "确认保存"; Hc22000Action.RUN -> "确认运行"; else -> "确认复制" },
+        summary = "将要${when (hc22000Action) { Hc22000Action.SAVE -> "保存"; Hc22000Action.RUN -> "使用 WPA Hashcat 运行"; else -> "复制" }}" +
             "此握手包的校验hc22000格式文本，此文本可用于校验密码hash是否正确。",
         onDismissRequest = {
             hc22000Action = null
@@ -482,7 +494,7 @@ internal fun MonitorDeviceDetailSheet(
                         )
                         Spacer(Modifier.width(20.dp))
                         TextButton(
-                            text = if (hc22000Action == Hc22000Action.SAVE) "保存" else "复制",
+                            text = when (hc22000Action) { Hc22000Action.SAVE -> "保存"; Hc22000Action.RUN -> "继续"; else -> "复制" },
                             enabled = hc22000ActionConsent,
                             onClick = {
                                 val hc22000 = hc22000ActionTarget.hc22000.orEmpty()
@@ -491,6 +503,12 @@ internal fun MonitorDeviceDetailSheet(
                                         hc22000,
                                         "${hc22000ActionTarget.startUnixMillis}.hc22000",
                                     )
+                                } else if (hc22000Action == Hc22000Action.RUN) {
+                                    handshakeTestTarget = null
+                                    handshakeTestPassword = ""
+                                    if (initialHandshakeAction != null) onInitialActionFinished()
+                                    onDismiss()
+                                    navigator.push(Route.HashcatRun(hc22000))
                                 } else {
                                     clipboardManager.setText(AnnotatedString(hc22000))
                                     Toast.makeText(

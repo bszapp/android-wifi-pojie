@@ -91,6 +91,7 @@ object HashcatDeviceTest {
                         }
                     }
                     is HashcatEvent.ParseError -> error("解析失败：$event")
+                    is HashcatEvent.KernelStep, HashcatEvent.KernelReady -> Unit
                 }
             }
         }
@@ -139,10 +140,10 @@ object HashcatDeviceTest {
         println("PASS: real GPU verification, status/progress/ETA/device parsing, fragmented output sizes 1..17, copy/cleanup steps, input originals preserved")
     }
 
-    private data class Fixture(val hash: String, val ssid: String, val password: String, val candidates: List<String>)
+    internal data class Fixture(val hash: String, val ssid: String, val password: String, val candidates: List<String>)
 
     /** Generates M1/M2 verification material using JCE, independently from Hashcat's OpenCL kernel. */
-    private fun randomHandshake(candidateCount: Int): Fixture {
+    internal fun randomHandshake(candidateCount: Int): Fixture {
         val random = SecureRandom()
         fun bytes(size: Int) = ByteArray(size).also(random::nextBytes)
         fun password() = buildString {

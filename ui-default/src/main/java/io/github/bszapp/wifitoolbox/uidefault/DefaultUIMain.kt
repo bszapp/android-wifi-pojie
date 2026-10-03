@@ -141,6 +141,8 @@ fun DefaultUI(
                                 )
                             }
                             entry<Route.WpaHashcat> { io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(snackbarHostState = snackbarHostState) }
+                            entry<Route.HashcatRun> { route -> io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(
+                                snackbarHostState = snackbarHostState, initialHandshake = route.handshake) }
                         },
                     )
 

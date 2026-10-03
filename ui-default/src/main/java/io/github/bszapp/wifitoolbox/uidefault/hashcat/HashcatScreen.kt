@@ -27,6 +27,9 @@ import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskState
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatMemorySnapshot
 import io.github.bszapp.wifitoolbox.contract.hashcat.HASHCAT_MIB
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelSnapshot
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelState
+import kotlinx.coroutines.delay
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import top.yukonga.miuix.kmp.basic.*
@@ -36,12 +39,14 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewModel = viewModel()) {
+fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewModel = viewModel(), initialHandshake: String? = null) {
     val tasks by viewModel.history.collectAsStateWithLifecycle()
     val connected by viewModel.connected.collectAsStateWithLifecycle()
     val sheet by viewModel.sheet.collectAsStateWithLifecycle()
     val dictionaries by viewModel.dictionaries.collectAsStateWithLifecycle()
     val memory by viewModel.memory.collectAsStateWithLifecycle()
+    val kernels by viewModel.kernels.collectAsStateWithLifecycle()
+    LaunchedEffect(initialHandshake) { initialHandshake?.let(viewModel::openIncoming) }
     val navigator = LocalNavigator.current
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val sheetHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
@@ -66,7 +71,7 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!connected) item { Text("服务未连接，历史记录仍可查看", style = MiuixTheme.textStyles.body2) }
-                item { MemoryPanel(memory) }
+                if (tasks.any { it.active }) item { MemoryPanel(memory) }
                 if (tasks.isEmpty()) item { Text("暂无 WPA 字典安全评估任务") }
                 items(tasks, key = { it.id }) { task ->
                     Card(Modifier.fillMaxWidth().clickable { viewModel.inspect(task.id) }) {
@@ -74,14 +79,16 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                             Text("WPA Hashcat · ${task.state.label()}", style = MiuixTheme.textStyles.subtitle)
                             Text(formatDate(task.createdAt), style = MiuixTheme.textStyles.body2)
                             Text(task.dictionaryNames.joinToString("、"), style = MiuixTheme.textStyles.body2)
-                            task.memoryLimitMiB?.let { Text("计算内存预算：$it MiB", style = MiuixTheme.textStyles.body2) }
-                            Progress(task)
+                            if (task.evaluationFinished()) Assessment(task) else {
+                                task.memoryLimitMiB?.let { Text("计算内存预算：$it MiB", style = MiuixTheme.textStyles.body2) }
+                                Progress(task)
+                            }
                             if (task.state == HashcatTaskState.SUCCEEDED) Text("已成功发现密码，点击查看详情", color = MiuixTheme.colorScheme.primary)
                         }
                     }
                 }
             }
-            FloatingActionButton(onClick = viewModel::open, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = safeBottom + 16.dp)) {
+            FloatingActionButton(onClick = { viewModel.open() }, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = safeBottom + 16.dp)) {
                 Icon(Icons.Filled.PlayArrow, contentDescription = "运行", tint = MiuixTheme.colorScheme.onPrimary)
             }
         }
@@ -98,6 +105,24 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 when (sheet.page) {
+                    HashcatSheetPage.PREPARATION -> {
+                        if (kernels?.state == HashcatKernelState.COMPILING) item { KernelProgress(kernels!!) }
+                        else {
+                            item { Text(if (sheet.busy) "加载中" else "内核暂未编译", style = MiuixTheme.textStyles.subtitle) }
+                            item { Text("此功能仅供恢复密码以及检验授权网络的安全性使用。破解未经授权网络密码属于违法行为。",
+                                style = MiuixTheme.textStyles.body2) }
+                            item {
+                                Row(Modifier.fillMaxWidth().clickable { viewModel.agree(!sheet.agreed) }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(state = if (sheet.agreed) ToggleableState.On else ToggleableState.Off,
+                                        onClick = { viewModel.agree(!sheet.agreed) })
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("已阅读并同意", style = MiuixTheme.textStyles.body2)
+                                }
+                            }
+                            kernels?.error?.let { error -> item { Text(error, style = MiuixTheme.textStyles.body2) } }
+                        }
+                    }
                     HashcatSheetPage.INPUT -> {
                         item { Text("选择 hc22000 文件，或直接粘贴握手包的 hc22000 文本。", style = MiuixTheme.textStyles.body2) }
                         item { TextButton("选择 hc22000 文件", onClick = { pickFile.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) }
@@ -121,8 +146,8 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                         if (task == null) item { Text("加载中") }
                         else {
                             item { Text(task.state.label(), style = MiuixTheme.textStyles.subtitle) }
-                            item { Progress(task) }
-                            item {
+                            item { if (task.evaluationFinished()) Assessment(task) else Progress(task) }
+                            if (!task.evaluationFinished()) item {
                                 val editable = task.state == HashcatTaskState.RUNNING || task.state == HashcatTaskState.PAUSED
                                 MemoryPanel(memory, taskId = task.id, selectedMiB = sheet.memoryLimitMiB ?: task.memoryLimitMiB,
                                     onSelect = if (editable) viewModel::allocateMemory else null, enabled = connected && !sheet.busy)
@@ -153,6 +178,9 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                     onClick = { if (sheet.page == HashcatSheetPage.DICTIONARIES) viewModel.previous() else viewModel.dismiss() },
                     modifier = Modifier.weight(1f), enabled = !sheet.busy)
                 when (sheet.page) {
+                    HashcatSheetPage.PREPARATION -> if (kernels?.state != HashcatKernelState.COMPILING) TextButton(
+                        "继续", onClick = viewModel::compileKernels, enabled = connected && sheet.agreed && !sheet.busy,
+                        modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
                     HashcatSheetPage.INPUT -> TextButton("下一步", onClick = viewModel::next, enabled = !sheet.busy,
                         modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
                     HashcatSheetPage.DICTIONARIES -> TextButton(if (sheet.busy) "准备中" else "运行", onClick = viewModel::run,
@@ -168,6 +196,34 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
             Spacer(Modifier.height(safeBottom))
         }
     }
+}
+
+@Composable
+private fun KernelProgress(snapshot: HashcatKernelSnapshot) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(snapshot.state) {
+        while (snapshot.state == HashcatKernelState.COMPILING) { now = System.currentTimeMillis(); delay(200) }
+    }
+    Text("正在编译内核", style = MiuixTheme.textStyles.subtitle)
+    Text("正在为当前设备编译Hashcat内核，可能需要数十秒", style = MiuixTheme.textStyles.body2)
+    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    Text(snapshot.stage, style = MiuixTheme.textStyles.body2)
+    Text("已完成 ${snapshot.steps.count { it.finishedAt != null }} 个步骤", style = MiuixTheme.textStyles.body2)
+    snapshot.steps.forEach { step ->
+        val elapsed = ((step.finishedAt ?: now) - step.startedAt).coerceAtLeast(0) / 1000.0
+        Text("${if (step.finishedAt == null) "进行中" else "已完成"} · ${step.label} · ${String.format(Locale.ROOT, "%.1f", elapsed)}秒",
+            style = MiuixTheme.textStyles.footnote1)
+    }
+}
+
+private fun HashcatTaskSnapshot.evaluationFinished() = state == HashcatTaskState.SUCCEEDED || state == HashcatTaskState.EXHAUSTED
+
+@Composable
+private fun Assessment(task: HashcatTaskSnapshot) {
+    Text(if (task.state == HashcatTaskState.SUCCEEDED) "已成功发现密码" else "给定字典未发现密码", style = MiuixTheme.textStyles.body2)
+    Text("计算耗时：${if (task.computeDurationMillis > 0) String.format(Locale.ROOT, "%.2f秒", task.computeDurationMillis / 1000.0) else "未记录"}", style = MiuixTheme.textStyles.body2)
+    Text("平均校验速度：${if (task.computeDurationMillis > 0) "${task.averageSpeed} H/s" else "未记录"}", style = MiuixTheme.textStyles.body2)
+    Text("已评估：${task.completed}/${task.total}", style = MiuixTheme.textStyles.body2)
 }
 
 /** 下方宽条显示实测 RAM；上方虚线显示预算预览，滑动不会改变实际占用数字。 */
@@ -262,7 +318,8 @@ private fun memorySize(bytes: Long): String {
 private fun Progress(task: HashcatTaskSnapshot) {
     Text(task.step, style = MiuixTheme.textStyles.body2)
     if (task.stepTotal > 0) {
-        Text("步骤进度：${task.stepCompleted}/${task.stepTotal}${if (task.stepUnit == "BYTES") " B" else ""}", style = MiuixTheme.textStyles.body2)
+        val label = if (task.stepUnit == "PBKDF2") "当前批次 PBKDF2 计算进度" else "步骤进度"
+        Text("$label：${task.stepCompleted}/${task.stepTotal}${if (task.stepUnit == "BYTES") " B" else ""}", style = MiuixTheme.textStyles.body2)
         LinearProgressIndicator(progress = (task.stepCompleted.toFloat() / task.stepTotal).coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
     } else if (task.active && task.total == 0L) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
     if (task.total > 0) {

@@ -96,6 +96,8 @@ interface IMainService {
     void registerHashcatCallback(IHashcatCallback cb);
     void unregisterHashcatCallback(IHashcatCallback cb);
     boolean prepareHashcatShutdown();
+    ParcelFileDescriptor getHashcatKernelStatus(String programHash);
+    void compileHashcatKernels(String programHash, in ParcelFileDescriptor program);
 
     ParcelFileDescriptor getWifiStateChunk(IMainServiceCallback cb, long generation, int chunkIndex);
     ParcelFileDescriptor getSavedWifiListChunk(IMainServiceCallback cb, long generation, int chunkIndex);

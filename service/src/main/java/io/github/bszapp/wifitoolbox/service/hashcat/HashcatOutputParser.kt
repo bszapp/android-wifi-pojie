@@ -9,6 +9,7 @@ class HashcatOutputParser(
 ) {
     private val pending = StringBuilder()
     private var scannedUntil = 0
+    private var runningPublished = false
     var lastStatus: HashcatStatusSnapshot? = null
         private set
 
@@ -55,11 +56,24 @@ class HashcatOutputParser(
             }
             val percent = indexPercent.find(detail)?.groupValues?.get(1)?.toDoubleOrNull()
             scannedUntil = match.range.last + 1
+            if (phase == HashcatPhase.RUNNING) {
+                if (runningPublished) return@forEach
+                runningPublished = true
+            }
             onEvent(HashcatEvent.Phase(phase, detail, percent))
         }
     }
 
     private fun parseLine(line: String) {
+        kernelStep.find(line)?.let { match ->
+            onEvent(HashcatEvent.KernelStep(match.groupValues[1].toInt(), match.groupValues[2],
+                match.groupValues[3], match.groupValues[4] == "DONE"))
+            return
+        }
+        if (line.trim() == "Hashcat kernel preparation complete") {
+            onEvent(HashcatEvent.KernelReady)
+            return
+        }
         // The upstream may concatenate a final non-newline diagnostic and the JSON record.
         val start = line.indexOf('{')
         if (start < 0) return
@@ -91,6 +105,7 @@ class HashcatOutputParser(
                 dictionary = if (guess.isNull("guess_base")) null else guess.getString("guess_base"),
                 dictionaryPercent = guess.optDouble("guess_base_percent", Double.NaN)
                     .takeIf { it.isFinite() },
+                runningMillis = json.optLong("running_millis", 0),
                 devices = List(devices.length()) { index ->
                     val device = devices.getJSONObject(index)
                     HashcatDeviceStatus(
@@ -103,13 +118,12 @@ class HashcatOutputParser(
                         candidateRange = if (!device.has("candidates") || device.isNull("candidates")) {
                             null
                         } else device.getString("candidates"),
+                        pbkdf2Completed = device.optLong("pbkdf2_completed", 0),
+                        pbkdf2Total = device.optLong("pbkdf2_total", 0),
                     )
                 },
             )
             lastStatus = snapshot
-            if (snapshot.status == HashcatStatus.RUNNING) {
-                onEvent(HashcatEvent.Phase(HashcatPhase.RUNNING, jsonText))
-            }
             onEvent(HashcatEvent.Status(snapshot))
         } catch (error: Exception) {
             onEvent(HashcatEvent.ParseError(jsonText, error.message ?: error.javaClass.simpleName))
@@ -117,6 +131,7 @@ class HashcatOutputParser(
     }
 
     private companion object {
+        val kernelStep = Regex("Hashcat kernel step: ([0-9]+)\\|([A-Z]+)\\|([^|\\r\\n]+)\\|(START|DONE)")
         val indexPercent = Regex("\\(([0-9.]+)%\\)")
         val phasePattern = Regex(
             "Initializing backend runtimes\\. Please be patient\\.\\.\\.|" +

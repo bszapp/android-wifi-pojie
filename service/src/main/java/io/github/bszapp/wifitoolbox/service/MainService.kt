@@ -616,6 +616,15 @@ open class MainService(
     }
     override fun pauseHashcat(taskId: String): Boolean = communication.callFromApp { hashcatManager.pause(taskId) }
     override fun prepareHashcatShutdown(): Boolean = communication.callFromApp { hashcatManager.prepareShutdown() }
+    override fun getHashcatKernelStatus(programHash: String): ParcelFileDescriptor = communication.callFromApp {
+        val snapshot = hashcatManager.kernelStatus(programHash)
+        io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFiles.pipe { out ->
+            out.writer(Charsets.UTF_8).use { it.write(snapshot.toJson().toString()) }
+        }
+    }
+    override fun compileHashcatKernels(programHash: String, program: ParcelFileDescriptor) = communication.callFromApp {
+        program.use { hashcatManager.compileKernels(programHash, it) }
+    }
     override fun getHashcatTask(taskId: String): ParcelFileDescriptor = communication.callFromApp {
         val snapshot = hashcatManager.snapshot(taskId)
         io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFiles.pipe { out ->

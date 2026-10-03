@@ -3567,6 +3567,13 @@ void status_display_status_json (hashcat_ctx_t *hashcat_ctx)
 
       printf (" \"speed\": %" PRIu64 ",", (u64) (device_info->hashes_msec_dev * 1000));
 
+      #if defined (WLANTOOL_ANDROID_HASHCAT)
+      const hc_device_param_t *android_device = hashcat_ctx->backend_ctx->devices_param + device_id;
+
+      printf (" \"pbkdf2_completed\": %u,", android_device->android_loop_done);
+      printf (" \"pbkdf2_total\": %u,", android_device->android_loop_total);
+      #endif
+
       if (device_info->guess_candidates_dev)
       {
         char *candidates_json_encoded = (char *) hcmalloc (strlen (device_info->guess_candidates_dev) * 6 + 1);
@@ -3599,6 +3606,9 @@ void status_display_status_json (hashcat_ctx_t *hashcat_ctx)
 
   printf (" ],");
   printf (" \"time_start\": %" PRIu64 ",", (u64) status_ctx->runtime_start);
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  printf (" \"running_millis\": %" PRIu64 ",", (u64) hashcat_status->msec_real);
+  #endif
   printf (" \"estimated_stop\": %" PRIu64 " }", (u64) end);
 
   fwrite (EOL, strlen (EOL), 1, stdout);

@@ -132,16 +132,53 @@ static int monitor (hashcat_ctx_t *hashcat_ctx)
   u32 remove_left   = user_options->remove_timer;
   u32 status_left   = user_options->status_timer;
 
+  u32 status_interval_ms = 0;
+
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  const char *interval = getenv ("HASHCAT_STATUS_INTERVAL_MS");
+
+  if (interval != NULL)
+  {
+    const int value = atoi (interval);
+
+    if ((value >= 50) && (value <= 1000)) status_interval_ms = (u32) value;
+  }
+  #endif
+
+  hc_timer_t status_timer;
+
+  hc_timer_set (&status_timer);
+
   while (status_ctx->shutdown_inner == false)
   {
-    // the loop body below counts iterations as seconds, so the cadence stays one second. Only the
-    // waiting is broken up, so a quit is noticed in 100ms instead of up to a full second.
+    // Status sampling must not stretch the second used by the maintenance counters below.
 
-    for (u32 slice = 0; slice < sleep_time * 10; slice++)
+    hc_timer_t maintenance_timer;
+
+    hc_timer_set (&maintenance_timer);
+
+    while (hc_timer_get (maintenance_timer) < sleep_time * 1000)
     {
       if (status_ctx->shutdown_inner == true) break;
 
-      usleep (100000);
+      const double remaining = sleep_time * 1000 - hc_timer_get (maintenance_timer);
+
+      if (remaining > 0) usleep ((u32) MIN (50.0, remaining) * 1000);
+
+      if ((status_check == true) && (status_interval_ms > 0)
+       && (status_ctx->accessible == true)
+       && ((status_ctx->devices_status == STATUS_RUNNING) || (status_ctx->devices_status == STATUS_PAUSED))
+       && (hc_timer_get (status_timer) >= status_interval_ms))
+      {
+        hc_thread_mutex_lock (status_ctx->mux_display);
+
+        hc_timer_set (&status_timer);
+
+        EVENT_DATA (EVENT_MONITOR_STATUS_REFRESH, NULL, 0);
+
+        hc_thread_mutex_unlock (status_ctx->mux_display);
+
+      }
     }
 
     if (status_ctx->shutdown_inner == true) break;
@@ -325,7 +362,7 @@ static int monitor (hashcat_ctx_t *hashcat_ctx)
       }
     }
 
-    if (status_check == true)
+    if ((status_check == true) && (status_interval_ms == 0))
     {
       status_left--;
 

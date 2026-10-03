@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskState
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelState
 import io.github.bszapp.wifitoolbox.contract.hashcat.HASHCAT_MIB
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryResource
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryStore
@@ -17,7 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class HashcatSheetPage { INPUT, DICTIONARIES, DETAIL }
+enum class HashcatSheetPage { PREPARATION, INPUT, DICTIONARIES, DETAIL }
 data class HashcatSheetState(
     val show: Boolean = false,
     val page: HashcatSheetPage = HashcatSheetPage.INPUT,
@@ -26,7 +27,8 @@ data class HashcatSheetState(
     val taskId: String? = null,
     val busy: Boolean = false,
     val message: String? = null,
-    val memoryLimitMiB: Int? = null,
+    val memoryLimitMiB: Int? = 1024,
+    val agreed: Boolean = false,
 )
 
 class HashcatViewModel(application: Application) : AndroidViewModel(application) {
@@ -34,20 +36,54 @@ class HashcatViewModel(application: Application) : AndroidViewModel(application)
     val history = controller.history
     val connected = controller.connected
     val memory = controller.memory
+    val kernels = controller.kernels
     private val _sheet = MutableStateFlow(HashcatSheetState())
     val sheet = _sheet.asStateFlow()
     private val _dictionaries = MutableStateFlow<List<DictionaryResource>>(emptyList())
     val dictionaries = _dictionaries.asStateFlow()
+    private var incomingOpened = false
 
-    fun open() {
-        _sheet.value = HashcatSheetState(show = true)
+    init {
+        viewModelScope.launch {
+            kernels.collect { snapshot ->
+                val form = _sheet.value
+                if (form.page == HashcatSheetPage.PREPARATION && !form.busy && snapshot?.state == HashcatKernelState.READY) {
+                    _sheet.compareAndSet(form, form.copy(page = HashcatSheetPage.INPUT, message = null))
+                }
+            }
+        }
+    }
+
+    fun open(handshake: String = "") {
+        _sheet.value = HashcatSheetState(show = true, page = HashcatSheetPage.PREPARATION, input = handshake, busy = true)
         viewModelScope.launch(Dispatchers.IO) {
+            try {
+                controller.refreshKernels()
+                val form = _sheet.value
+                if (form.page == HashcatSheetPage.PREPARATION) _sheet.compareAndSet(form, form.copy(busy = false, page =
+                    if (kernels.value?.state == HashcatKernelState.READY) HashcatSheetPage.INPUT else HashcatSheetPage.PREPARATION))
+            } catch (error: Throwable) { error(error) }
             runCatching { DictionaryStore.getAll(getApplication()).filter { it.type == 0 } }
                 .onSuccess { _dictionaries.value = it }
                 .onFailure { error(it) }
         }
     }
-    fun inspect(id: String) { _sheet.value = HashcatSheetState(show = true, page = HashcatSheetPage.DETAIL, taskId = id) }
+    fun openIncoming(handshake: String) { if (!incomingOpened) { incomingOpened = true; open(handshake) } }
+    fun agree(value: Boolean) { _sheet.value = _sheet.value.copy(agreed = value) }
+    fun compileKernels() {
+        if (!_sheet.value.agreed) return
+        viewModelScope.launch {
+            _sheet.value = _sheet.value.copy(busy = true, message = null)
+            try { controller.compileKernels() }
+            catch (error: Throwable) { error(error) }
+            finally {
+                val form = _sheet.value
+                _sheet.compareAndSet(form, form.copy(busy = false, page =
+                    if (kernels.value?.state == HashcatKernelState.READY) HashcatSheetPage.INPUT else form.page))
+            }
+        }
+    }
+    fun inspect(id: String) { _sheet.value = HashcatSheetState(show = true, page = HashcatSheetPage.DETAIL, taskId = id, memoryLimitMiB = null) }
     fun dismiss() { _sheet.value = _sheet.value.copy(show = false) }
     fun input(value: String) { _sheet.value = _sheet.value.copy(input = value, message = null) }
     fun readFile(uri: Uri) {

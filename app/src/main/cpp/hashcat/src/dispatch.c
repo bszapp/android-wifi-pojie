@@ -1104,6 +1104,40 @@ static int pipe_run (hashcat_ctx_t *hashcat_ctx, hc_device_param_t *device_param
 
       pipe_acc (device_param, PIPE_COPY, &timer_copy);
 
+      #if defined (WLANTOOL_ANDROID_HASHCAT)
+      // Snapshot the submitted host candidates without reading the GPU command queue in status.
+      hc_thread_mutex_lock (status_ctx->mux_display);
+
+      device_param->android_candidates_valid = false;
+      device_param->android_loop_done = 0;
+      device_param->android_loop_total = 0;
+
+      if ((hashcat_ctx->hashconfig->kern_type == 22000)
+       && (hashcat_ctx->user_options_extra->attack_kern == ATTACK_KERN_STRAIGHT)
+       && (user_options->rp_files_cnt == 0) && (user_options->rp_gen == 0))
+      {
+        const u64 first = (device_param->pws_sort_cnt == pws_cnt) ? device_param->pws_sort_head : 0;
+        const u64 last  = (device_param->pws_sort_cnt == pws_cnt) ? device_param->pws_sort_tail : pws_cnt - 1;
+        const pw_idx_t a = device_param->pws_idx[first];
+        const pw_idx_t b = device_param->pws_idx[last];
+
+        if ((a.cnt <= 64) && (b.cnt <= 64) && (a.len <= PW_MAX) && (b.len <= PW_MAX)
+         && (((u64) a.off + a.cnt) <= device_param->size_pws_comp / sizeof (u32))
+         && (((u64) b.off + b.cnt) <= device_param->size_pws_comp / sizeof (u32)))
+        {
+          memset (&device_param->android_candidate_first, 0, sizeof (pw_t));
+          memset (&device_param->android_candidate_last,  0, sizeof (pw_t));
+          memcpy (device_param->android_candidate_first.i, device_param->pws_comp + a.off, a.cnt * sizeof (u32));
+          memcpy (device_param->android_candidate_last.i,  device_param->pws_comp + b.off, b.cnt * sizeof (u32));
+          device_param->android_candidate_first.pw_len = a.len;
+          device_param->android_candidate_last.pw_len  = b.len;
+          device_param->android_candidates_valid = true;
+        }
+      }
+
+      hc_thread_mutex_unlock (status_ctx->mux_display);
+      #endif
+
       const u64 pws_pos = (slow == true) ? (u64) -1 : words_off;
 
       if (run_cracker (hashcat_ctx, device_param, pws_pos, pws_cnt) == -1)

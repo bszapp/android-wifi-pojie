@@ -1153,8 +1153,20 @@ char *status_get_guess_candidates_dev (const hashcat_ctx_t *hashcat_ctx, const i
   int plain_len1 = 0;
   int plain_len2 = 0;
 
-  build_plain ((hashcat_ctx_t *) hashcat_ctx, device_param, &plain1, plain_buf1, &plain_len1);
-  build_plain ((hashcat_ctx_t *) hashcat_ctx, device_param, &plain2, plain_buf2, &plain_len2);
+  #if defined (WLANTOOL_ANDROID_HASHCAT)
+  if (device_param->android_candidates_valid == true)
+  {
+    plain_len1 = device_param->android_candidate_first.pw_len;
+    plain_len2 = device_param->android_candidate_last.pw_len;
+    memcpy (plain_buf1, device_param->android_candidate_first.i, plain_len1);
+    memcpy (plain_buf2, device_param->android_candidate_last.i,  plain_len2);
+  }
+  else
+  #endif
+  {
+    build_plain ((hashcat_ctx_t *) hashcat_ctx, device_param, &plain1, plain_buf1, &plain_len1);
+    build_plain ((hashcat_ctx_t *) hashcat_ctx, device_param, &plain2, plain_buf2, &plain_len2);
+  }
 
   const bool always_ascii = (hashconfig->opts_type & OPTS_TYPE_PT_ALWAYS_ASCII) ? true : false;
 

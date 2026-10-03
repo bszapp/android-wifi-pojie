@@ -14,6 +14,7 @@ data class HashcatRequest(
     /** 持久任务使用固定 UUID 运行目录；null 保持诊断调用的临时会话行为。 */
     val runtimeDirectory: File? = null,
     val restore: Boolean = false,
+    val precompile: Boolean = false,
 )
 
 enum class HashcatPhase {
@@ -51,6 +52,9 @@ data class HashcatDeviceStatus(
     val utilizationPercent: Int?,
     /** 上游当前批次的首尾候选文本，GPU 同时尝试该批次中的多个密码。 */
     val candidateRange: String? = null,
+    /** 已完成的当前批次 PBKDF2 迭代，和完整校验过的候选数分别统计。 */
+    val pbkdf2Completed: Long = 0,
+    val pbkdf2Total: Long = 0,
 )
 
 data class HashcatStatusSnapshot(
@@ -68,6 +72,7 @@ data class HashcatStatusSnapshot(
     val dictionary: String?,
     val dictionaryPercent: Double?,
     val devices: List<HashcatDeviceStatus>,
+    val runningMillis: Long = 0,
 ) {
     val status: HashcatStatus? get() = HashcatStatus.fromCode(statusCode)
     val progressPercent: Double? get() = progressTotal.takeIf { it > 0 }
@@ -75,6 +80,8 @@ data class HashcatStatusSnapshot(
 }
 
 sealed interface HashcatEvent {
+    data class KernelStep(val device: Int, val kind: String, val name: String, val finished: Boolean) : HashcatEvent
+    data object KernelReady : HashcatEvent
     data class StepProgress(
         val step: HashcatStep,
         val completed: Long,

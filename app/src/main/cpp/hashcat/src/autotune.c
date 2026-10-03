@@ -1305,4 +1305,3 @@ HC_THREAD_FUNC thread_autotune (void *p)
 
   return 0;
 }
-

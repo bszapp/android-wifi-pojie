@@ -42,6 +42,8 @@ data class HashcatTaskSnapshot(
     val error: String? = null,
     /** 每个计算设备的预算上限，非进程实际占用；null 保留上游自动调优。 */
     val memoryLimitMiB: Int? = null,
+    val computeDurationMillis: Long = 0,
+    val averageSpeed: Long = 0,
 ) {
     val active get() = state == HashcatTaskState.RUNNING || state == HashcatTaskState.PAUSING
 
@@ -57,6 +59,7 @@ data class HashcatTaskSnapshot(
         })
         put("error", error)
         put("memoryLimitMiB", memoryLimitMiB)
+        put("computeDurationMillis", computeDurationMillis); put("averageSpeed", averageSpeed)
     }
 
     companion object {
@@ -74,6 +77,7 @@ data class HashcatTaskSnapshot(
             } },
             error = if (json.isNull("error")) null else json.getString("error"),
             memoryLimitMiB = if (json.isNull("memoryLimitMiB")) null else json.getInt("memoryLimitMiB"),
+            computeDurationMillis = json.optLong("computeDurationMillis"), averageSpeed = json.optLong("averageSpeed"),
         )
     }
 }
@@ -82,6 +86,9 @@ interface IHashcatController {
     val history: StateFlow<List<HashcatTaskSnapshot>>
     val connected: StateFlow<Boolean>
     val memory: StateFlow<HashcatMemorySnapshot?>
+    val kernels: StateFlow<HashcatKernelSnapshot?>
+    suspend fun refreshKernels()
+    suspend fun compileKernels()
     suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String
     suspend fun pause(taskId: String)
     suspend fun resume(taskId: String)

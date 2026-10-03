@@ -164,9 +164,11 @@ static int run_frontend(int argc, char **argv, const char *runtime,
     int result = -1;
     HC_ANDROID_LOG(ANDROID_LOG_INFO, "Native invocation: version=%s embedded=%d argc=%d uid=%u runtime=%s",
         VERSION_TAG, library_mode, argc, (unsigned)getuid(), runtime);
-    if (!version_only && hc_android_prepare_resources(runtime) != 0) {
-        HC_ANDROID_LOG(ANDROID_LOG_ERROR, "Resource preparation failed: %s: %s", runtime, strerror(errno));
-        fprintf(stderr, "hashcat: cannot prepare resources in %s: %s\n", runtime, strerror(errno));
+    const char *resource_home = library_mode ? NULL : getenv("HASHCAT_RESOURCE_HOME");
+    if (!resource_home || !*resource_home) resource_home = runtime;
+    if (!version_only && hc_android_prepare_resources(resource_home) != 0) {
+        HC_ANDROID_LOG(ANDROID_LOG_ERROR, "Resource preparation failed: %s: %s", resource_home, strerror(errno));
+        fprintf(stderr, "hashcat: cannot prepare resources in %s: %s\n", resource_home, strerror(errno));
         goto finished;
     }
     if (!version_only) HC_ANDROID_LOG(ANDROID_LOG_INFO, "Resources ready: %s", hc_android_resource_dir());

@@ -9,6 +9,8 @@ import io.github.bszapp.wifitoolbox.service.IMainService
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,12 +29,28 @@ class HashcatTaskController(
     private val storeLock = Any()
     private val root = File(context.filesDir, "hashcat-tasks")
     private val snapshots = linkedMapOf<String, HashcatTaskSnapshot>()
+    private val dirtySnapshots = linkedSetOf<String>()
+    private var writeScheduled = false
+    private val snapshotWriter = Executors.newSingleThreadScheduledExecutor {
+        Thread(it, "hashcat-history-writer").apply { isDaemon = true }
+    }
     private val _history = MutableStateFlow<List<HashcatTaskSnapshot>>(emptyList())
     override val history = _history.asStateFlow()
     private val _connected = MutableStateFlow(false)
     override val connected = _connected.asStateFlow()
     private val _memory = MutableStateFlow<HashcatMemorySnapshot?>(null)
     override val memory = _memory.asStateFlow()
+    private val _kernels = MutableStateFlow<HashcatKernelSnapshot?>(null)
+    override val kernels = _kernels.asStateFlow()
+    private val program by lazy { File(context.applicationInfo.nativeLibraryDir, "libhashcat.so") }
+    private val programHash by lazy {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        program.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }
     private var binding: Binding? = null
     private class Binding(val service: IMainService, val callback: IHashcatCallback) {
         val ready = CompletableFuture<Unit>()
@@ -56,6 +74,11 @@ class HashcatTaskController(
     fun connect(service: IMainService) {
         lateinit var next: Binding
         val callback = object : IHashcatCallback.Stub() {
+            override fun onHashcatKernelChanged() {
+                scope.launch(Dispatchers.IO) {
+                    if (isCurrent(next)) runCatching { fetchKernels(next) }.onFailure { report("读取 Hashcat 内核编译进度", it) }
+                }
+            }
             override fun onHashcatMemoryChanged() {
                 scope.launch(Dispatchers.IO) {
                     if (isCurrent(next)) runCatching { fetchMemory(next) }.onFailure { report("读取 Hashcat 内存", it) }
@@ -89,7 +112,7 @@ class HashcatTaskController(
             }
         }
         next = Binding(service, callback)
-        val old = synchronized(lock) { binding.also { binding = next; _connected.value = false; _memory.value = null } }
+        val old = synchronized(lock) { binding.also { binding = next; _connected.value = false; _memory.value = null; _kernels.value = null } }
         old?.ready?.completeExceptionally(IllegalStateException("服务会话已改变"))
         old?.let { scope.launch(Dispatchers.IO) { runCatching { it.service.unregisterHashcatCallback(it.callback) } } }
         scope.launch(Dispatchers.IO) {
@@ -103,6 +126,7 @@ class HashcatTaskController(
                 next.ready.complete(Unit)
                 _connected.value = true
                 fetchMemory(next)
+                fetchKernels(next)
                 var offset = 0
                 while (isCurrent(next)) {
                     val ids = service.getHashcatTaskIds(offset)
@@ -118,7 +142,7 @@ class HashcatTaskController(
     }
 
     fun disconnect() {
-        val previous = synchronized(lock) { binding.also { binding = null; _connected.value = false; _memory.value = null } }
+        val previous = synchronized(lock) { binding.also { binding = null; _connected.value = false; _memory.value = null; _kernels.value = null } }
         previous?.ready?.completeExceptionally(IllegalStateException("服务已断开"))
         previous?.let { scope.launch(Dispatchers.IO) { runCatching { it.service.unregisterHashcatCallback(it.callback) } } }
         // 历史属于 App；正常退出服务的任务已经由服务备份为 PAUSED 或结束态。
@@ -150,6 +174,15 @@ class HashcatTaskController(
             throw error
         }
         id
+    }
+
+    override suspend fun refreshKernels() = withContext(Dispatchers.IO) { fetchKernels(requireBinding()) }
+    override suspend fun compileKernels() = withContext(Dispatchers.IO) {
+        val active = requireBinding()
+        ParcelFileDescriptor.open(program, ParcelFileDescriptor.MODE_READ_ONLY).use { fd ->
+            active.service.compileHashcatKernels(programHash, fd)
+        }
+        fetchKernels(active)
     }
 
     override suspend fun pause(taskId: String) = withContext(Dispatchers.IO) {
@@ -210,7 +243,15 @@ class HashcatTaskController(
         val snapshot = active.service.getHashcatTask(id).let { fd ->
             ParcelFileDescriptor.AutoCloseInputStream(fd).bufferedReader().use { HashcatTaskSnapshot.fromJson(JSONObject(it.readText())) }
         }
-        synchronized(storeLock) { if (isCurrent(active)) save(snapshot) }
+        synchronized(lock) {
+            if (binding !== active) return
+            val old = snapshots[id]
+            if (old != null && old.revision >= snapshot.revision) return
+            snapshots[id] = snapshot
+            publish()
+            dirtySnapshots.add(id)
+            scheduleSnapshotWrite()
+        }
     }
     private fun fetchMemory(active: Binding) {
         val measured = active.service.getHashcatMemory().let { fd ->
@@ -218,17 +259,51 @@ class HashcatTaskController(
         }
         synchronized(lock) { if (binding === active && measured.capturedAt >= (_memory.value?.capturedAt ?: 0)) _memory.value = measured }
     }
+    private fun fetchKernels(active: Binding) {
+        val snapshot = active.service.getHashcatKernelStatus(programHash).let { fd ->
+            ParcelFileDescriptor.AutoCloseInputStream(fd).bufferedReader().use { HashcatKernelSnapshot.fromJson(JSONObject(it.readText())) }
+        }
+        synchronized(lock) {
+            if (binding === active && snapshot.revision >= (_kernels.value?.revision ?: -1)) _kernels.value = snapshot
+        }
+    }
     private fun save(snapshot: HashcatTaskSnapshot) {
         synchronized(lock) {
             val old = snapshots[snapshot.id]
             if (old != null && old.revision > snapshot.revision) return
-            val file = AtomicFile(File(taskDirectory(snapshot.id), "snapshot.json"))
-            val out = file.startWrite()
-            try { out.write(snapshot.toJson().toString().toByteArray()); file.finishWrite(out) }
-            catch (error: Throwable) { file.failWrite(out); throw error }
-            snapshots[snapshot.id] = snapshot
-            publish()
         }
+        writeSnapshot(snapshot)
+        synchronized(lock) {
+            if ((snapshots[snapshot.id]?.revision ?: -1) <= snapshot.revision) {
+                snapshots[snapshot.id] = snapshot
+                publish()
+            }
+        }
+    }
+    // Live publication never waits for fsync. One writer coalesces snapshots; backups still save synchronously.
+    private fun scheduleSnapshotWrite() {
+        if (writeScheduled) return
+        writeScheduled = true
+        snapshotWriter.schedule({
+            val ids = synchronized(lock) { dirtySnapshots.toList().also { dirtySnapshots.clear() } }
+            ids.forEach { id ->
+                runCatching {
+                    synchronized(storeLock) {
+                        synchronized(lock) { snapshots[id] }?.let(::writeSnapshot)
+                    }
+                }.onFailure { report("保存 Hashcat 进度", it) }
+            }
+            synchronized(lock) {
+                writeScheduled = false
+                if (dirtySnapshots.isNotEmpty()) scheduleSnapshotWrite()
+            }
+        }, 100, TimeUnit.MILLISECONDS)
+    }
+    private fun writeSnapshot(snapshot: HashcatTaskSnapshot) {
+        val file = AtomicFile(File(taskDirectory(snapshot.id), "snapshot.json"))
+        val out = file.startWrite()
+        try { out.write(snapshot.toJson().toString().toByteArray()); file.finishWrite(out) }
+        catch (error: Throwable) { file.failWrite(out); throw error }
     }
     private fun publish() = synchronized(lock) { _history.value = snapshots.values.sortedByDescending { it.createdAt } }
     private fun taskDirectory(id: String): File {
