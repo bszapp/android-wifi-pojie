@@ -40,6 +40,7 @@ data class MonitorCaptureClearProgress(
     val stage: MonitorCaptureClearStage = MonitorCaptureClearStage.PREPARING,
     val processedBytes: Long = 0L,
     val totalBytes: Long = 0L,
+    val operationId: Long = 0L,
 ) : Parcelable
 
 /** 切换操作的进度，不代表网卡类型；结束后保留目标供界面退场使用。 */
@@ -47,6 +48,7 @@ data class MonitorCaptureClearProgress(
 data class WifiModeSwitch(
     val targetMode: WifiMode,
     val isRunning: Boolean,
+    val operationId: Long = 0L,
 ) : Parcelable
 
 @Parcelize

@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -1493,72 +1494,132 @@ static char *build_tool_shell(const char *guest_path) {
   return command;
 }
 
-static char *build_chroot_command(const char *root, const char *host_path,
-                                  const char *guest_path,
-                                  const struct string_list *mount_roots) {
-  char *quoted_root = shell_quote(root);
-  char *quoted_host_path = shell_quote(host_path);
-  char *tool_shell = build_tool_shell(guest_path);
-  char *quoted_tool_shell = shell_quote(tool_shell);
-  char *inner = NULL;
-  char *quoted_inner = NULL;
-  char *command = NULL;
+static void add_chroot_apex_mounts(struct string_list *mount_roots) {
+  DIR *directory = opendir("/apex");
+  struct dirent *entry;
+
+  if (directory == NULL) {
+    return;
+  }
+  // Some Android mount implementations treat --rbind as a plain bind.
+  // Bind the real APEX module mountpoints individually so their linkers and
+  // shared libraries remain available inside chroot. Symlink aliases are
+  // already provided by the parent /apex mount.
+  while ((entry = readdir(directory)) != NULL) {
+    struct stat st;
+    char *path;
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    path = path_join2("/apex", entry->d_name);
+    if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+      string_list_add_unique_owned(mount_roots, path);
+    } else {
+      free(path);
+    }
+  }
+  closedir(directory);
+}
+
+static volatile sig_atomic_t g_mount_stop = 0;
+
+static void handle_mount_stop(int signal_number) {
+  (void)signal_number;
+  g_mount_stop = 1;
+}
+
+static void prepare_mount_target(const char *target, bool directory) {
+  struct stat st;
+  if (lstat(target, &st) == 0 && S_ISLNK(st.st_mode)) {
+    if (unlink(target) != 0) die_errno("unlink mount target", target);
+  }
+  if (directory) {
+    ensure_dir(target, 0755);
+  } else {
+    int fd;
+    ensure_parent_dirs(target, 0755);
+    fd = open(target, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+    if (fd < 0) die_errno("open mount target", target);
+    close(fd);
+  }
+}
+
+static void bind_container_path(const char *root, const char *source) {
+  struct stat st;
+  char *target;
+  if (stat(source, &st) != 0) die_errno("stat mount source", source);
+  target = path_join2(root, source);
+  prepare_mount_target(target, S_ISDIR(st.st_mode));
+  if (mount(source, target, NULL, MS_BIND | (S_ISDIR(st.st_mode) ? MS_REC : 0), NULL) != 0) {
+    die_errno("bind container path", target);
+  }
+  free(target);
+}
+
+/** A service-owned holder: all mount changes remain in this private namespace. */
+static int hold_container_mounts(const char *root, const char *host_tool_path) {
+  struct string_list host_paths;
+  struct string_list mount_roots;
+  struct sigaction action;
+  char resolved_root[PATH_MAX];
+  char *proc_target;
   size_t i;
+  pid_t parent = getppid();
 
-  appendf(&inner,
-          "PATH=%s; export PATH; "
-          "ROOT=%s; "
-          "mkdir -p \"$ROOT/proc\" \"$ROOT/sys\" \"$ROOT/dev\"; ",
-          quoted_host_path,
-          quoted_root);
-  for (i = 0; i < mount_roots->count; i++) {
-    appendf(&inner,
-            "if [ -d %1$s ]; then "
-            "rm -f \"$ROOT%1$s\" 2>/dev/null || true; "
-            "mkdir -p \"$ROOT%1$s\"; "
-            "mount --rbind %1$s \"$ROOT%1$s\" 2>/dev/null || true; "
-            "else "
-            "rm -rf \"$ROOT%1$s\" 2>/dev/null || true; "
-            "mkdir -p \"$(dirname \"$ROOT%1$s\")\"; "
-            ": > \"$ROOT%1$s\"; "
-            "mount -o bind %1$s \"$ROOT%1$s\" 2>/dev/null || true; "
-            "fi; ",
-            mount_roots->items[i]);
+  if (geteuid() != 0) dief("container mounts require uid 0");
+  if (root == NULL || realpath(root, resolved_root) == NULL || strcmp(resolved_root, "/") == 0) {
+    dief("invalid container root");
   }
-  appendf(&inner,
-          "mount -t proc proc \"$ROOT/proc\" 2>/dev/null || true; "
-          "mount --rbind /sys \"$ROOT/sys\" 2>/dev/null || true; "
-          "mount --rbind /dev \"$ROOT/dev\" 2>/dev/null || true; ");
-  appendf(&inner,
-          "cd \"$ROOT\"; "
-          "chroot . /bin/sh -lc %s; "
-          "RC=$?; ",
-          quoted_tool_shell);
-  for (i = mount_roots->count; i > 0; i--) {
-    appendf(&inner, "umount -l \"$ROOT%s\" 2>/dev/null || true; ",
-            mount_roots->items[i - 1]);
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = handle_mount_stop;
+  sigemptyset(&action.sa_mask);
+  sigaction(SIGTERM, &action, NULL);
+  sigaction(SIGINT, &action, NULL);
+  if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) die_errno("prctl", NULL);
+  if (parent == 1 || getppid() != parent) return 1;
+  if (unshare(CLONE_NEWNS) != 0) die_errno("unshare container mounts", NULL);
+  // Prevent both mount and unmount propagation to Android or other containers.
+  if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) die_errno("make mounts private", NULL);
+  // A single private root mount owns the complete subtree and can detach it atomically.
+  if (mount(resolved_root, resolved_root, NULL, MS_BIND, NULL) != 0) die_errno("bind container root", resolved_root);
+  collect_host_tool_paths(host_tool_path, &host_paths, &mount_roots);
+  add_chroot_apex_mounts(&mount_roots);
+  for (i = 0; i < mount_roots.count; i++) bind_container_path(resolved_root, mount_roots.items[i]);
+  proc_target = path_join2(resolved_root, "/proc");
+  prepare_mount_target(proc_target, true);
+  if (mount("proc", proc_target, "proc", 0, NULL) != 0) die_errno("mount proc", proc_target);
+  free(proc_target);
+  bind_container_path(resolved_root, "/sys");
+  bind_container_path(resolved_root, "/dev");
+  string_list_free(&mount_roots);
+  string_list_free(&host_paths);
+  if (g_mount_stop) {
+    umount2(resolved_root, MNT_DETACH);
+    return 1;
   }
-  appendf(&inner,
-          "umount -l \"$ROOT/dev\" 2>/dev/null || true; "
-          "umount -l \"$ROOT/sys\" 2>/dev/null || true; "
-          "umount -l \"$ROOT/proc\" 2>/dev/null || true; "
-          "exit $RC");
-  quoted_inner = shell_quote(inner);
-  appendf(&command,
-          "PATH=%s; export PATH; "
-          "ROOT=%s; "
-          "exec /system/bin/unshare -m /system/bin/sh -c %s",
-          quoted_host_path,
-          quoted_root,
-          quoted_inner);
+  printf("{\"event\":\"mounted\",\"pid\":%ld}\n", (long)getpid());
+  fflush(stdout);
+  while (!g_mount_stop) {
+    struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN | POLLHUP };
+    int ready = poll(&input, 1, -1);
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (input.revents & (POLLHUP | POLLERR | POLLNVAL)) break;
+    if (input.revents & POLLIN) {
+      char value;
+      if (read(STDIN_FILENO, &value, 1) <= 0) break;
+    }
+  }
+  if (umount2(resolved_root, MNT_DETACH) != 0) die_errno("unmount container root", resolved_root);
+  return 0;
+}
 
-  free(quoted_root);
-  free(quoted_host_path);
-  free(tool_shell);
-  free(quoted_tool_shell);
-  free(inner);
-  free(quoted_inner);
-  return command;
+static void chroot_pre_exec(void *opaque) {
+  const char *root = opaque;
+  if (chroot(root) != 0) die_errno("chroot", root);
+  if (chdir("/") != 0) die_errno("chdir", "/");
 }
 
 static int start_proot_session_impl(const char *root, const char *runtime_root,
@@ -1646,15 +1707,16 @@ static int start_proot_session_impl(const char *root, const char *runtime_root,
 
 static int start_chroot_session_impl(const char *root, int *read_fd, int *write_fd,
                                      pid_t *pid_out,
-                                     const char *host_tool_path) {
+                                     const char *host_tool_path, pid_t mount_pid) {
   struct string_list host_paths;
   struct string_list mount_roots;
   char *guest_path;
-  char *host_exec_path;
-  char *command;
+  char *tool_shell;
+  char namespace_path[64];
+  int namespace_fd;
   char *argv[] = {
-      "/system/bin/sh",
-      "-c",
+      "/bin/sh",
+      "-lc",
       NULL,
       NULL,
   };
@@ -1662,16 +1724,19 @@ static int start_chroot_session_impl(const char *root, int *read_fd, int *write_
   if (geteuid() != 0) {
     dief("chroot session requires uid 0");
   }
-
+  if (mount_pid <= 0) dief("chroot session requires a service-owned mount namespace");
+  snprintf(namespace_path, sizeof(namespace_path), "/proc/%ld/ns/mnt", (long)mount_pid);
+  namespace_fd = open(namespace_path, O_RDONLY | O_CLOEXEC);
+  if (namespace_fd < 0) die_errno("open container namespace", namespace_path);
+  if (setns(namespace_fd, CLONE_NEWNS) != 0) die_errno("join container namespace", namespace_path);
+  close(namespace_fd);
   collect_host_tool_paths(host_tool_path, &host_paths, &mount_roots);
   guest_path = build_guest_path(&host_paths);
-  host_exec_path = build_host_exec_path(&host_paths);
-  command = build_chroot_command(root, host_exec_path, guest_path, &mount_roots);
-  argv[2] = command;
+  tool_shell = build_tool_shell(guest_path);
+  argv[2] = tool_shell;
 
-  spawn_pty_process(argv, NULL, NULL, read_fd, write_fd, pid_out);
-  free(command);
-  free(host_exec_path);
+  spawn_pty_process(argv, chroot_pre_exec, (void *)root, read_fd, write_fd, pid_out);
+  free(tool_shell);
   free(guest_path);
   string_list_free(&mount_roots);
   string_list_free(&host_paths);
@@ -1760,7 +1825,7 @@ static int run_session(void *opaque) {
         args->read_fd,
         args->write_fd,
         args->pid_out,
-        args->host_tool_path);
+        args->host_tool_path, 0);
   }
   dief("unsupported mode: %d", args->mode);
   return -1;
@@ -2093,10 +2158,11 @@ static void usage(const char *argv0) {
           "usage:\n"
           "  %s version\n"
           "  %s session proot --rootfs PATH --runtime PATH --host-path PATH\n"
-          "  %s session chroot --rootfs PATH --runtime PATH --host-path PATH\n"
+          "  %s session chroot --rootfs PATH --runtime PATH --host-path PATH --mount-pid PID\n"
+          "  %s container mount --rootfs PATH --host-path PATH\n"
           "  %s container delete --path PATH --allowed-root PATH\n"
           "  %s process terminate --pid PID\n",
-          argv0, argv0, argv0, argv0, argv0);
+          argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv) {
@@ -2124,6 +2190,12 @@ int main(int argc, char **argv) {
       return proxy_pty_session(read_fd, write_fd, child);
     }
     if (strcmp(argv[2], "chroot") == 0) {
+      const char *mount_pid_text = option_value(argc, argv, "--mount-pid");
+      char *end;
+      long mount_pid;
+      if (mount_pid_text == NULL) dief("missing service container mount pid");
+      mount_pid = strtol(mount_pid_text, &end, 10);
+      if (*end != '\0' || mount_pid <= 0 || mount_pid > INT_MAX) dief("invalid container mount pid");
       prepare_terminal_signal_state();
       if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
         dief("cannot configure chroot parent-death signal: %s", strerror(errno));
@@ -2131,11 +2203,15 @@ int main(int argc, char **argv) {
       if (getppid() == 1) {
         raise(SIGTERM);
       }
-      start_chroot_session_impl(root, &read_fd, &write_fd, &child, host_path);
+      start_chroot_session_impl(root, &read_fd, &write_fd, &child, host_path, (pid_t)mount_pid);
       return proxy_pty_session(read_fd, write_fd, child);
     }
     usage(argv[0]);
     return 2;
+  }
+
+  if (argc >= 3 && strcmp(argv[1], "container") == 0 && strcmp(argv[2], "mount") == 0) {
+    return hold_container_mounts(option_value(argc, argv, "--rootfs"), option_value(argc, argv, "--host-path"));
   }
 
   if (argc >= 3 && strcmp(argv[1], "container") == 0 &&

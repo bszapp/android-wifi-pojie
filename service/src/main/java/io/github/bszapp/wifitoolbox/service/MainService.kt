@@ -7,7 +7,6 @@ import android.util.Log
 import androidx.annotation.Keep
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiResponse
-import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment
 import io.github.bszapp.wifitoolbox.contract.container.ContainerOperationRequest
 import io.github.bszapp.wifitoolbox.contract.container.ContainerState
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogTransport
@@ -20,6 +19,7 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
 import io.github.bszapp.wifitoolbox.service.task.TaskManager
 import io.github.bszapp.wifitoolbox.service.container.ContainerSystemManager
+import io.github.bszapp.wifitoolbox.service.container.ContainerMountManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 
 @Keep
@@ -57,7 +57,15 @@ open class MainService(
         )
     }
 
-    private val terminalManager = TerminalManager(
+    private val containerMounts: ContainerMountManager = ContainerMountManager(
+        beforeUnmount = { mountPid -> terminalManager.stopChrootTerminals(mountPid) },
+        onError = { error -> communication.broadcastServiceError(
+            source = "Service.ContainerMountManager", operation = "容器挂载", error = error,
+        ) },
+    )
+
+    private val terminalManager: TerminalManager = TerminalManager(
+        containerMounts = containerMounts,
         onAliveTerminalsChanged = communication::broadcastAliveTerminalsChanged,
         onTerminalLogRangeChanged = communication::broadcastTerminalLogRangeChanged,
     )
@@ -68,6 +76,7 @@ open class MainService(
 
     private val containerSystemManager = ContainerSystemManager(
         trustedUid = { initializer.requireStartupInfo().trustedUid },
+        mounts = containerMounts,
         beforeDelete = hybridWifiScanner::stop,
         onError = { operation, error ->
             communication.broadcastServiceError(
@@ -175,6 +184,9 @@ open class MainService(
 
     private fun initializeFromStartupInfo(startupInfo: StartupInfo): StartupInfo {
         val completed = initializer.initialize(startupInfo)
+        containerSystemManager.initialize(initializer.requireContainerEnvironment())
+        val environment = containerSystemManager.taskEnvironment()
+        wifiListController.configureEnvironment(environment.rootfsPath, environment.runtimePath, environment.terminalPath)
         serviceNotifications.start()
         wifiEventMonitor.start()
         wifiListController.initialize()
@@ -190,11 +202,11 @@ open class MainService(
         initializer.requireStartupInfo()
     }
 
-    override fun configureContainerSystem(environment: ContainerEnvironment) = communication.callFromApp {
-        containerSystemManager.configure(environment)
-    }
-
     override fun getContainerState(): ContainerState = communication.callFromApp { containerSystemManager.state() }
+
+    override fun interruptContainerOperation(operationId: Long) = communication.callFromApp {
+        containerSystemManager.interrupt(operationId)
+    }
 
     override fun executeContainerOperation(
         request: ContainerOperationRequest,
@@ -309,23 +321,15 @@ open class MainService(
         }
     }
 
-    override fun setWifiMode(
-        source: Int,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
-    ) = communication.callFromApp {
+    override fun setWifiMode(source: Int) = communication.callFromApp {
+        val environment = containerSystemManager.taskEnvironment()
         val resolvedSource = WifiMode.fromWireValue(source)
         wifiListController.setMode(
             mode = resolvedSource,
-            rootfsPath = rootfsPath,
-            runtimePath = runtimePath,
-            terminalPath = terminalPath,
+            rootfsPath = environment.rootfsPath,
+            runtimePath = environment.runtimePath,
+            terminalPath = environment.terminalPath,
         )
-    }
-
-    override fun configureWifiEnvironment(rootfsPath: String, runtimePath: String, terminalPath: String) = communication.callFromApp {
-        wifiListController.configureEnvironment(rootfsPath, runtimePath, terminalPath)
     }
 
     override fun setHybridScanEnabled(enabled: Boolean) = communication.callFromApp {
@@ -340,17 +344,21 @@ open class MainService(
         wifiListController.clearMonitorCapture(handshakesOnly)
     }
 
-    override fun enterMonitorMode(
-        command: String,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
-    ) = communication.callFromApp {
+    override fun interruptWifiModeSwitch(operationId: Long) = communication.callFromApp {
+        wifiListController.interruptModeSwitch(operationId)
+    }
+
+    override fun interruptMonitorClear(operationId: Long) = communication.callFromApp {
+        wifiListController.interruptMonitorClear(operationId)
+    }
+
+    override fun enterMonitorMode(command: String) = communication.callFromApp {
+        val environment = containerSystemManager.taskEnvironment()
         wifiListController.enterMonitorMode(
             command = command,
-            rootfsPath = rootfsPath,
-            runtimePath = runtimePath,
-            terminalPath = terminalPath,
+            rootfsPath = environment.rootfsPath,
+            runtimePath = environment.runtimePath,
+            terminalPath = environment.terminalPath,
         )
     }
 
@@ -448,12 +456,9 @@ open class MainService(
         )
     }
 
-    override fun createServiceTerminal(
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
-    ) = communication.callFromApp {
-        terminalManager.createChrootTerminal(rootfsPath, runtimePath, terminalPath)
+    override fun createServiceTerminal() = communication.callFromApp {
+        val environment = containerSystemManager.taskEnvironment()
+        terminalManager.createChrootTerminal(environment.rootfsPath, environment.runtimePath, environment.terminalPath)
         Unit
     }
 
@@ -650,9 +655,9 @@ open class MainService(
         taskManager.unregisterCallback(notificationTaskCallback)
         serviceNotifications.close()
         taskManager.close()
+        terminalManager.close()
         containerSystemManager.close()
         initializer.close()
-        terminalManager.close()
         wifiLogAnalyzer.close()
         serviceLogRecorder.setOnVisibleRangeChanged(null)
         systemWifiLogRecorder.setOnVisibleRangeChanged(null)

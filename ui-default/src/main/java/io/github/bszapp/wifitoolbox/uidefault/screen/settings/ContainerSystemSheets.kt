@@ -4,12 +4,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -27,7 +23,7 @@ import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.component.BlockingLoadingDialog
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
@@ -147,13 +143,13 @@ fun UninstallContainerConfirmationDialog(
 }
 
 @Composable
-fun ContainerProgressSheet(state: ContainerState) {
-    SingleOverlayBottomSheet(
-        show = state.isBusy,
-        title = state.operation?.title ?: "容器系统",
-        allowDismiss = false,
-        onDismissRequest = {},
-        renderInRootScaffold = true,
+fun ContainerProgressSheet(state: ContainerState, onInterrupt: (Long) -> Unit) {
+    BlockingLoadingDialog(
+        visible = state.isBusy,
+        operationId = state.operationId,
+        text = "${state.operation?.title ?: "容器系统"}：${state.progress?.message.orEmpty()}",
+        interruptionWarning = "强制停止容器文件操作。已经解压或删除的内容不会自动恢复，容器可能需要重新安装。",
+        onInterrupt = onInterrupt,
     ) {
         ContainerProgressContent(progress = state.progress)
     }
@@ -162,17 +158,11 @@ fun ContainerProgressSheet(state: ContainerState) {
 @Composable
 private fun ContainerProgressContent(progress: ContainerProgress?) {
     val fraction = progress?.fraction?.coerceIn(0f, 1f) ?: 0f
-    val bottomSafeDrawingPadding = WindowInsets.safeDrawing
-        .asPaddingValues()
-        .calculateBottomPadding()
+    val measuredProgress = progress?.message == "正在解压" || progress?.message == "正在删除"
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            text = progress?.message.orEmpty(),
-            color = MiuixTheme.colorScheme.onSurface,
-        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -185,7 +175,7 @@ private fun ContainerProgressContent(progress: ContainerProgress?) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
+            if (measuredProgress) Text(
                 text = "${(fraction * 100).roundToInt()}%",
                 modifier = Modifier.width(48.dp),
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -193,10 +183,9 @@ private fun ContainerProgressContent(progress: ContainerProgress?) {
                 textAlign = TextAlign.End,
             )
         }
-        LinearProgressIndicator(
+        if (measuredProgress) LinearProgressIndicator(
             modifier = Modifier.fillMaxWidth(),
             progress = fraction,
         )
-        Spacer(Modifier.height(4.dp + bottomSafeDrawingPadding))
     }
 }

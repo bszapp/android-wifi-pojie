@@ -56,7 +56,10 @@ internal class HashcatKernelCompiler(
         val caches = linkedSetOf<File>()
         var ready = false
         try {
-            check(runtime.mkdirs()) { "无法创建内核编译目录" }
+            check(runtime.mkdirs()) {
+                "无法创建内核编译目录：$runtime，uid=${android.os.Process.myUid()}，" +
+                    "父目录存在=${runtime.parentFile?.isDirectory}，可写=${runtime.parentFile?.canWrite()}"
+            }
             val executable = File(runtime, "libhashcat.so")
             ParcelFileDescriptor.AutoCloseInputStream(input).use { source ->
                 executable.outputStream().use { source.copyTo(it, 64 * 1024) }

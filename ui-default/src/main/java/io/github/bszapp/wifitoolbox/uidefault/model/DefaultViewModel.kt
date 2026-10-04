@@ -34,7 +34,15 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     val tasks = controller.tasks
     val containerState = controller.containers.state
 
-    val startup = StartupUiState(controller, viewModelScope)
+    val startup = StartupUiState(controller, viewModelScope) { exit, error ->
+        showConfirmationDialog(
+            title = "服务退出失败",
+            content = "${error.message ?: error.javaClass.name}\n\n确认断开与服务的连接？服务可能仍在运行，未完成保存的任务数据可能丢失。" +
+                if (exit) "确认后将退出应用。" else "确认后将返回工作模式选择界面。",
+            confirmButtonText = "确认断开",
+            onConfirmed = { controller.startup.disconnect(exit) },
+        )
+    }
     val wifiList = WifiListUiState(
         controller = controller,
         scope = viewModelScope,
@@ -184,6 +192,7 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     fun updateContainer() = controller.containers.update()
     fun resetContainer() = controller.containers.reset()
     fun uninstallContainer() = controller.containers.uninstall()
+    fun interruptContainer(operationId: Long) = controller.containers.interrupt(operationId)
 
     //TODO: 废弃的API
 }

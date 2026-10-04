@@ -1,40 +1,18 @@
 package io.github.bszapp.wifitoolbox.uidefault.widget.wifilist
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiModeSwitch
-import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
-import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
-import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.theme.MiuixTheme
+import io.github.bszapp.wifitoolbox.uidefault.component.BlockingLoadingDialog
 
 /** 始终参与组合；服务保留的切换目标让退出动画期间的文字保持不变。 */
 @Composable
-internal fun WifiModeSwitchSheet(progress: WifiModeSwitch?) {
-    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
+internal fun WifiModeSwitchSheet(progress: WifiModeSwitch?, onInterrupt: (Long) -> Unit) {
     val message = progress?.targetMode?.let { "正在切换到${it.displayName}" } ?: "正在切换网卡模式"
-    SingleOverlayBottomSheet(
-        show = progress?.isRunning == true,
-        title = "切换网卡模式",
-        allowDismiss = false,
-        onDismissRequest = {},
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = bottomPadding),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CircularProgressIndicator()
-            Text(message, style = MiuixTheme.textStyles.body2)
-        }
-    }
+    BlockingLoadingDialog(
+        visible = progress?.isRunning == true,
+        operationId = progress?.operationId ?: 0L,
+        text = message,
+        interruptionWarning = "强制结束模式切换终端及相关操作，并重新读取网卡实际模式。已执行的命令不会自动回滚。",
+        onInterrupt = onInterrupt,
+    )
 }

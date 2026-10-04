@@ -11,6 +11,7 @@ interface IContainerController {
     fun update()
     fun reset()
     fun uninstall()
+    fun interrupt(operationId: Long)
 }
 
 @Parcelize
@@ -21,6 +22,7 @@ data class ContainerState(
     val progress: ContainerProgress? = null,
     val errorMessage: String? = null,
     val revision: Long = 0L,
+    val operationId: Long = 0L,
 ) : Parcelable {
     val isBusy: Boolean
         get() = systemStatus == ContainerSystemStatus.WORKING
@@ -49,7 +51,7 @@ data class ContainerProgress(
     val fraction: Float,
 ) : Parcelable
 
-/** 服务从 App 提供的私有数据目录派生 rootfs 和运行目录；所有容器文件操作在服务执行。 */
+/** 服务查询系统安装记录后生成的内部环境；所有容器文件操作在服务执行。 */
 @Parcelize
 data class ContainerEnvironment(
     val appDataPath: String,

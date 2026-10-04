@@ -1,7 +1,8 @@
 package io.github.bszapp.wifitoolbox.uidefault.component.miuix.animation
 
-import android.annotation.SuppressLint
 import android.graphics.RuntimeShader
+import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.VisibilityThreshold
@@ -21,7 +22,7 @@ import kotlinx.coroutines.launch
 import io.github.bszapp.wifitoolbox.uidefault.component.miuix.modifier.inspectDragGestures
 import org.intellij.lang.annotations.Language
 
-@SuppressLint("NewApi")
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 class InteractiveHighlight(
     val animationScope: CoroutineScope,
     val position: (size: Size, offset: Offset) -> Offset = { _, offset -> offset }

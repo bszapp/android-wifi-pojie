@@ -1,7 +1,6 @@
 package io.github.bszapp.wifitoolbox.service;
 
 import android.os.ParcelFileDescriptor;
-import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment;
 import io.github.bszapp.wifitoolbox.contract.container.ContainerOperationRequest;
 import io.github.bszapp.wifitoolbox.contract.container.ContainerState;
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest;
@@ -25,9 +24,9 @@ interface IMainService {
     StartupInfo getStartupInfo();
     AndroidApiResponse executeAndroidApi(in AndroidApiRequest request);
 
-    void configureContainerSystem(in ContainerEnvironment environment);
     ContainerState getContainerState();
     boolean executeContainerOperation(in ContainerOperationRequest request, in ParcelFileDescriptor archive);
+    void interruptContainerOperation(long operationId);
     void registerContainerSystemCallback(IContainerSystemCallback cb);
     void unregisterContainerSystemCallback(IContainerSystemCallback cb);
 
@@ -43,12 +42,13 @@ interface IMainService {
     void refreshSavedWifiNetworks();
     int saveWifiNetwork(String ssid, String password);
     boolean startWifiScan();
-    void setWifiMode(int source, String rootfsPath, String runtimePath, String terminalPath);//TODO:为什么传这么多信息，服务不知道吗？下同
-    void configureWifiEnvironment(String rootfsPath, String runtimePath, String terminalPath);
+    void setWifiMode(int source);//TODO:为什么传这么多信息，服务不知道吗？下同
     void setHybridScanEnabled(boolean enabled);
     void setMonitorCapture(boolean enabled, int frequencyMhz, boolean hopping);
     void clearMonitorCapture(boolean handshakesOnly);
-    void enterMonitorMode(String command, String rootfsPath, String runtimePath, String terminalPath);
+    void interruptWifiModeSwitch(long operationId);
+    void interruptMonitorClear(long operationId);
+    void enterMonitorMode(String command);
     ParcelFileDescriptor getMonitorChanges(long sessionGeneration, long afterRevision);
     void exportMonitorPcap(String requestId, String mode, String bssid, String deviceMac, in String[] subtypeIds);
     void exportMonitorHandshakePcap(String requestId, String bssid, String deviceMac, String handshakeId);
@@ -65,7 +65,7 @@ interface IMainService {
     long[] getTerminalLogRange(long terminalId);
     String getTerminalInputPrompt(long terminalId);
     ParcelFileDescriptor getTerminalLogs(long terminalId, long fromIdInclusive, long toIdInclusive);
-    void createServiceTerminal(String rootfsPath, String runtimePath, String terminalPath);
+    void createServiceTerminal();
     oneway void clearTerminalLogs(long terminalId);//TODO:oneway是啥
     oneway void sendTerminalInput(long terminalId, String text);
     oneway void stopTerminal(long terminalId);

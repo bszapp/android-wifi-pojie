@@ -31,8 +31,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.OutputStreamWriter
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
@@ -54,7 +54,12 @@ internal class MonitorModeController(
     private var captureTerminalId: Long? = null
     private var statisticsTerminalId: Long? = null
     private var eventInput: FileInputStream? = null
-    private var commandWriter: OutputStreamWriter? = null
+    private var commandWriter: FileOutputStream? = null
+    private var processReady: CompletableFuture<Unit>? = null
+    private val captureRequests = linkedMapOf<Long, CompletableFuture<Unit>>()
+    private val requestedCaptureStates = linkedMapOf<Long, Boolean>()
+    private var captureStateSequence = -1L
+    private var nextCaptureRequestId = 0L
     private var pipeFiles: PipeFiles? = null
     private var captureFile: File? = null
     private var exportDirectory: File? = null
@@ -78,6 +83,7 @@ internal class MonitorModeController(
 
     /** 心跳只读取诊断快照，不等待业务锁或 FIFO。 */
     private class DiagnosticSession(val generation: Long) {
+        @Volatile var lastHealthAt = SystemClock.elapsedRealtime()
         @Volatile var active = true
         @Volatile var phase = "waitingEvent"
         @Volatile var phaseSince = SystemClock.elapsedRealtime()
@@ -102,8 +108,10 @@ internal class MonitorModeController(
         rootfsPath: String,
         runtimePath: String,
         terminalPath: String,
-    ) {
-        stop()
+        resumeCapture: Boolean = false,
+    ): CompletableFuture<Unit> {
+        val previousParts = synchronized(lock) { captureParts.toList() }
+        if (!resumeCapture) stop()
 
         val rootfs = File(rootfsPath)
         val capture = File(rootfs, CAPTURE_FILE_RELATIVE_PATH)
@@ -111,32 +119,37 @@ internal class MonitorModeController(
         require(parent.isDirectory || parent.mkdirs()) {
             "无法创建监听模式临时目录: ${parent.absolutePath}"
         }
-        if (capture.exists() && !capture.delete()) {
+        if (!resumeCapture && capture.exists() && !capture.delete()) {
             throw IOException("无法删除旧的 /tmp/wlanlogs.pcap")
         }
 
-        val pipes = preparePipes(rootfs)
+        val pipes = preparePipes(rootfs, resumeCapture)
         val input = FileInputStream(
             Os.open(pipes.eventPipe.absolutePath, OsConstants.O_RDWR, 0),
         )
         val writer = FileOutputStream(
-            Os.open(pipes.commandPipe.absolutePath, OsConstants.O_RDWR, 0),
-        ).writer(Charsets.UTF_8)
+            Os.open(pipes.commandPipe.absolutePath, OsConstants.O_RDWR or OsConstants.O_NONBLOCK, 0),
+        )
+        val ready = CompletableFuture<Unit>()
         val sessionGeneration = synchronized(lock) {
             generation += 1
             mirrorGeneration++
             activeMirror = CaptureMirror()
             preparedMirror = CaptureMirror()
             captureFile = capture
-            captureParts = listOf(capture)
+            captureParts = if (resumeCapture) previousParts else listOf(capture)
             nonHandshakeBytes = 0L
             clearProgress = null
             eventInput = input
             commandWriter = writer
+            processReady = ready
             exportDirectory = pipes.exportDirectory
-            recordedBytes = 0L
+            recordedBytes = recordedSizeLocked()
             statisticsPublishScheduled = false
             stopping = false
+            capturing = false
+            clearing = false
+            captureStateSequence = -1L
             generation
         }
         val diagnostic = DiagnosticSession(sessionGeneration)
@@ -146,6 +159,7 @@ internal class MonitorModeController(
         executor.execute { diagnosticHeartbeat(diagnostic) }
         executor.execute { readStatistics(input, sessionGeneration) }
 
+        var startupTerminalId: Long? = null
         try {
             val statisticsId = terminalManager.createChrootTerminal(
                 rootfsPath = rootfsPath,
@@ -155,20 +169,39 @@ internal class MonitorModeController(
                     handleTerminalExit(terminalId, exitCode, "监听模式统计终端")
                 },
             )
-            synchronized(lock) { statisticsTerminalId = statisticsId }
+            startupTerminalId = statisticsId
+            synchronized(lock) {
+                check(generation == sessionGeneration && !stopping) { "监听统计会话已结束" }
+                statisticsTerminalId = statisticsId
+            }
+            check(statisticsId in terminalManager.aliveSnapshot().terminalIds) { "监听统计终端启动后已退出" }
             Log.d(TAG, "[MonitorDiagnostic] statisticsTerminal session=$sessionGeneration terminalId=$statisticsId")
             terminalManager.writeInput(
                 statisticsId,
                 "$STATISTICS_COMMAND --command-pipe /tmp/$PIPE_DIRECTORY_NAME/${pipes.commandFifoId} " +
-                    "--event-pipe /tmp/$PIPE_DIRECTORY_NAME/${pipes.eventFifoId}",
+                    "--event-pipe /tmp/$PIPE_DIRECTORY_NAME/${pipes.eventFifoId}" +
+                    if (resumeCapture) (previousParts.filter { it != capture } + capture).joinToString("") {
+                        val path = "/" + it.relativeTo(rootfs).invariantSeparatorsPath
+                        " --resume-part '${path.replace("'", "'\\''")}'"
+                    } else "",
             )
 
             publishEmptyStatistics()
             executor.execute { pollRecordedBytes(sessionGeneration) }
         } catch (error: Throwable) {
-            stop()
+            failProcess(sessionGeneration, "启动监听统计进程", error)
+            startupTerminalId?.let { terminalManager.stopTerminal(it, reason = "监听统计进程启动失败") }
             throw error
         }
+        return ready
+    }
+
+    fun ensureRunning(environment: HybridTaskEnvironment): CompletableFuture<Unit> {
+        synchronized(lock) {
+            if (statisticsTerminalId != null) return requireNotNull(processReady)
+        }
+        return start(environment.rootfsPath, environment.runtimePath, environment.terminalPath,
+            resumeCapture = synchronized(lock) { captureFile != null })
     }
 
     fun stop() {
@@ -184,6 +217,7 @@ internal class MonitorModeController(
                 eventInput = eventInput,
                 commandWriter = commandWriter,
                 pipeFiles = pipeFiles,
+                pending = takePendingCommandsLocked(),
             ).also {
                 captureTerminalId = null
                 statisticsTerminalId = null
@@ -204,6 +238,7 @@ internal class MonitorModeController(
             }
         }
 
+        resources.pending.forEach { it.completeExceptionally(IOException("监听模式已停止")) }
         runCatching { resources.eventInput?.close() }
         runCatching { resources.commandWriter?.close() }
         resources.statisticsTerminalId?.let { terminalId ->
@@ -229,30 +264,50 @@ internal class MonitorModeController(
     fun isClearing(): Boolean = synchronized(lock) { clearing }
     fun captureClearProgress(): MonitorCaptureClearProgress? = synchronized(lock) { clearProgress }
 
-    fun setCapture(enabled: Boolean) {
-        val previous = synchronized(lock) {
+    fun setCapture(enabled: Boolean): CompletableFuture<Unit> {
+        val request = CompletableFuture<Unit>()
+        val requestId = synchronized(lock) {
             check(captureFile != null && !clearing)
-            capturing.also { if (enabled) capturing = true }
+            if (!enabled && (statisticsTerminalId == null || (processReady?.isDone != true && !capturing))) {
+                return CompletableFuture.completedFuture(Unit)
+            }
+            check(statisticsTerminalId != null && processReady?.isDone == true) { "监听统计进程尚未就绪" }
+            (++nextCaptureRequestId).also { captureRequests[it] = request; requestedCaptureStates[it] = enabled }
         }
         try {
-            sendCommand(JSONObject().put("type", "capture").put("enabled", enabled))
+            sendCommand(JSONObject().put("type", "capture").put("enabled", enabled).put("requestId", requestId))
         } catch (error: Throwable) {
-            synchronized(lock) { capturing = previous }
-            throw error
+            synchronized(lock) { captureRequests.remove(requestId); requestedCaptureStates.remove(requestId) }
+            request.completeExceptionally(error)
         }
+        return request
     }
 
     fun clearCapture(handshakesOnly: Boolean) {
-        synchronized(lock) {
+        val request = CompletableFuture<Unit>()
+        val (session, requestId) = synchronized(lock) {
             check(captureFile != null && !clearing) { "抓取数据正在清理" }
+            check(statisticsTerminalId != null && processReady?.isDone == true) { "监听统计进程尚未就绪" }
             clearing = true
-            clearProgress = MonitorCaptureClearProgress(handshakesOnly, isRunning = true)
+            val id = ++nextCaptureRequestId
+            clearProgress = MonitorCaptureClearProgress(handshakesOnly, isRunning = true, operationId = id)
+            captureRequests[id] = request
+            generation to id
         }
         publishEmptyStatistics()
         try {
-            sendCommand(JSONObject().put("type", "clear").put("handshakesOnly", handshakesOnly))
+            sendCommand(JSONObject().put("type", "clear").put("handshakesOnly", handshakesOnly).put("requestId", requestId))
+            executor.execute {
+                try { request.get(CLEAR_CONFIRM_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                catch (error: java.util.concurrent.TimeoutException) {
+                    failProcess(session, "清理抓取数据", IOException("等待清理完成超时，现有抓包文件保留", error))
+                } catch (_: java.util.concurrent.ExecutionException) {
+                    // 请求失败由 FIFO 或终端退出路径回传。
+                } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            }
         } catch (error: Throwable) {
             synchronized(lock) {
+                captureRequests.remove(requestId)
                 clearing = false
                 clearProgress = clearProgress?.copy(isRunning = false)
             }
@@ -268,9 +323,14 @@ internal class MonitorModeController(
         Log.d(TAG, "[MonitorDiagnostic] commandSendBegin session=$session type=$type " +
             "enabled=${command.opt("enabled")} handshakesOnly=${command.opt("handshakesOnly")} " +
             "requestId=${command.opt("requestId")}")
-        val writer = synchronized(lock) { commandWriter ?: error("监听命令通道尚未连接") }
+        val writer = synchronized(lock) {
+            check(statisticsTerminalId != null && !stopping) { "监听统计进程已退出" }
+            commandWriter ?: error("监听命令通道尚未连接")
+        }
         try {
-            synchronized(writer) { writer.write(command.toString() + "\n"); writer.flush() }
+            val bytes = (command.toString() + "\n").toByteArray(Charsets.UTF_8)
+            require(bytes.size <= 4096) { "监听命令超过 FIFO 原子写入上限" }
+            synchronized(writer) { writer.write(bytes) }
             Log.d(TAG, "[MonitorDiagnostic] commandSendEnd session=$session type=$type elapsedMs=${SystemClock.elapsedRealtime() - started}")
         } catch (error: Throwable) {
             Log.w(TAG, "[MonitorDiagnostic] commandSendFailed session=$session type=$type " +
@@ -288,9 +348,8 @@ internal class MonitorModeController(
     ) {
         val command = synchronized(lock) {
             check(!stopping && captureFile != null) { "监听模式尚未运行" }
-            val writer = commandWriter ?: error("监听模式命令通道尚未建立")
             val directory = exportDirectory ?: error("监听模式导出目录尚未建立")
-            writer to JSONObject()
+            JSONObject()
                 .put("type", "export")
                 .put("requestId", requestId)
                 .put("mode", mode)
@@ -300,11 +359,7 @@ internal class MonitorModeController(
                 .put("subtypeIds", org.json.JSONArray(subtypeIds))
                 .also { require(directory.isDirectory || directory.mkdirs()) }
         }
-        synchronized(command.first) {
-            command.first.write(command.second.toString())
-            command.first.write("\n")
-            command.first.flush()
-        }
+        sendCommand(command)
     }
 
     fun exportHandshakePcap(
@@ -390,21 +445,21 @@ internal class MonitorModeController(
         }
     }
 
-    private fun preparePipes(rootfs: File): PipeFiles {
+    private fun preparePipes(rootfs: File, preserveCapture: Boolean): PipeFiles {
         val tmp = File(rootfs, "tmp")
         require(tmp.isDirectory || tmp.mkdirs()) {
             "无法创建 rootfs/tmp: ${tmp.absolutePath}"
         }
         val directory = File(tmp, PIPE_DIRECTORY_NAME)
-        if (directory.exists() && !directory.deleteRecursively()) {
+        if (!preserveCapture && directory.exists() && !directory.deleteRecursively()) {
             throw IOException("无法清理监听模式通信目录: ${directory.absolutePath}")
         }
-        if (!directory.mkdirs()) {
+        if (!directory.isDirectory && !directory.mkdirs()) {
             throw IOException("无法创建监听模式通信目录: ${directory.absolutePath}")
         }
         Os.chmod(directory.absolutePath, 457)
         val exports = File(directory, EXPORT_DIRECTORY_NAME)
-        if (!exports.mkdirs()) {
+        if (!exports.isDirectory && !exports.mkdirs()) {
             throw IOException("无法创建监听模式导出目录: ${exports.absolutePath}")
         }
         Os.chmod(exports.absolutePath, 493)
@@ -426,7 +481,8 @@ internal class MonitorModeController(
         var countsAt = 0L
         Log.d(TAG, "[MonitorDiagnostic] fifoReaderBegin session=$sessionGeneration")
         try {
-            input.bufferedReader(Charsets.UTF_8).useLines { lines ->
+            input.use {
+                val lines = eventLines(input, sessionGeneration)
                 lines.filter(String::isNotBlank).forEach { line ->
                     val started = SystemClock.elapsedRealtime()
                     diagnostic?.apply {
@@ -468,15 +524,31 @@ internal class MonitorModeController(
             Log.w(TAG, "[MonitorDiagnostic] fifoReaderFailed session=$sessionGeneration " +
                 "lastType=${diagnostic?.eventType} lastSource=${diagnostic?.source} errorType=${error.javaClass.name}")
             if (synchronized(lock) { generation == sessionGeneration && !stopping }) {
-                synchronized(lock) {
-                    clearing = false
-                    clearProgress = clearProgress?.copy(isRunning = false)
-                }
-                publishEmptyStatistics()
-                reportError("读取监听模式统计数据", error)
+                failProcess(sessionGeneration, "读取监听模式统计数据", error)
             }
         }
         Log.d(TAG, "[MonitorDiagnostic] fifoReaderEnd session=$sessionGeneration events=${diagnostic?.eventCount}")
+    }
+
+    private fun eventLines(input: FileInputStream, session: Long): Sequence<String> = sequence {
+        val pending = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (isCurrentSession(session)) {
+            val available = input.available()
+            if (available == 0) { Thread.sleep(5L); continue }
+            val count = input.read(buffer, 0, minOf(buffer.size, available))
+            if (count < 0) return@sequence
+            var start = 0
+            for (index in 0 until count) {
+                if (buffer[index] == '\n'.code.toByte()) {
+                    pending.write(buffer, start, index - start)
+                    yield(pending.toString("UTF-8"))
+                    pending.reset()
+                    start = index + 1
+                }
+            }
+            pending.write(buffer, start, count - start)
+        }
     }
 
     private fun diagnosticHeartbeat(diagnostic: DiagnosticSession) {
@@ -487,6 +559,10 @@ internal class MonitorModeController(
             }
             if (!diagnostic.active) return
             val now = SystemClock.elapsedRealtime()
+            if (now - diagnostic.lastHealthAt > HEALTH_TIMEOUT_MILLIS) {
+                failProcess(diagnostic.generation, "监听统计健康检测", IOException("统计脚本健康事件超时，录制已停止，现有抓包文件保留"))
+                return
+            }
             Log.d(TAG, "[MonitorDiagnostic] heartbeat session=${diagnostic.generation} phase=${diagnostic.phase} " +
                 "phaseAgeMs=${now - diagnostic.phaseSince} lastType=${diagnostic.eventType} source=${diagnostic.source} " +
                 "events=${diagnostic.eventCount} characters=${diagnostic.characterCount} counts=${diagnostic.eventCounts} " +
@@ -515,14 +591,42 @@ internal class MonitorModeController(
             if (event.optString("source") == "retained") preparedMirror else activeMirror
         }
         when (event.optString("type")) {
+            "health" -> {
+                diagnosticSession?.takeIf { it.generation == sessionGeneration }?.lastHealthAt = SystemClock.elapsedRealtime()
+                val mainStalled = event.getLong("mainAgeMillis") > HEALTH_TIMEOUT_MILLIS
+                val copyStalled = event.getBoolean("capturing") &&
+                    (!event.getBoolean("processAlive") || !event.getBoolean("copyAlive") ||
+                        (!event.getBoolean("copyWaitingForPacket") && event.getLong("copyAgeMillis") > HEALTH_TIMEOUT_MILLIS))
+                if (mainStalled || copyStalled) throw IOException("监听工作线程无响应：解析=$mainStalled，复制=$copyStalled；现有抓包文件保留")
+            }
+            "ready" -> synchronized(lock) {
+                processReady?.takeIf { generation == sessionGeneration && !stopping }
+            }?.complete(Unit)
             "captureState" -> {
-                synchronized(lock) {
+                val requestId = event.optLong("requestId", -1L)
+                val state = event.getBoolean("capturing")
+                var requestedState: Boolean? = null
+                val request = synchronized(lock) {
                     if (generation != sessionGeneration || stopping) return
-                    capturing = event.getBoolean("capturing")
-                    clearing = false
-                    clearProgress = clearProgress?.copy(isRunning = false)
+                    val sequence = event.getLong("sequence")
+                    if (sequence <= captureStateSequence) return
+                    captureStateSequence = sequence
+                    capturing = state
+                    requestedState = requestedCaptureStates.remove(requestId)
+                    if (requestId == clearProgress?.operationId) {
+                        clearing = false
+                        clearProgress = clearProgress?.copy(isRunning = false)
+                    }
+                    captureRequests.remove(requestId)
                 }
                 publishEmptyStatistics()
+                if (requestedState != null && requestedState != state) {
+                    val error = IOException("tcpdump 未保持请求的录制状态：期望 $requestedState，实际 $state")
+                    request?.completeExceptionally(error)
+                    failProcess(sessionGeneration, "确认录制状态", error)
+                } else if (requestId < 0L && !state) {
+                    failProcess(sessionGeneration, "录制进程异常结束", IOException("tcpdump 已停止，现有抓包文件保留"))
+                } else request?.complete(Unit)
             }
             "captureFiles" -> {
                 synchronized(lock) {
@@ -596,10 +700,14 @@ internal class MonitorModeController(
             }
             "commandFailed" -> {
                 if (isCurrentSession(sessionGeneration)) {
-                    reportError(
-                        "处理监听模式命令",
-                        IOException(event.optString("message", "Python 命令处理失败")),
-                    )
+                    val error = IOException(event.optString("message", "Python 命令处理失败"))
+                    val request = synchronized(lock) {
+                        val id = event.optLong("requestId", -1L)
+                        requestedCaptureStates.remove(id)
+                        captureRequests.remove(id)
+                    }
+                    if (request != null) request.completeExceptionally(error)
+                    else reportError("处理监听模式命令", error)
                 }
             }
             else -> throw IOException("监听模式统计脚本返回未知事件: $event")
@@ -1111,7 +1219,9 @@ internal class MonitorModeController(
 
     fun statisticsHeader(): MonitorModeStatistics = synchronized(lock) { statisticsSnapshotLocked() }
 
-    fun isCurrentSnapshot(sessionGeneration: Long): Boolean = synchronized(lock) { mirrorGeneration == sessionGeneration && !stopping }
+    fun isCurrentSnapshot(sessionGeneration: Long): Boolean = synchronized(lock) {
+        mirrorGeneration == sessionGeneration && !stopping && captureFile != null
+    }
 
     fun isCurrentSession(sessionGeneration: Long): Boolean = synchronized(lock) {
         generation == sessionGeneration && !stopping
@@ -1131,22 +1241,61 @@ internal class MonitorModeController(
         exitCode: Int,
         terminalName: String,
     ) {
-        val unexpected = synchronized(lock) {
-            !stopping &&
-                (captureTerminalId == terminalId || statisticsTerminalId == terminalId)
+        val session = synchronized(lock) {
+            generation.takeIf { !stopping && statisticsTerminalId == terminalId }
         }
-        if (unexpected) {
-            synchronized(lock) {
+        if (session != null) {
+            failProcess(session, "${terminalName}意外退出",
+                IllegalStateException("终端 $terminalId 已退出，退出码 $exitCode"))
+        }
+    }
+
+    private fun takePendingCommandsLocked(): List<CompletableFuture<Unit>> =
+        (captureRequests.values.toList() + listOfNotNull(processReady)).also {
+            captureRequests.clear()
+            requestedCaptureStates.clear()
+            processReady = null
+        }
+
+    private fun failProcess(session: Long, operation: String, error: Throwable, reportFailure: Boolean = true,
+                            clearOperationId: Long? = null): Boolean {
+        val resources = synchronized(lock) {
+            if (generation != session || stopping) return false
+            if (clearOperationId != null && (!clearing || clearProgress?.operationId != clearOperationId)) return false
+            generation++
+            diagnosticSession?.active = false
+            Resources(null, statisticsTerminalId, eventInput, commandWriter, null,
+                takePendingCommandsLocked()).also {
+                statisticsTerminalId = null
+                eventInput = null
+                commandWriter = null
                 capturing = false
                 clearing = false
+                statisticsPublishScheduled = false
                 clearProgress = clearProgress?.copy(isRunning = false)
             }
-            publishEmptyStatistics()
-            reportError(
-                "${terminalName}意外退出",
-                IllegalStateException("终端 $terminalId 已退出，退出码 $exitCode"),
-            )
         }
+        resources.pending.forEach { it.completeExceptionally(error) }
+        resources.statisticsTerminalId?.let { terminalManager.stopTerminal(it, reason = operation) }
+        runCatching { resources.commandWriter?.close() }
+        runCatching { resources.eventInput?.close() }
+        publishEmptyStatistics()
+        if (reportFailure) reportError(operation, error)
+        return true
+    }
+
+    fun interruptClear(operationId: Long): Boolean {
+        val session = synchronized(lock) { generation }
+        return failProcess(session, "用户强制中断抓包清理", IOException("用户强制中断抓包清理"),
+            reportFailure = false, clearOperationId = operationId)
+    }
+
+    fun abortProcess(error: Throwable) {
+        val session = synchronized(lock) {
+            generation.takeIf { statisticsTerminalId != null || eventInput != null }
+        } ?: return
+        // 调用方负责发布此操作的失败；这里仅释放进程与通信资源。
+        failProcess(session, "终止无响应的监听统计进程", error, reportFailure = false)
     }
 
     private fun reportError(operation: String, error: Throwable) {
@@ -1158,8 +1307,9 @@ internal class MonitorModeController(
         val captureTerminalId: Long?,
         val statisticsTerminalId: Long?,
         val eventInput: FileInputStream?,
-        val commandWriter: OutputStreamWriter?,
+        val commandWriter: FileOutputStream?,
         val pipeFiles: PipeFiles?,
+        val pending: List<CompletableFuture<Unit>> = emptyList(),
     )
 
     private data class PipeFiles(
@@ -1321,6 +1471,8 @@ internal class MonitorModeController(
         const val MAX_HC22000_LENGTH = 256 * 1024
         const val RECORDED_BYTES_POLL_INTERVAL_MILLIS = 50L
         const val STATISTICS_PUBLISH_INTERVAL_MILLIS = 50L
+        const val CLEAR_CONFIRM_TIMEOUT_MILLIS = 5_000L
+        const val HEALTH_TIMEOUT_MILLIS = 10_000L
         val PCAP_MAGIC_VALUES = arrayOf(
             byteArrayOf(0xd4.toByte(), 0xc3.toByte(), 0xb2.toByte(), 0xa1.toByte()),
             byteArrayOf(0x4d, 0x3c, 0xb2.toByte(), 0xa1.toByte()),

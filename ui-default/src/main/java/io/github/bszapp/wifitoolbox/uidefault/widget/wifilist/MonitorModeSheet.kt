@@ -1,5 +1,6 @@
 package io.github.bszapp.wifitoolbox.uidefault.widget.wifilist
 
+import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,9 +18,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
+import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.RadioButton
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
@@ -29,7 +34,10 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 @Composable
 internal fun MonitorModeSheet(show: Boolean, onDismiss: () -> Unit, onExecute: (String) -> Unit) {
-    var command by rememberSaveable { mutableStateOf(DEFAULT_MONITOR_COMMAND) }
+    var preset by rememberSaveable {
+        mutableStateOf(if (isQualcommDevice()) MonitorCommandPreset.QUALCOMM else MonitorCommandPreset.GENERAL)
+    }
+    var command by rememberSaveable { mutableStateOf(preset.command) }
     val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     SingleOverlayBottomSheet(
         show = show,
@@ -49,10 +57,25 @@ internal fun MonitorModeSheet(show: Boolean, onDismiss: () -> Unit, onExecute: (
                 item {
                     Text(
                         text = "此命令只切换网卡模式，持续抓取的信道在开始抓取时选择。\n" +
-                            "支持监听模式的网卡较少，可能需要自定义内核。以下命令已在 Redmi Note 12T Pro 测试，其他设备支持情况未知，可按设备情况修改。",
+                            "一般命令已在 Redmi Note 12T Pro 测试，高通专用命令已在小米6测试。监听模式支持情况依赖设备驱动，可选择命令并按设备情况编辑。",
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         style = MiuixTheme.textStyles.body2,
                     )
+                }
+                item {
+                    Card {
+                        MonitorCommandPreset.entries.forEach { option ->
+                            BasicComponent(
+                                title = option.title,
+                                role = Role.RadioButton,
+                                onClick = {
+                                    preset = option
+                                    command = option.command
+                                },
+                                endActions = { RadioButton(selected = preset == option, onClick = null) },
+                            )
+                        }
+                    }
                 }
                 item {
                     TextField(value = command, onValueChange = { command = it },
@@ -69,6 +92,17 @@ internal fun MonitorModeSheet(show: Boolean, onDismiss: () -> Unit, onExecute: (
     }
 }
 
+private fun isQualcommDevice(): Boolean =
+    Build.HARDWARE.startsWith("qcom", ignoreCase = true) ||
+        Build.HARDWARE.contains("qualcomm", ignoreCase = true) ||
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            Build.SOC_MANUFACTURER.contains("qualcomm", ignoreCase = true))
+
+private enum class MonitorCommandPreset(val title: String, val command: String) {
+    GENERAL("一般命令", DEFAULT_MONITOR_COMMAND),
+    QUALCOMM("高通专用", QUALCOMM_MONITOR_COMMAND),
+}
+
 private const val DEFAULT_MONITOR_COMMAND = """svc wifi disable
 setprop ctl.restart wificond
 setprop ctl.restart vendor.wifi_hal_legacy
@@ -77,4 +111,17 @@ start vendor.wifi_hal_legacy
 pkill wpa_supplicant
 ip link set wlan0 down
 iw wlan0 set type monitor
+ip link set wlan0 up"""
+
+private const val QUALCOMM_MONITOR_COMMAND = """stop wpa_supplicant
+stop vendor.wifi_hal_legacy
+stop wificond
+ip link set wlan0 down
+if ip link show wlan1 >/dev/null 2>&1; then
+    ip link set wlan1 down
+fi
+if ip link show p2p0 >/dev/null 2>&1; then
+    ip link set p2p0 down
+fi
+printf '4\n' > /sys/module/wlan/parameters/con_mode
 ip link set wlan0 up"""

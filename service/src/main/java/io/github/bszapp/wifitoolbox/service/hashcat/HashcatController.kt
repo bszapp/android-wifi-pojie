@@ -288,11 +288,11 @@ class HashcatController : AutoCloseable {
 
         internal fun kernelCacheDirectory() = File(runtimeBaseDirectory(), "hashcat-cache-${AndroidProcess.myUid()}")
 
-        /** system 使用 Android 系统应用的缓存，shell/root 使用设备 /tmp。 */
+        /** system 使用 Android 系统应用的缓存，shell/root 使用 Android 临时目录。 */
         internal fun runtimeBaseDirectory(): File = if (AndroidProcess.myUid() == 1000) {
             File("/data/user/0/android/cache")
         } else {
-            File("/tmp")
+            File("/data/local/tmp")
         }
     }
 

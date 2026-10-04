@@ -14,6 +14,7 @@ import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.MainServiceStarter
 import io.github.bszapp.wifitoolbox.tools.AndroidApiClient
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -35,6 +36,8 @@ class ProcessLauncher(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var launchJob: Job? = null
     private var brokerWatchJob: Job? = null
+    private var autoReconnectEnabled = true
+    private var stoppingBinder: IBinder? = null
 
     private val _state = kotlinx.coroutines.flow.MutableStateFlow(StartupState())
     val state: kotlinx.coroutines.flow.StateFlow<StartupState> = _state
@@ -111,7 +114,8 @@ class ProcessLauncher(
     }
 
     private fun canAcceptBrokerBinder(): Boolean =
-        !(activeBinder?.isBinderAlive == true && mainService != null)
+        autoReconnectEnabled && stoppingBinder == null &&
+            !(activeBinder?.isBinderAlive == true && mainService != null)
 
     /**
      * 预连接校验：只读取 StartupInfo，不更新 App 自己的连接状态。
@@ -191,6 +195,7 @@ class ProcessLauncher(
                 scope.launch(Dispatchers.Main) {
                     if (activeBinder === binder &&
                         deathRecipient === recipient &&
+                        stoppingBinder !== binder &&
                         _state.value.status == StartupStatus.RUNNING
                     ) {
                         cleanupActive()
@@ -205,6 +210,7 @@ class ProcessLauncher(
 
             binder.linkToDeath(recipient, 0)
             deathRecipient = recipient
+            autoReconnectEnabled = true
 
             _state.value = StartupState(
                 status = StartupStatus.RUNNING,
@@ -326,27 +332,47 @@ class ProcessLauncher(
         }
     }
 
-    fun stop(onStopped: () -> Unit = {}) {
+    suspend fun stop(resetStartupState: Boolean = true) = withContext(Dispatchers.Main) {
         launchJob?.cancel()
         launchJob = null
 
         val service = mainService
-        val toClose = activeLauncher
-
-        scope.launch {
-            try { if (service != null) withContext(Dispatchers.IO) { onBeforeServiceStop(service) } }
-            catch (error: Throwable) { onAndroidApiError("保存任务并退出服务", error); return@launch }
-            cleanupDeathRecipientOnly()
-            ToolboxServiceProvider.clearBinder()
-            activeLauncher = null
-            withContext(Dispatchers.IO) {
-                runCatching { service?.shutdown() }
-                toClose?.closeQuietly()
+        val binder = activeBinder
+        stoppingBinder = binder
+        try {
+            try {
+                if (service != null) withContext(Dispatchers.IO) {
+                    onBeforeServiceStop(service)
+                    service.shutdown()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // shutdown 会结束服务进程；Binder 随进程死亡属于退出完成。
+                if (binder?.isBinderAlive == true) {
+                    onAndroidApiError("保存任务并退出服务", error)
+                    throw error
+                }
             }
-            _state.value = StartupState()
+            disconnect(resetStartupState)
             Log.d(TAG, "停止服务")
-            onStopped()
+        } finally {
+            if (stoppingBinder === binder) stoppingBinder = null
         }
+    }
+
+    /** 仅断开应用侧连接，不再请求服务退出。主动启动服务后恢复自动接收 Binder。 */
+    suspend fun disconnect(resetStartupState: Boolean = true) = withContext(Dispatchers.Main) {
+        autoReconnectEnabled = false
+        launchJob?.cancel()
+        launchJob = null
+        val toClose = activeLauncher
+        cleanupDeathRecipientOnly()
+        ToolboxServiceProvider.clearBinder()
+        activeLauncher = null
+        withContext(Dispatchers.IO) { toClose?.closeQuietly() }
+        // 退出应用时保留当前启动状态，交由退出广播关闭 Activity，避免先跳到模式选择页。
+        if (resetStartupState) _state.value = StartupState()
     }
 
     private suspend fun createLauncherAndBinder(mode: StartupMode): Pair<AutoCloseable, IBinder> =

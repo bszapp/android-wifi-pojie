@@ -5,6 +5,7 @@ package io.github.bszapp.wifitoolbox.service
 import android.annotation.SuppressLint
 import android.content.AttributionSource
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
@@ -36,6 +37,36 @@ class AndroidApi(
     private val sdk = Build.VERSION.SDK_INT
     private val temporaryWifiNetworkLock = Any()
     private var activeTemporaryWifiNetworkRequest: TemporaryWifiNetworkRequest? = null
+
+    /** 直接查询系统安装记录；不依赖 App 传入目录或创建 ActivityThread/Context。 */
+    internal fun getApplicationInfo(packageName: String, userId: Int): ApplicationInfo = androidBusinessCall(
+        operation = "读取应用安装信息",
+        details = "package=$packageName userId=$userId",
+        successMessage = { "已读取应用安装信息：package=$packageName userId=$userId" },
+    ) {
+        systemApi("IPackageManager.getApplicationInfo") {
+            val binder = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String::class.java).invoke(null, "package") as? IBinder
+                ?: error("PackageManager service 不存在")
+            val manager = Class.forName("android.content.pm.IPackageManager\$Stub")
+                .getMethod("asInterface", IBinder::class.java).invoke(null, binder)
+                ?: error("IPackageManager.asInterface 返回 null")
+            // Android 旧版 flags 为 int，新版为 long；按实际 Binder 接口选择。
+            val method = Class.forName("android.content.pm.IPackageManager").methods.single { method ->
+                val types = method.parameterTypes
+                method.name == "getApplicationInfo" && types.size == 3 &&
+                    types[0] == String::class.java && types[2] == Int::class.javaPrimitiveType &&
+                    (types[1] == Int::class.javaPrimitiveType || types[1] == Long::class.javaPrimitiveType)
+            }
+            val result = if (method.parameterTypes[1] == Long::class.javaPrimitiveType) {
+                method.invoke(manager, packageName, 0L, userId)
+            } else {
+                method.invoke(manager, packageName, 0, userId)
+            }
+            result as? ApplicationInfo
+                ?: error("未找到应用安装信息：$packageName userId=$userId")
+        }
+    }
 
     fun execute(request: AndroidApiRequest): AndroidApiResponse =
         runCatching {

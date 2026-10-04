@@ -27,6 +27,8 @@ interface IWifiListController {
     fun setHybridScanEnabled(enabled: Boolean)
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false)
     fun clearMonitorCapture(handshakesOnly: Boolean)
+    fun interruptModeSwitch(operationId: Long)
+    fun interruptMonitorClear(operationId: Long)
 
     /** 请求 Service 执行进入脚本；持续抓取时单独选择信道。 */
     fun enterMonitorMode(command: String)

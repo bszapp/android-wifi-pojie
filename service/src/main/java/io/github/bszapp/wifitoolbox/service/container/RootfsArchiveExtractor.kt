@@ -7,6 +7,7 @@ import java.io.EOFException
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.InterruptedIOException
 import org.tukaani.xz.XZInputStream
 
 internal object RootfsArchiveExtractor {
@@ -44,6 +45,7 @@ internal object RootfsArchiveExtractor {
         var longLink: String? = null
 
         while (true) {
+            checkInterrupted()
             val headerSize = readFullyOrEof(input, header)
             if (headerSize == 0) break
             if (headerSize != TAR_BLOCK_SIZE) throw EOFException("tar header 不完整")
@@ -105,6 +107,7 @@ internal object RootfsArchiveExtractor {
                         val buffer = ByteArray(BUFFER_SIZE)
                         var remaining = size
                         while (remaining > 0) {
+                            checkInterrupted()
                             val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
                             if (count <= 0) throw EOFException("tar entry 数据不完整: $normalized")
                             stream.write(buffer, 0, count)
@@ -200,6 +203,7 @@ internal object RootfsArchiveExtractor {
         var remaining = count
         val buffer = ByteArray(BUFFER_SIZE)
         while (remaining > 0) {
+            checkInterrupted()
             val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
             if (read <= 0) throw EOFException("归档数据提前结束")
             remaining -= read
@@ -209,6 +213,7 @@ internal object RootfsArchiveExtractor {
     private fun readFully(input: InputStream, data: ByteArray) {
         var offset = 0
         while (offset < data.size) {
+            checkInterrupted()
             val count = input.read(data, offset, data.size - offset)
             if (count <= 0) throw EOFException("归档数据提前结束")
             offset += count
@@ -218,6 +223,7 @@ internal object RootfsArchiveExtractor {
     private fun readFullyOrEof(input: InputStream, data: ByteArray): Int {
         var offset = 0
         while (offset < data.size) {
+            checkInterrupted()
             val count = input.read(data, offset, data.size - offset)
             if (count < 0) return offset
             offset += count
@@ -226,14 +232,23 @@ internal object RootfsArchiveExtractor {
     }
 }
 
+private fun checkInterrupted() {
+    if (Thread.currentThread().isInterrupted) throw InterruptedIOException("用户强制中断容器解压")
+}
+
 private class CountingInputStream(private val delegate: InputStream) : InputStream() {
     var bytesRead = 0L
         private set
 
-    override fun read(): Int = delegate.read().also { if (it >= 0) bytesRead++ }
+    override fun read(): Int {
+        checkInterrupted()
+        return delegate.read().also { if (it >= 0) bytesRead++ }
+    }
 
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
-        delegate.read(buffer, offset, length).also { if (it > 0) bytesRead += it }
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        checkInterrupted()
+        return delegate.read(buffer, offset, length).also { if (it > 0) bytesRead += it }
+    }
 
     override fun close() = delegate.close()
 }

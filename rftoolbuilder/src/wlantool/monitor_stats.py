@@ -6,6 +6,7 @@ import copy
 import uuid
 import base64
 import queue
+import select
 import signal
 import subprocess
 import sys
@@ -30,7 +31,7 @@ PUBLISH_INTERVAL_SECONDS = 0.05
 REALTIME_WINDOW_SECONDS = 1.0
 BYTE_RATE_WINDOW_SECONDS = 5.0
 ANALYSIS_BATCH_MAX_BYTES = 1024 * 1024
-ANALYSIS_BATCH_MAX_PACKETS = 2048
+ANALYSIS_BATCH_MAX_PACKETS = 128
 PCAP_GLOBAL_HEADER_SIZE = 24
 PCAP_PACKET_HEADER_SIZE = 16
 MAX_CAPTURED_PACKET_SIZE = 16 * 1024 * 1024
@@ -241,6 +242,7 @@ def parse_args():
     parser.add_argument("--pcap", required=True)
     parser.add_argument("--command-pipe", required=True)
     parser.add_argument("--event-pipe", required=True)
+    parser.add_argument("--resume-part", action="append", default=[])
     return parser.parse_args()
 
 
@@ -297,15 +299,24 @@ def decode_text(value):
 
 def iter_dot11_elements(packet):
     element = packet.getlayer(Dot11Elt)
-    while isinstance(element, Dot11Elt):
-        yield element
-        element = element.payload
+    if element is None:
+        return
+    # Scapy 的 RSN/厂商扩展等专用元素没有通用 info 字段。
+    data = element.original or bytes(element)
+    offset = 0
+    while offset + 2 <= len(data):
+        element_id, length = data[offset:offset + 2]
+        offset += 2
+        if offset + length > len(data):
+            return
+        yield element_id, data[offset:offset + length]
+        offset += length
 
 
 def ssid_element(packet):
-    for element in iter_dot11_elements(packet):
-        if int(element.ID) == 0:
-            return bytes(element.info)
+    for element_id, info in iter_dot11_elements(packet):
+        if element_id == 0:
+            return info
     return None
 
 
@@ -354,9 +365,7 @@ def packet_security_protocols(packet):
     if dot11 is None or int(dot11.type) != 0 or int(dot11.subtype) not in (5, 8):
         return ()
     protocols = set()
-    for element in iter_dot11_elements(packet):
-        info = bytes(element.info)
-        element_id = int(element.ID)
+    for element_id, info in iter_dot11_elements(packet):
         if element_id == 48:
             if PSK_AKM_TYPE in parse_akm_suites(info, RSN_AKM_OUI):
                 protocols.add("wpa2")
@@ -385,9 +394,8 @@ def parse_wps_attributes(data):
 def wps_device_identity(packet):
     best_name = None
     best_priority = 0
-    for element in iter_dot11_elements(packet):
-        info = bytes(element.info)
-        if int(element.ID) != 221 or not info.startswith(WPS_VENDOR_PREFIX):
+    for element_id, info in iter_dot11_elements(packet):
+        if element_id != 221 or not info.startswith(WPS_VENDOR_PREFIX):
             continue
         attributes = parse_wps_attributes(info[len(WPS_VENDOR_PREFIX):])
         device_name = attributes.get(WPS_DEVICE_NAME)
@@ -1548,34 +1556,94 @@ class CaptureSession:
         self.copied_packets = 0
         self.copied_bytes = 0
         self.last_packet_unix_millis = None
+        self.ready = threading.Event()
+        self.stop_event = threading.Event()
+        self.start_error = None
+        self.state_lock = threading.RLock()
+        self.state_sequence = 0
+        self.copy_progress_at = time.monotonic()
+        self.waiting_for_packet = False
+
+    def publish_state(self, request_id=None):
+        # 状态取值、序号分配和 FIFO 写入同序，退出广播不能被旧启动快照覆盖。
+        with self.state_lock:
+            self.state_sequence += 1
+            self.writer.write({"type": "captureState", "capturing": self.process is not None
+                               and self.process.poll() is None,
+                               "sequence": self.state_sequence, "requestId": request_id})
+
+    def health(self):
+        process = self.process
+        return dict(capturing=process is not None, copyAlive=bool(self.worker and self.worker.is_alive()),
+                    processAlive=bool(process and process.poll() is None),
+                    copyWaitingForPacket=self.waiting_for_packet,
+                    copyAgeMillis=int((time.monotonic() - self.copy_progress_at) * 1000))
 
     def start(self):
         if self.process is not None:
             return
+        if self.worker is not None and self.worker.is_alive():
+            raise RuntimeError("上次抓取线程尚未退出")
+        self.ready.clear()
+        self.stop_event.clear()
+        self.start_error = None
         diagnostic("captureStartRequested", analyzedOffset=self.analyzed_offset)
-        self.process = subprocess.Popen(
-            ["tcpdump", "-U", "-i", "wlan0", "-w", "-"],
-            stdout=subprocess.PIPE, stderr=None)
+        with self.state_lock:
+            self.process = subprocess.Popen(
+                ["tcpdump", "-U", "-i", "wlan0", "-w", "-"],
+                stdout=subprocess.PIPE, stderr=None, bufsize=0)
+            self.copy_progress_at = time.monotonic()
         process = self.process
         diagnostic("captureProcessStarted", tcpdumpPid=process.pid)
         self.worker = threading.Thread(target=self._copy, args=(process,),
                                        name="capture-copy", daemon=True)
         self.worker.start()
-        self.writer.write({"type": "captureState", "capturing": True})
+        if not self.ready.wait(3.0):
+            self.stop()
+            raise TimeoutError("等待 tcpdump 文件头超时")
+        if self.start_error is not None or self.process is not process or process.poll() is not None:
+            self.stop()
+            raise IOError(self.start_error or "tcpdump 启动后已退出")
+
+    def _read_exact(self, process, size, idle_allowed=False):
+        data = bytearray()
+        while len(data) < size and not self.stop_event.is_set():
+            # 完整记录之间等待新包可以无限空闲；半个包或写文件停滞需要检测。
+            self.waiting_for_packet = idle_allowed and not data
+            if not select.select([process.stdout], [], [], 0.1)[0]:
+                continue
+            chunk = os.read(process.stdout.fileno(), size - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+            self.copy_progress_at = time.monotonic()
+        self.waiting_for_packet = False
+        return bytes(data)
+
+    @staticmethod
+    def _terminate(process):
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
 
     def _copy(self, process):
         try:
             DIAGNOSTICS.phase("copy", "readGlobalHeader", tcpdumpPid=process.pid)
-            header = process.stdout.read(24)
+            header = self._read_exact(process, 24)
             if len(header) != 24:
                 raise IOError("tcpdump 没有返回完整 pcap 文件头")
             endian = "<" if header[:4] in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1") else ">"
             with open(self.path, "ab", buffering=0) as output:
                 if output.tell() == 0:
                     output.write(header)
+                self.ready.set()
                 while True:
                     DIAGNOSTICS.phase("copy", "readPacketHeader", tcpdumpPid=process.pid)
-                    record = process.stdout.read(16)
+                    record = self._read_exact(process, 16, idle_allowed=True)
                     if not record:
                         diagnostic("captureStreamEnded", tcpdumpPid=process.pid)
                         break
@@ -1588,59 +1656,66 @@ class CaptureSession:
                         raise IOError("tcpdump 返回异常包长度")
                     DIAGNOSTICS.phase("copy", "readPayload", tcpdumpPid=process.pid,
                                       expectedBytes=length)
-                    payload = process.stdout.read(length)
+                    payload = self._read_exact(process, length)
                     if len(payload) != length:
                         diagnostic("capturePartialPayload", tcpdumpPid=process.pid,
                                    expectedBytes=length, receivedBytes=len(payload))
                         break
                     DIAGNOSTICS.phase("copy", "backpressure", tcpdumpPid=process.pid)
                     while output.tell() - self.analyzed_offset >= ANALYSIS_BATCH_MAX_BYTES and self.process is process:
+                        # 解析正常前进时，反压等待保持活性；解析卡住由主循环心跳检测。
+                        self.copy_progress_at = time.monotonic()
                         time.sleep(0.01)
                     DIAGNOSTICS.phase("copy", "appendRecord", tcpdumpPid=process.pid)
                     output.write(record + payload)
                     self.copied_packets += 1
+                    self.copy_progress_at = time.monotonic()
                     self.copied_bytes += 16 + length
                     seconds, fraction = struct.unpack(endian + "IIII", record)[:2]
                     divisor = 1_000_000 if header[:4] in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d") else 1000
                     self.last_packet_unix_millis = seconds * 1000 + fraction // divisor
             DIAGNOSTICS.phase("copy", "waitProcessExit", tcpdumpPid=process.pid)
-            code = process.wait()
+            self._terminate(process)
+            code = process.returncode
             diagnostic("captureProcessExited", tcpdumpPid=process.pid, exitCode=code,
                        stopRequested=self.process is not process)
-            if self.process is process:
-                self.process = None
-                self.writer.write({"type": "captureState", "capturing": False})
-                self.writer.write({"type": "commandFailed", "message": f"tcpdump 意外退出，退出码 {code}"})
+            with self.state_lock:
+                if self.process is process:
+                    self.process = None
+                    self.publish_state()
+                    self.writer.write({"type": "commandFailed", "message": f"tcpdump 意外退出，退出码 {code}"})
         except Exception as error:
-            diagnostic("captureCopyFailed", tcpdumpPid=process.pid, errorType=type(error).__name__)
-            if process.poll() is None:
-                process.terminate()
-                process.wait()
-            process.stdout.close()
-            if self.process is process:
-                self.process = None
-                self.writer.write({"type": "captureState", "capturing": False})
-                self.writer.write({"type": "commandFailed", "message": str(error)})
+            self.start_error = str(error)
+            self.ready.set()
+            diagnostic("captureCopyFailed", tcpdumpPid=process.pid, errorType=type(error).__name__, message=str(error))
+            self._terminate(process)
+            with self.state_lock:
+                if self.process is process:
+                    self.process = None
+                    self.publish_state()
+                    self.writer.write({"type": "commandFailed", "message": str(error)})
         finally:
+            self.ready.set()
+            process.stdout.close()
             DIAGNOSTICS.done("copy")
 
     def stop(self):
-        process = self.process
-        self.process = None
+        with self.state_lock:
+            process = self.process
+            self.process = None
+        self.stop_event.set()
         if process is not None:
             started = time.monotonic()
             diagnostic("captureStopBegin", tcpdumpPid=process.pid)
             DIAGNOSTICS.phase("capture-stop", "terminate", tcpdumpPid=process.pid)
-            process.terminate()
-            DIAGNOSTICS.phase("capture-stop", "waitProcessExit", tcpdumpPid=process.pid)
-            process.wait()
-            if self.worker is not None:
-                DIAGNOSTICS.phase("capture-stop", "joinCopyWorker", tcpdumpPid=process.pid)
-                self.worker.join()
-            process.stdout.close()
+            self._terminate(process)
             DIAGNOSTICS.done("capture-stop")
             diagnostic("captureStopEnd", tcpdumpPid=process.pid, exitCode=process.returncode,
                        elapsedMillis=int((time.monotonic() - started) * 1000))
+        if self.worker is not None:
+            self.worker.join(timeout=2.0)
+            if self.worker.is_alive():
+                raise TimeoutError("抓取线程停止超时")
 
 
 class CaptureAnalysis:
@@ -1659,6 +1734,7 @@ class CaptureAnalysis:
         self.next_packet_id = 0
         self.signal_samples = 0
         self.last_signal_unix_millis = None
+        self.rejected_packets = 0
 
     def fork(self):
         # 包体 bytes 为不可变对象，deepcopy 共享它们；只分离可变解析状态。
@@ -2054,7 +2130,88 @@ class CaptureFiles:
 
     def close(self):
         self.retained_stream.close()
-        self.deleter.shutdown(wait=True)
+        self.deleter.shutdown(wait=False)
+
+
+def may_contain_handshake_evidence(record, has_active_handshakes):
+    payload, _, link_type = record[:3]
+    if link_type == 127:
+        if len(payload) < 8:
+            return True
+        offset = struct.unpack_from("<H", payload, 2)[0]
+    elif link_type == 105:
+        offset = 0
+    else:
+        return True
+    if offset + 2 > len(payload):
+        return True
+    frame_type = (payload[offset] >> 2) & 3
+    subtype = payload[offset] >> 4
+    if frame_type == 0:
+        return subtype in (0, 1, 2, 3, 4, 5, 8, 10, 11, 12)
+    if frame_type != 2:
+        return False
+    if has_active_handshakes:
+        return True
+    flags = payload[offset + 1]
+    if flags & 0x40:
+        return False
+    body = offset + 24 + (6 if flags & 3 == 3 else 0)
+    if subtype & 8:
+        body += 2 + (4 if flags & 0x80 else 0)
+    if body + 8 > len(payload):
+        return True
+    llc = payload[body:body + 8]
+    # 明确的 IP/ARP 普通数据无握手证据；其余封装仍交给完整解析器。
+    return not (llc[:6] == b"\xaa\xaa\x03\x00\x00\x00" and
+                llc[6:] in (b"\x08\x00", b"\x86\xdd", b"\x08\x06"))
+
+
+def consume_capture_record(record, header, full, retained, files,
+                           full_writer, retained_writer, retain_to_file=True, retain_only=False):
+    if retain_only and not may_contain_handshake_evidence(record, retained.handshake_device_keys):
+        files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
+        return
+    try:
+        packet = decode_packet(record[0], record[2])
+        dot11 = packet.getlayer(Dot11) if packet is not None else None
+        candidate = packet is not None and (frame_subtype_id(packet) == "data.eapol" or (
+            dot11 is not None and int(dot11.type) == 0 and
+            int(dot11.subtype) in (0, 1, 2, 3, 4, 5, 8, 10, 11, 12)))
+        if retain_only:
+            # 清理时只补齐预备流；普通数据的完整统计马上会被丢弃。
+            completes_handshake = False
+            if not candidate and packet is not None and retained.handshake_device_keys:
+                relation = packet_device_relation(packet, known_bssids=retained.access_points.keys())
+                if relation is not None:
+                    bssid, mac, _ = relation
+                    access_point = retained.access_points.get(bssid)
+                    device = access_point["devices"].get(mac) if access_point else None
+                    active = device["activeHandshake"] if device else None
+                    completes_handshake = active is not None and active["m3ReplayCounter"] is not None and (
+                        is_protected_data_from_device(packet, normalized_unicast_mac(dot11.addr2), mac))
+            evidence = retained.consume(record, packet, header, retained_writer) if (
+                candidate or completes_handshake) else False
+            if candidate or evidence:
+                files.retain(record, header)
+            else:
+                files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
+            return
+        evidence = full.consume(record, packet, header, full_writer)
+        if candidate or evidence:
+            if retain_to_file:
+                files.retain(record, header)
+            retained.consume(record, packet, header, retained_writer)
+        elif retain_to_file:
+            files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
+    except (AttributeError, ValueError, IndexError, TypeError, struct.error) as error:
+        # 异常包仍保留原始字节供导出；单包解码失败不能终止抓取。
+        if retain_to_file:
+            files.retain(record, header)
+        full.rejected_packets += 1
+        if full.rejected_packets <= 5 or full.rejected_packets % 1000 == 0:
+            diagnostic("packetDecodeFailed", offset=record[3],
+                       count=full.rejected_packets, errorType=type(error).__name__, message=str(error))
 
 
 def command_loop(
@@ -2121,6 +2278,7 @@ def main():
     files = None
     interface_diagnostics = None
     next_interface_diagnostics = 0.0
+    main_progress_at = time.monotonic()
     directory = os.path.dirname(args.event_pipe)
     allowed_export_directory = os.path.realpath(os.path.join(directory, "exports"))
     def progress_snapshot():
@@ -2169,12 +2327,45 @@ def main():
             retained_writer = AnalysisEventWriter(writer, "retained")
             files = CaptureFiles(args.pcap, os.path.join(directory, "capture"))
             capture = CaptureSession(args.pcap, writer)
+            def health_loop():
+                while not DIAGNOSTICS.stop_event.wait(1.0):
+                    writer.write(dict(type="health",
+                                      mainAgeMillis=int((time.monotonic() - main_progress_at) * 1000),
+                                      **capture.health()))
+            threading.Thread(target=health_loop, name="monitor-health", daemon=True).start()
+            files.segments = [path for path in args.resume_part if path != args.pcap]
             writer.write({"type": "captureFiles", "paths": files.paths()})
             threading.Thread(target=command_loop,
                              args=(args.command_pipe, reader, reader_lock, files,
                                    allowed_export_directory, writer, commands),
                              name="monitor-commands", daemon=True).start()
+            # 故障恢复沿用历史 PCAP；按有界批次重建解析状态，不清空已录制文件。
+            for part in files.segments:
+                replay = GrowingPcapReader(part)
+                try:
+                    while True:
+                        main_progress_at = time.monotonic()
+                        records = replay.read_available(max_packets=ANALYSIS_BATCH_MAX_PACKETS,
+                                                        max_bytes=ANALYSIS_BATCH_MAX_BYTES)
+                        if not records:
+                            break
+                        if files.header is None:
+                            files.header = replay.global_header
+                            files.retained_stream.write(files.header)
+                        for record in records:
+                            main_progress_at = time.monotonic()
+                            consume_capture_record(record, replay.global_header, full, retained, files,
+                                                   full_writer, retained_writer, retain_to_file=False)
+                        full.publish(replay.global_header, full_writer, records[-1][5])
+                        retained.publish(replay.global_header, retained_writer, records[-1][5])
+                finally:
+                    replay.close()
+            recovering = bool(args.resume_part)
+            recovery_cutoff = diagnostic_file_size(args.pcap) or 0
+            if not recovering:
+                writer.write({"type": "ready"})
             while True:
+                main_progress_at = time.monotonic()
                 if pending_clear is None and not commands.empty():
                     command = commands.get()
                     diagnostic("commandExecuteBegin", type=command["type"],
@@ -2187,7 +2378,7 @@ def main():
                                 capture.start()
                             else:
                                 capture.stop()
-                                writer.write({"type": "captureState", "capturing": False})
+                            capture.publish_state(command.get("requestId"))
                         else:
                             resume = capture.process is not None
                             capture.stop()
@@ -2199,8 +2390,9 @@ def main():
                     except Exception as error:
                         diagnostic("commandExecuteFailed", type=command["type"],
                                    errorType=type(error).__name__)
-                        writer.write({"type": "commandFailed", "message": str(error)})
-                        writer.write({"type": "captureState", "capturing": capture.process is not None})
+                        writer.write({"type": "commandFailed", "message": str(error),
+                                      "requestId": command.get("requestId")})
+                        capture.publish_state()
                     diagnostic("commandExecuteEnd", type=command["type"], pendingClear=pending_clear is not None)
 
                 keep = pending_clear is None or pending_clear["handshakesOnly"]
@@ -2215,26 +2407,24 @@ def main():
                         files.retained_stream.write(files.header)
                     DIAGNOSTICS.phase("main", "parseBatch", packets=len(records), endOffset=reader.offset)
                     for record in records:
-                        packet = decode_packet(record[0], record[2])
-                        evidence = full.consume(record, packet, reader.global_header, full_writer)
-                        dot11 = packet.getlayer(Dot11) if packet is not None else None
-                        candidate = packet is not None and (frame_subtype_id(packet) == "data.eapol" or (
-                            dot11 is not None and int(dot11.type) == 0 and
-                            int(dot11.subtype) in (0, 1, 2, 3, 4, 5, 8, 10, 11, 12)))
-                        if candidate or evidence:
-                            files.retain(record, reader.global_header)
-                            retained.consume(record, packet, reader.global_header, retained_writer)
-                        else:
-                            files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
+                        main_progress_at = time.monotonic()
+                        consume_capture_record(record, reader.global_header, full, retained, files,
+                                               full_writer, retained_writer,
+                                               retain_only=pending_clear is not None)
                     capture.analyzed_offset = reader.offset
+
+                if recovering and (reader.offset >= recovery_cutoff or not records):
+                    recovering = False
+                    writer.write({"type": "ready"})
 
                 ready = pending_clear is not None and (
                     not pending_clear["handshakesOnly"] or reader.offset >= pending_clear["cutoff"] or not records)
                 now = time.monotonic()
                 if now >= next_publish or ready:
-                    timestamp = time.time()
+                    timestamp = records[-1][5] if recovering and records else time.time()
                     DIAGNOSTICS.phase("main", "publishFull")
-                    full.publish(reader.global_header, full_writer, timestamp)
+                    if pending_clear is None:
+                        full.publish(reader.global_header, full_writer, timestamp)
                     DIAGNOSTICS.phase("main", "publishRetained")
                     retained.publish(reader.global_header, retained_writer, timestamp)
                     DIAGNOSTICS.phase("main", "flushRetained")
@@ -2245,7 +2435,7 @@ def main():
                         total = max(0, pending_clear["cutoff"] - pending_clear["startOffset"])
                         writer.write({"type": "clearProgress", "stage": "preparing",
                                       "processedBytes": max(0, reader.offset - pending_clear["startOffset"]),
-                                      "totalBytes": total})
+                                      "totalBytes": total, "requestId": pending_clear.get("requestId")})
                 if ready:
                     command = pending_clear
                     pending_clear = None
@@ -2254,7 +2444,8 @@ def main():
                                    resume=command["resume"], readerOffset=reader.offset)
                         DIAGNOSTICS.phase("main", "switchClearMirror")
                         writer.write({"type": "clearProgress", "stage": "switching",
-                                      "processedBytes": 0, "totalBytes": 0})
+                                      "processedBytes": 0, "totalBytes": 0,
+                                      "requestId": command.get("requestId")})
                         if command["handshakesOnly"]:
                             next_full = retained.fork()
                             next_retained = retained
@@ -2273,24 +2464,26 @@ def main():
                         DIAGNOSTICS.phase("main", "publishCaptureReset")
                         writer.write({"type": "captureReset", "retainPrepared": command["handshakesOnly"],
                                       "addedSegment": added_segment})
-                        writer.write({"type": "clearProgress", "stage": "finished",
-                                      "processedBytes": 0, "totalBytes": 0})
                         if command["resume"]:
                             DIAGNOSTICS.phase("main", "resumeCapture")
                             capture.start()
-                        else:
-                            writer.write({"type": "captureState", "capturing": False})
+                        writer.write({"type": "clearProgress", "stage": "finished",
+                                      "processedBytes": 0, "totalBytes": 0,
+                                      "requestId": command.get("requestId")})
+                        capture.publish_state(command.get("requestId"))
                         diagnostic("clearSwitchEnd", handshakesOnly=command["handshakesOnly"],
                                    resumed=capture.process is not None, readerOffset=reader.offset)
                     except Exception as error:
                         diagnostic("clearSwitchFailed", errorType=type(error).__name__)
-                        writer.write({"type": "commandFailed", "message": str(error)})
-                        writer.write({"type": "captureState", "capturing": False})
+                        writer.write({"type": "commandFailed", "message": str(error),
+                                      "requestId": command.get("requestId")})
+                        capture.stop()
+                        capture.publish_state()
                 try:
                     has_backlog = reader.offset < os.path.getsize(args.pcap)
                 except FileNotFoundError:
                     has_backlog = False
-                if has_backlog or pending_clear is not None or not commands.empty():
+                if (has_backlog and records) or pending_clear is not None or not commands.empty():
                     continue
                 DIAGNOSTICS.phase("main", "idle")
                 time.sleep(max(0, next_publish - time.monotonic()))

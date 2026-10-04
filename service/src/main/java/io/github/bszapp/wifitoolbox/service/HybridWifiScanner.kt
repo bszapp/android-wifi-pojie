@@ -95,18 +95,10 @@ internal class HybridWifiScanner(
                 publishState()
                 executor.execute { readEvents(eventStream) }
 
-                val createdTerminalId = terminalManager.createTerminal(
-                    command = listOf(
-                        terminal.absolutePath,
-                        "session",
-                        "chroot",
-                        "--rootfs",
-                        rootfs.absolutePath,
-                        "--runtime",
-                        runtime.absolutePath,
-                        "--host-path",
-                        HOST_TOOL_PATH,
-                    ),
+                val createdTerminalId = terminalManager.createChrootTerminal(
+                    rootfsPath = rootfs.absolutePath,
+                    runtimePath = runtime.absolutePath,
+                    terminalPath = terminal.absolutePath,
                     onExit = ::onTerminalExited,
                 )
                 val stopImmediately = synchronized(lock) {
@@ -516,7 +508,6 @@ internal class HybridWifiScanner(
         const val STATUS_ERROR = "ERROR"
         const val PIPE_DIRECTORY_NAME = "wlantool-ipc"
         const val SCAN_SCRIPT = "/wlantool/scan.py"
-        const val HOST_TOOL_PATH = "/system/bin:/system/xbin:/system_ext/bin:/product/bin:/vendor/bin:/odm/bin:/apex/com.android.runtime/bin"
         const val BRIDGE_COMMAND = "/usr/bin/python3 -u /wlantool/terminal_bridge.py"
         const val START_TIMEOUT_MILLIS = 20_000L
     }

@@ -14,8 +14,10 @@ import io.github.bszapp.wifitoolbox.contract.container.ContainerState
 import io.github.bszapp.wifitoolbox.contract.container.ContainerSystemStatus
 import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
 import io.github.bszapp.wifitoolbox.service.IContainerSystemCallback
+import io.github.bszapp.wifitoolbox.service.HybridTaskEnvironment
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
@@ -23,6 +25,7 @@ import org.json.JSONObject
 /** 容器状态与操作的唯一管理者；操作生命周期属于服务，与 App 回调的注册周期无关。 */
 internal class ContainerSystemManager(
     private val trustedUid: () -> Int,
+    private val mounts: ContainerMountManager,
     private val beforeDelete: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
@@ -35,20 +38,35 @@ internal class ContainerSystemManager(
     private var running = false
     private var closed = false
     private var lastProgressUpdate = 0L
+    private var operationThread: Thread? = null
+    private var operationProcess: Process? = null
+    private var operationArchive: ParcelFileDescriptor? = null
+    private var interruptRequested = false
+    private var nextOperationId = 0L
 
     fun state(): ContainerState = synchronized(lock) { currentState }
 
-    fun configure(next: ContainerEnvironment) {
+    fun taskEnvironment(): HybridTaskEnvironment = synchronized(lock) {
+        val env = requireNotNull(environment) { "服务容器环境尚未初始化" }
+        HybridTaskEnvironment(rootfs(env).absolutePath, runtime(env).absolutePath, env.terminalPath)
+    }
+
+    fun initialize(next: ContainerEnvironment) {
         val data = File(next.appDataPath)
-        require(data.isAbsolute && data.canonicalPath != "/" && data.canonicalPath == data.absolutePath) {
+        require(data.isAbsolute && data.absolutePath != "/") {
             "容器数据目录必须为明确的绝对目录"
         }
-        require(Os.stat(data.absolutePath).st_uid == trustedUid()) { "容器数据目录不属于可信 App" }
+        // 环境来自系统安装记录。非 Root 服务不访问私有目录进行挂载校验。
+        if (android.os.Process.myUid() == 0) {
+            require(data.canonicalPath == data.absolutePath) { "容器数据目录必须为规范路径" }
+            require(Os.stat(data.absolutePath).st_uid == trustedUid()) { "容器数据目录不属于可信 App" }
+        }
         require(File(next.terminalPath).isAbsolute) { "终端路径必须为绝对路径" }
         synchronized(lock) {
             check(!closed) { "容器管理器已关闭" }
             if (environment == next) return
             check(!running) { "容器操作期间不能修改环境" }
+            mounts.refresh(next)
             environment = next
             val installed = isContainerSystemInstalled(rootfs(next))
             publishLocked(ContainerState(systemStatus = installedStatus(installed), installed = installed))
@@ -65,6 +83,8 @@ internal class ContainerSystemManager(
                 ParcelFileDescriptor.dup(requireNotNull(archive) { "缺少容器压缩包数据" }.fileDescriptor)
             }
             running = true
+            interruptRequested = false
+            operationArchive = descriptor
             lastProgressUpdate = SystemClock.elapsedRealtime()
             publishLocked(currentState.copy(
                 systemStatus = ContainerSystemStatus.WORKING,
@@ -72,12 +92,14 @@ internal class ContainerSystemManager(
                 operation = request.operation,
                 progress = ContainerProgress(request.operation.title, "", 0f),
                 errorMessage = null,
+                operationId = ++nextOperationId,
             ))
             try {
                 worker.execute { runOperation(env, request, descriptor) }
             } catch (error: Throwable) {
                 descriptor?.close()
                 running = false
+                operationArchive = null
                 publishLocked(currentState.copy(systemStatus = ContainerSystemStatus.ERROR, progress = null,
                     errorMessage = error.message ?: error.javaClass.simpleName))
                 throw error
@@ -96,41 +118,77 @@ internal class ContainerSystemManager(
 
     fun unregister(callback: IContainerSystemCallback) { callbacks.unregister(callback) }
 
+    fun interrupt(operationId: Long) {
+        val resources = synchronized(lock) {
+            if (!running || currentState.operationId != operationId) return
+            interruptRequested = true
+            // 同一 worker 会复用于下一次操作；在运行标记锁内发送中断，避免打断后续任务。
+            operationThread?.interrupt()
+            Triple(operationThread, operationProcess, operationArchive)
+        }
+        resources.second?.let {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) it.destroyForcibly() else it.destroy()
+        }
+        runCatching { resources.third?.close() }
+    }
+
+    private fun checkInterrupted() {
+        if (Thread.currentThread().isInterrupted || synchronized(lock) { interruptRequested }) {
+            throw InterruptedIOException("用户强制中断容器操作")
+        }
+    }
+
     private fun runOperation(env: ContainerEnvironment, request: ContainerOperationRequest, archive: ParcelFileDescriptor?) {
         var failure: Throwable? = null
         try {
+            synchronized(lock) { operationThread = Thread.currentThread() }
+            checkInterrupted()
             when (request.operation) {
                 ContainerOperation.INSTALL -> {
+                    beforeDelete()
+                    mounts.unmount()
                     deletePaths(env, request.operation, listOf(rootfs(env)))
                     extract(env, request, requireNotNull(archive))
                 }
                 ContainerOperation.UPDATE -> extract(env, request, requireNotNull(archive))
                 ContainerOperation.RESET -> {
                     beforeDelete()
+                    mounts.unmount()
                     deletePaths(env, request.operation, listOf(rootfs(env), runtime(env)))
                     extract(env, request, requireNotNull(archive))
                 }
                 ContainerOperation.UNINSTALL -> {
                     beforeDelete()
+                    mounts.unmount()
                     deletePaths(env, request.operation, listOf(rootfs(env), runtime(env)))
                 }
             }
         } catch (error: Throwable) {
-            failure = error
+            failure = if (synchronized(lock) { interruptRequested }) InterruptedIOException("用户强制中断容器操作") else error
         } finally {
             runCatching { archive?.close() }
+            // 包括失败、中断后的残留容器：是否挂载始终以最终存在的容器为准。
+            Thread.interrupted()
+            try { mounts.refresh(env) }
+            catch (error: Throwable) {
+                if (failure == null || failure is InterruptedIOException) failure = error
+                else failure?.addSuppressed(error)
+            }
             synchronized(lock) {
                 val installed = isContainerSystemInstalled(rootfs(env))
                 running = false
+                operationThread = null
+                operationProcess = null
+                operationArchive = null
                 publishLocked(currentState.copy(
-                    systemStatus = if (failure == null) installedStatus(installed) else ContainerSystemStatus.ERROR,
+                    systemStatus = if (failure == null || failure is InterruptedIOException) installedStatus(installed) else ContainerSystemStatus.ERROR,
                     installed = installed,
-                    operation = if (failure == null) null else request.operation,
-                    progress = null,
+                    operation = request.operation,
                     errorMessage = failure?.let { it.message ?: it.javaClass.simpleName },
                 ))
             }
-            failure?.let { onError(request.operation.title, it) }
+            Thread.interrupted()
+            failure?.takeUnless { it is InterruptedIOException }?.let { onError(request.operation.title, it) }
         }
     }
 
@@ -155,13 +213,17 @@ internal class ContainerSystemManager(
         val terminal = File(env.terminalPath)
         check(terminal.isFile && terminal.canExecute()) { "未找到可执行的 libterminal.so: ${terminal.absolutePath}" }
         targets.forEachIndexed { index, target ->
+            checkInterrupted()
             // 使用现有原生删除器验证范围、解除子挂载并输出逐项进度；不启动 su 或另一个权限源。
             val process = ProcessBuilder(terminal.absolutePath, "container", "delete", "--path", target.absolutePath,
                 "--allowed-root", env.appDataPath).redirectErrorStream(true).start()
             try {
+                synchronized(lock) { operationProcess = process }
+                checkInterrupted()
                 val output = StringBuilder()
                 process.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
                     lines.forEach { line ->
+                        checkInterrupted()
                         val event = runCatching { JSONObject(line) }.getOrNull()
                         if (event == null || !event.has("event")) {
                             if (output.length < 8192) output.appendLine(line.take(8192 - output.length))
@@ -187,11 +249,13 @@ internal class ContainerSystemManager(
                 updateProgress(operation, "正在删除", target.name, (index + 1f) / targets.size)
             } finally {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) process.destroyForcibly() else process.destroy()
+                synchronized(lock) { if (operationProcess === process) operationProcess = null }
             }
         }
     }
 
     private fun updateProgress(operation: ContainerOperation, message: String, detail: String, fraction: Float) {
+        checkInterrupted()
         synchronized(lock) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastProgressUpdate < PROGRESS_UPDATE_INTERVAL_MILLIS) return
@@ -220,7 +284,18 @@ internal class ContainerSystemManager(
             if (closed) return
             closed = true
             worker.shutdown()
+        }
+        // 已接收的安装操作先完成，避免退出服务后又重新挂载。
+        var interrupted = false
+        try {
+            while (true) {
+                try { if (worker.awaitTermination(1, TimeUnit.SECONDS)) break }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+            mounts.close()
+        } finally {
             delivery.shutdown()
+            if (interrupted) Thread.currentThread().interrupt()
         }
         callbacks.kill()
     }

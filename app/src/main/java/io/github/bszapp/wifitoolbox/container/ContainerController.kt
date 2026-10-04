@@ -2,14 +2,12 @@ package io.github.bszapp.wifitoolbox.container
 
 import android.content.Context
 import android.os.DeadObjectException
-import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment
 import io.github.bszapp.wifitoolbox.contract.container.ContainerOperation
 import io.github.bszapp.wifitoolbox.contract.container.ContainerOperationRequest
 import io.github.bszapp.wifitoolbox.contract.container.ContainerState
 import io.github.bszapp.wifitoolbox.contract.container.IContainerController
 import io.github.bszapp.wifitoolbox.service.IContainerSystemCallback
 import io.github.bszapp.wifitoolbox.service.IMainService
-import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,11 +49,6 @@ class ContainerController(
             try {
                 synchronized(binding.registrationLock) {
                     if (!isCurrent(binding)) return@launch
-                    service.configureContainerSystem(ContainerEnvironment(
-                        appDataPath = requireNotNull(context.filesDir.parentFile).canonicalPath,
-                        terminalPath = File(context.applicationInfo.nativeLibraryDir, "libterminal.so").absolutePath,
-                    ))
-                    if (!isCurrent(binding)) return@launch
                     service.registerContainerSystemCallback(callback)
                     binding.registered = true
                 }
@@ -80,6 +73,17 @@ class ContainerController(
     override fun update() = request(ContainerOperation.UPDATE)
     override fun reset() = request(ContainerOperation.RESET)
     override fun uninstall() = request(ContainerOperation.UNINSTALL)
+
+    override fun interrupt(operationId: Long) {
+        val binding = synchronized(lock) { activeBinding } ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (isCurrent(binding)) binding.service.interruptContainerOperation(operationId)
+            } catch (error: Throwable) {
+                if (isCurrent(binding)) report("强制中断容器操作", error)
+            }
+        }
+    }
 
     private fun request(operation: ContainerOperation) {
         val binding = synchronized(lock) { activeBinding }

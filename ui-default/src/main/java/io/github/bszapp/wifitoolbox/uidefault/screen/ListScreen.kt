@@ -387,8 +387,8 @@ fun ListScreen(
         }
     }
 
-    WifiModeSwitchSheet(progress = modeState?.modeSwitch)
-    MonitorCaptureClearSheet(progress = modeState?.captureClearProgress)
+    WifiModeSwitchSheet(progress = modeState?.modeSwitch, onInterrupt = viewModel.wifiList::interruptModeSwitch)
+    MonitorCaptureClearSheet(progress = modeState?.captureClearProgress, onInterrupt = viewModel.wifiList::interruptMonitorClear)
     MonitorModeSheet(
         show = showMonitorCommand,
         onDismiss = { showMonitorCommand = false },

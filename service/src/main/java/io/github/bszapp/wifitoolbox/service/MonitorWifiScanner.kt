@@ -170,18 +170,23 @@ internal class MonitorWifiScanner(
         scan.onFinished(code, error)
     }
 
-    @Synchronized
     fun stop() {
-        val id = terminalId
-        terminalId = null
-        ready?.completeExceptionally(IllegalStateException("monitor 扫描进程已停止"))
-        ready = null
-        val request = resumeRequest
-        resumeRequest = null
-        request?.completion?.completeExceptionally(IllegalStateException("monitor 进程已停止"))
-        hopping = false
-        channels = emptyList()
-        pending?.let { finish(it, it.scanCode ?: 1, IllegalStateException("monitor 扫描已停止")) }
+        val (id, futures, scan) = synchronized(this) {
+            Triple(terminalId, listOfNotNull(ready, resumeRequest?.completion), pending).also {
+                terminalId = null
+                ready = null
+                resumeRequest = null
+                pending = null
+                hopping = false
+                channels = emptyList()
+            }
+        }
+        val error = IllegalStateException("monitor 扫描进程已停止")
+        futures.forEach { it.completeExceptionally(error) }
+        scan?.let {
+            it.confirmation.completeExceptionally(error)
+            it.onFinished(it.scanCode ?: 1, error)
+        }
         if (id != null) terminals.stopTerminal(id, reason = "退出 monitor 模式，停止扫描进程")
     }
 

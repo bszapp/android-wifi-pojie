@@ -102,7 +102,7 @@ fun SettingsScreen(
             viewModel.uninstallContainer()
         },
     )
-    ContainerProgressSheet(state = containerState)
+    ContainerProgressSheet(state = containerState, onInterrupt = viewModel::interruptContainer)
 
     Scaffold(
         topBar = {

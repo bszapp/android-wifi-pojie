@@ -162,10 +162,6 @@ class WifiListController(
             if (!isCurrentConnection(plan.generation, plan.callback)) return@launch
 
             runCatching {
-                val data = requireNotNull(context.filesDir.parentFile)
-                service.configureWifiEnvironment(File(data, "rootfs").absolutePath,
-                    File(context.noBackupFilesDir, "rftool-runtime").absolutePath,
-                    File(context.applicationInfo.nativeLibraryDir, "libterminal.so").absolutePath)
                 service.registerCallback(plan.callback)
             }
                 .onSuccess {
@@ -550,17 +546,8 @@ class WifiListController(
     }
 
     override fun setMode(mode: WifiMode) {
-        val appDataDirectory = requireNotNull(context.filesDir.parentFile)
-        val rootfs = File(appDataDirectory, "rootfs")
-        val runtime = File(context.noBackupFilesDir, "rftool-runtime")
-        val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
         callService("切换 Wi-Fi 信息源为 ${mode.displayName}") { service ->
-            service.setWifiMode(
-                mode.wireValue,
-                rootfs.absolutePath,
-                runtime.absolutePath,
-                terminal.absolutePath,
-            )
+            service.setWifiMode(mode.wireValue)
         }
     }
 
@@ -575,20 +562,19 @@ class WifiListController(
         callService("清理抓取数据") { it.clearMonitorCapture(handshakesOnly) }
     }
 
+    override fun interruptModeSwitch(operationId: Long) {
+        callService("强制中断网卡模式切换") { it.interruptWifiModeSwitch(operationId) }
+    }
+
+    override fun interruptMonitorClear(operationId: Long) {
+        callService("强制中断抓包清理") { it.interruptMonitorClear(operationId) }
+    }
+
     override fun enterMonitorMode(
         command: String,
     ) {
-        val appDataDirectory = requireNotNull(context.filesDir.parentFile)
-        val rootfs = File(appDataDirectory, "rootfs")
-        val runtime = File(context.noBackupFilesDir, "rftool-runtime")
-        val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
         callService("进入监听模式") { service ->
-            service.enterMonitorMode(
-                command,
-                rootfs.absolutePath,
-                runtime.absolutePath,
-                terminal.absolutePath,
-            )
+            service.enterMonitorMode(command)
         }
     }
 

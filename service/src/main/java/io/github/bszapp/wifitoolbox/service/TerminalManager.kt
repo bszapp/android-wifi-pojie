@@ -4,6 +4,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
+import io.github.bszapp.wifitoolbox.service.container.ContainerMountManager
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogBatch
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogEntry
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalOutputAccumulator
@@ -17,6 +18,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 
 internal class TerminalManager(
+    private val containerMounts: ContainerMountManager,
     private val onAliveTerminalsChanged: (AliveTerminalSnapshot) -> Unit,
     private val onTerminalLogRangeChanged: (TerminalLogRangeSnapshot) -> Unit,
 ) {
@@ -31,6 +33,7 @@ internal class TerminalManager(
         command: List<String>,
         onOutputLines: (terminalId: Long, lines: List<String>) -> Unit = { _, _ -> },
         onExit: (terminalId: Long, exitCode: Int) -> Unit = { _, _ -> },
+        containerMountPid: Int? = null,
     ): Long = synchronized(creationLock) {
         require(command.isNotEmpty()) { "终端启动命令不能为空" }
         synchronized(lock) { check(!closed) { "终端管理器已关闭" } }
@@ -57,6 +60,7 @@ internal class TerminalManager(
                         ownerThread = Thread.currentThread(),
                         onOutputLines = onOutputLines,
                         onExit = onExit,
+                        containerMountPid = containerMountPid,
                     )
                     val aliveSnapshot = synchronized(lock) {
                         if (closed) {
@@ -132,11 +136,13 @@ internal class TerminalManager(
         require(runtime.isDirectory || runtime.mkdirs()) {
             "无法创建终端运行目录: ${runtime.absolutePath}"
         }
-        return createTerminal(
+        return containerMounts.withMounted(rootfs.absolutePath, terminal.absolutePath) { mountPid -> createTerminal(
             command = listOf(
                 terminal.absolutePath,
                 "session",
                 "chroot",
+                "--mount-pid",
+                mountPid.toString(),
                 "--rootfs",
                 rootfs.absolutePath,
                 "--runtime",
@@ -146,7 +152,18 @@ internal class TerminalManager(
             ),
             onOutputLines = onOutputLines,
             onExit = onExit,
-        )
+            containerMountPid = mountPid,
+        ) }
+    }
+
+    fun stopChrootTerminals(mountPid: Int) {
+        val users = synchronized(lock) { terminals.values.filter { it.containerMountPid == mountPid } }
+        users.forEach { terminal ->
+            stopTerminal(terminal.id, "容器解除挂载")
+            check(runCatching { terminal.process.exitValue() }.isSuccess) {
+                "容器终端 ${terminal.id} 尚未退出，不能解除挂载"
+            }
+        }
     }
 
     private fun awaitTerminalStart(startup: CompletableFuture<ManagedTerminal>): ManagedTerminal {
@@ -173,8 +190,8 @@ internal class TerminalManager(
 
     fun writeInput(terminalId: Long, text: String) {
         val terminal = requireTerminal(terminalId)
-        synchronized(terminal.lock) {
-            check(!terminal.stopping) { "终端 $terminalId 正在停止" }
+        synchronized(terminal.inputLock) {
+            synchronized(terminal.lock) { check(!terminal.stopping) { "终端 $terminalId 正在停止" } }
             terminal.input.write(text)
             terminal.input.newLine()
             terminal.input.flush()
@@ -198,7 +215,6 @@ internal class TerminalManager(
             }
             terminal.stopping = true
             terminal.stopReason = reason
-            runCatching { terminal.input.close() }
         }
         Log.i(
             TAG,
@@ -218,6 +234,8 @@ internal class TerminalManager(
                 Log.e(TAG, "强制结束后终端仍未确认退出: id=$terminalId reason=$reason")
             }
         }
+        // 先终止进程解除管道写入，再关闭带缓冲的输入，避免 close 的 flush 卡住停止线程。
+        runCatching { terminal.input.close() }
     }
 
     fun aliveSnapshot(): AliveTerminalSnapshot = synchronized(lock) {
@@ -292,7 +310,11 @@ internal class TerminalManager(
             }
             exitCode = terminal.process.waitFor()
         } catch (error: Throwable) {
-            Log.w(TAG, "读取终端 ${terminal.id} 输出失败：${error.message}", error)
+            if (error is IOException && terminal.exitState().stopRequested) {
+                Log.i(TAG, "终端 ${terminal.id} 主动停止，输出读取已结束：${error.message}")
+            } else {
+                Log.w(TAG, "读取终端 ${terminal.id} 输出失败：${error.message}", error)
+            }
             exitCode = runCatching { terminal.process.waitFor() }.getOrDefault(-1)
         } finally {
             val exitState = terminal.exitState()
@@ -341,8 +363,10 @@ internal class TerminalManager(
         val ownerThread: Thread,
         val onOutputLines: (terminalId: Long, lines: List<String>) -> Unit,
         val onExit: (terminalId: Long, exitCode: Int) -> Unit,
+        val containerMountPid: Int?,
     ) {
         val lock = Any()
+        val inputLock = Any()
         val logs = ArrayList<TerminalLogEntry>()
         val outputAccumulator = TerminalOutputAccumulator()
         var nextLogId = 0L
@@ -435,7 +459,7 @@ internal class TerminalManager(
     }
 }
 
-private fun Process.waitForCompat(timeout: Long, unit: TimeUnit): Boolean {
+internal fun Process.waitForCompat(timeout: Long, unit: TimeUnit): Boolean {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         return waitFor(timeout, unit)
     }
@@ -453,7 +477,7 @@ private fun Process.waitForCompat(timeout: Long, unit: TimeUnit): Boolean {
     }
 }
 
-private fun Process.destroyForciblyCompat() {
+internal fun Process.destroyForciblyCompat() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         destroyForcibly()
     } else {

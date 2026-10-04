@@ -62,6 +62,7 @@ class WifiListUiState(
                 val mode = modeState.value
                 val shouldAutoScan =
                     mode?.mode == WifiMode.NORMAL && !mode.hybridScanEnabled &&
+                    mode.modeSwitch?.isRunning != true &&
                     (previous is WifiState.Data.Disabled || previous is WifiState.Error) &&
                         current is WifiState.Data.Enabled &&
                         !current.isScanning
@@ -89,6 +90,8 @@ class WifiListUiState(
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false) =
         controller.wifiList.setMonitorCapture(enabled, frequencyMhz, hopping)
     fun clearMonitorCapture(handshakesOnly: Boolean) = controller.wifiList.clearMonitorCapture(handshakesOnly)
+    fun interruptModeSwitch(operationId: Long) = controller.wifiList.interruptModeSwitch(operationId)
+    fun interruptMonitorClear(operationId: Long) = controller.wifiList.interruptMonitorClear(operationId)
 
     fun enterMonitorMode(command: String) = controller.wifiList.enterMonitorMode(command)
 
@@ -156,12 +159,14 @@ class WifiListUiState(
      * 错误已经由 App Controller 统一广播，这里只负责结束异步任务。
      */
     fun startScan() {
+        if (modeState.value?.modeSwitch?.isRunning == true) return
         if (!scanRequestGuard.compareAndSet(false, true)) return
         _isSendingScanRequest.value = true
 
         scope.launch {
             try {
                 withContext(Dispatchers.IO) {
+                    if (modeState.value?.modeSwitch?.isRunning == true) return@withContext
                     controller.wifiList.startScan()
                 }
             } catch (error: CancellationException) {

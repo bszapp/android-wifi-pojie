@@ -4,8 +4,10 @@ import android.content.Context
 import android.os.Process
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
+import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment
+import java.io.File
 
-/** 管理服务初始化：校验启动信息、补齐服务自身信息、清理旧实例、创建 AndroidApi。 */
+/** 管理服务初始化：校验身份、查询系统安装记录和容器路径、清理旧实例、创建 AndroidApi。 */
 class ServiceInitializer(
     private val serviceContext: Context? = null,
 ) {
@@ -13,6 +15,9 @@ class ServiceInitializer(
 
     @Volatile
     private var startupInfo: StartupInfo? = null
+
+    @Volatile
+    private var containerEnvironment: ContainerEnvironment? = null
 
     @Volatile
     var androidApi: AndroidApi? = null
@@ -48,6 +53,14 @@ class ServiceInitializer(
                 callerPackage = callerPackage(),
                 serviceContext = serviceContext,
             )
+            val application = api.getApplicationInfo(APP_PACKAGE, launchInfo.trustedUid / 100_000)
+            require(application.uid == launchInfo.trustedUid) { "系统安装记录的应用 UID 与可信 UID 不一致" }
+            val data = File(requireNotNull(application.dataDir) { "系统安装记录缺少应用数据目录" })
+            val nativeDirectory = requireNotNull(application.nativeLibraryDir) { "系统安装记录缺少原生库目录" }
+            containerEnvironment = ContainerEnvironment(
+                appDataPath = if (Process.myUid() == 0) data.canonicalPath else data.absolutePath,
+                terminalPath = File(nativeDirectory, "libterminal.so").absolutePath,
+            )
             startupInfo = completed
             androidApi = api
 
@@ -64,6 +77,9 @@ class ServiceInitializer(
 
     fun requireStartupInfo(): StartupInfo =
         startupInfo ?: throw IllegalStateException("服务启动信息未初始化")
+
+    internal fun requireContainerEnvironment(): ContainerEnvironment =
+        containerEnvironment ?: throw IllegalStateException("服务容器环境未初始化")
 
     fun close() {
         androidApi?.close()

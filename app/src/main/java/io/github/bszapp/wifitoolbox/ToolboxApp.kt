@@ -26,6 +26,7 @@ import io.github.bszapp.wifitoolbox.wifilist.WifiListController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -79,16 +80,26 @@ class ToolboxApp : Application(), IAppController {
         override val state get() = processLauncher.state
         override fun launch(mode: StartupMode) = processLauncher.launch(mode)
         override fun cancel() = processLauncher.cancel()
-        override fun stop(exit: Boolean) {
-            processLauncher.stop {
-                if (exit) {
-                    appScope.launch {
-                        delay(200.milliseconds)
-                        Process.killProcess(Process.myPid())
-                    }
-                    _exitRequests.tryEmit(Unit)
-                }
+        override suspend fun stop(exit: Boolean) {
+            // 服务断连会清理界面会话；停止服务任务由 App 持有，不随调用方 ViewModel 取消。
+            appScope.async {
+                processLauncher.stop(resetStartupState = !exit)
+                if (exit) requestAppExit()
+            }.await()
+        }
+        override fun disconnect(exit: Boolean) {
+            appScope.launch {
+                processLauncher.disconnect(resetStartupState = !exit)
+                if (exit) requestAppExit()
             }
+        }
+    }
+
+    private fun requestAppExit() {
+        _exitRequests.tryEmit(Unit)
+        appScope.launch {
+            delay(200.milliseconds)
+            Process.killProcess(Process.myPid())
         }
     }
 

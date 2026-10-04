@@ -10,7 +10,6 @@ import io.github.bszapp.wifitoolbox.contract.terminal.TerminalLogTransport
 import io.github.bszapp.wifitoolbox.contract.terminal.TerminalManagerState
 import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.ITerminalManagerCallback
-import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -143,13 +142,8 @@ class TerminalController(
         }
         scope.launch(Dispatchers.IO) {
             if (!isCurrent(binding) || !binding.service.asBinder().isBinderAlive) return@launch
-            val rootfs = File(requireNotNull(context.filesDir.parentFile), "rootfs")
-            val runtime = File(context.noBackupFilesDir, "rftool-runtime")
-            val terminal = File(context.applicationInfo.nativeLibraryDir, "libterminal.so")
             runCatching {
-                binding.service.createServiceTerminal(
-                    rootfs.absolutePath, runtime.absolutePath, terminal.absolutePath,
-                )
+                binding.service.createServiceTerminal()
             }.onFailure { error ->
                 if (isCurrent(binding)) {
                     reportError(
