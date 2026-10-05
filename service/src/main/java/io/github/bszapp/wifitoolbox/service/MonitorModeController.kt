@@ -105,15 +105,12 @@ internal class MonitorModeController(
     }
 
     fun start(
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
         resumeCapture: Boolean = false,
     ): CompletableFuture<Unit> {
         val previousParts = synchronized(lock) { captureParts.toList() }
         if (!resumeCapture) stop()
 
-        val rootfs = File(rootfsPath)
+        val rootfs = File(terminalManager.rootfsPathForFifo())
         val capture = File(rootfs, CAPTURE_FILE_RELATIVE_PATH)
         val parent = requireNotNull(capture.parentFile)
         require(parent.isDirectory || parent.mkdirs()) {
@@ -162,9 +159,6 @@ internal class MonitorModeController(
         var startupTerminalId: Long? = null
         try {
             val statisticsId = terminalManager.createChrootTerminal(
-                rootfsPath = rootfsPath,
-                runtimePath = runtimePath,
-                terminalPath = terminalPath,
                 onExit = { terminalId, exitCode ->
                     handleTerminalExit(terminalId, exitCode, "监听模式统计终端")
                 },
@@ -196,12 +190,11 @@ internal class MonitorModeController(
         return ready
     }
 
-    fun ensureRunning(environment: HybridTaskEnvironment): CompletableFuture<Unit> {
+    fun ensureRunning(): CompletableFuture<Unit> {
         synchronized(lock) {
             if (statisticsTerminalId != null) return requireNotNull(processReady)
         }
-        return start(environment.rootfsPath, environment.runtimePath, environment.terminalPath,
-            resumeCapture = synchronized(lock) { captureFile != null })
+        return start(resumeCapture = synchronized(lock) { captureFile != null })
     }
 
     fun stop() {

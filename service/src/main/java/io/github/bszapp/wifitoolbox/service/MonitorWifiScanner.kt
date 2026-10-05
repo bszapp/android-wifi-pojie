@@ -21,12 +21,11 @@ internal class MonitorWifiScanner(
     fun availableChannels(): List<MonitorChannel> = channels
 
     @Synchronized
-    fun initialize(environment: HybridTaskEnvironment): CompletableFuture<Unit> {
+    fun initialize(): CompletableFuture<Unit> {
         if (terminalId != null) return requireNotNull(ready)
         val boot = CompletableFuture<Unit>()
         ready = boot
         val id = terminals.createChrootTerminal(
-            environment.rootfsPath, environment.runtimePath, environment.terminalPath,
             onOutputLines = output@{ sourceId, lines ->
                 if (synchronized(this) { terminalId != sourceId }) return@output
                 lines.forEach { line ->
@@ -120,7 +119,6 @@ internal class MonitorWifiScanner(
 
     @Synchronized
     fun start(
-        environment: HybridTaskEnvironment,
         onMessage: (JSONObject) -> Unit,
         restore: () -> CompletableFuture<Unit>,
         onFinished: (Int, Throwable?) -> Unit,
@@ -129,7 +127,7 @@ internal class MonitorWifiScanner(
         val scan = Scan(++nextRequestId, CompletableFuture(), onMessage, restore, onFinished)
         pending = scan
         try {
-            initialize(environment)
+            initialize()
             terminals.writeInput(requireNotNull(terminalId), JSONObject()
                 .put("action", "scan").put("requestId", scan.id).toString())
         } catch (error: Throwable) {

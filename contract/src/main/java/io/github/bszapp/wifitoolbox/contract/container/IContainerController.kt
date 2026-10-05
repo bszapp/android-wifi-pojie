@@ -55,7 +55,6 @@ data class ContainerProgress(
 @Parcelize
 data class ContainerEnvironment(
     val appDataPath: String,
-    val terminalPath: String,
 ) : Parcelable
 
 /**

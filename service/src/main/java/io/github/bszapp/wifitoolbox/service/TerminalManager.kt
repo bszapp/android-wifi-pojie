@@ -19,6 +19,9 @@ import java.util.concurrent.TimeUnit
 
 internal class TerminalManager(
     private val containerMounts: ContainerMountManager,
+    private val terminalBinaryOverride: (() -> File)? = null,
+    private val trustedUidProvider: () -> Int = { android.os.Process.myUid() },
+    private val androidApiProvider: () -> AndroidApi? = { null },
     private val onAliveTerminalsChanged: (AliveTerminalSnapshot) -> Unit,
     private val onTerminalLogRangeChanged: (TerminalLogRangeSnapshot) -> Unit,
 ) {
@@ -28,6 +31,93 @@ internal class TerminalManager(
     private var nextTerminalId = 1L
     private var aliveGeneration = 0L
     private var closed = false
+    @Volatile private var rootfsPath: String? = null
+    @Volatile private var runtimePath: String? = null
+
+    /** 在服务容器环境就绪后初始化一次；调用方只提供数据目录，由本类确定容器路径。 */
+    fun initialize(appDataPath: String) {
+        val dataDirectory = File(appDataPath)
+        require(dataDirectory.isAbsolute) { "容器数据目录必须是绝对路径" }
+        initializePaths(
+            File(dataDirectory, "rootfs").absolutePath,
+            File(dataDirectory, "no_backup/rftool-runtime").absolutePath,
+        )
+    }
+
+    internal fun initializeForTest(rootfsPath: String, runtimePath: String) {
+        initializePaths(rootfsPath, runtimePath)
+    }
+
+    private fun initializePaths(rootfs: String, runtime: String) {
+        synchronized(lock) {
+            check(!closed) { "终端管理器已关闭" }
+            val currentRootfs = rootfsPath
+            val currentRuntime = runtimePath
+            if (currentRootfs != null || currentRuntime != null) {
+                check(currentRootfs == rootfs && currentRuntime == runtime) {
+                    "终端管理器容器环境不能重复更改"
+                }
+                return
+            }
+            rootfsPath = rootfs
+            runtimePath = runtime
+        }
+    }
+
+    /** FIFO 和 rootfs 文件校验通过本类取得当前 rootfs。 */
+    fun rootfsPathForFifo(): String = requireRootfsPath()
+
+    fun isContainerSystemInstalled(): Boolean =
+        isContainerSystemInstalled(File(requireRootfsPath()))
+
+    fun hasRootfsFile(relativePath: String): Boolean {
+        require(relativePath.isNotBlank() && !File(relativePath).isAbsolute) {
+            "rootfs 相对路径无效"
+        }
+        val rootfs = File(requireRootfsPath()).canonicalFile
+        val target = File(rootfs, relativePath).canonicalFile
+        val rootPath = rootfs.path
+        require(target.path == rootPath || target.path.startsWith(rootPath + File.separator)) {
+            "rootfs 文件路径越界"
+        }
+        return target.isFile
+    }
+
+    /** 容器挂载器通过该入口启动挂载进程，不接触库路径或 rootfs 路径。 */
+    fun startContainerMountProcess(): Process {
+        val terminal = resolveTerminalBinary()
+        require(terminal.isFile && terminal.canExecute()) {
+            "libterminal.so 不可执行: ${terminal.absolutePath}"
+        }
+        return ProcessBuilder(
+            terminal.absolutePath,
+            "container",
+            "mount",
+            "--rootfs",
+            requireRootfsPath(),
+            "--host-path",
+            HOST_TOOL_PATH,
+        ).redirectErrorStream(true).start()
+    }
+
+    /** 容器安装管理器在执行目录删除时使用；库路径解析仍由本类执行。 */
+    internal fun resolveTerminalBinaryForContainerManager(): File = resolveTerminalBinary()
+
+    private fun resolveTerminalBinary(): File {
+        terminalBinaryOverride?.let { return it() }
+        val trustedUid = trustedUidProvider()
+        val api = requireNotNull(androidApiProvider()) { "AndroidApi 尚未初始化" }
+        val application = api.getApplicationInfo(APP_PACKAGE, trustedUid / 100_000)
+        require(application.uid == trustedUid) { "系统安装记录的应用 UID 与可信 UID 不一致" }
+        val nativeDirectory = requireNotNull(application.nativeLibraryDir) {
+            "系统安装记录缺少原生库目录"
+        }
+        return File(nativeDirectory, "libterminal.so").absoluteFile.also { terminal ->
+            require(terminal.isFile && terminal.canExecute()) {
+                "libterminal.so 不可执行: ${terminal.absolutePath}"
+            }
+        }
+    }
 
     fun createTerminal(
         command: List<String>,
@@ -119,16 +209,13 @@ internal class TerminalManager(
     }
 
     fun createChrootTerminal(
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
         onOutputLines: (terminalId: Long, lines: List<String>) -> Unit = { _, _ -> },
         onExit: (terminalId: Long, exitCode: Int) -> Unit = { _, _ -> },
     ): Long {
         require(android.os.Process.myUid() == 0) { "Chroot 终端要求 Root 工作模式" }
-        val rootfs = File(rootfsPath)
-        val runtime = File(runtimePath)
-        val terminal = File(terminalPath)
+        val rootfs = File(requireRootfsPath())
+        val runtime = File(requireRuntimePath())
+        val terminal = resolveTerminalBinary()
         require(isContainerSystemInstalled(rootfs)) { "容器系统尚未安装" }
         require(terminal.isFile && terminal.canExecute()) {
             "libterminal.so 不可执行: ${terminal.absolutePath}"
@@ -136,7 +223,7 @@ internal class TerminalManager(
         require(runtime.isDirectory || runtime.mkdirs()) {
             "无法创建终端运行目录: ${runtime.absolutePath}"
         }
-        return containerMounts.withMounted(rootfs.absolutePath, terminal.absolutePath) { mountPid -> createTerminal(
+        return containerMounts.withMounted { mountPid -> createTerminal(
             command = listOf(
                 terminal.absolutePath,
                 "session",
@@ -165,6 +252,12 @@ internal class TerminalManager(
             }
         }
     }
+
+    private fun requireRootfsPath(): String =
+        checkNotNull(rootfsPath) { "终端管理器尚未初始化容器环境" }
+
+    private fun requireRuntimePath(): String =
+        checkNotNull(runtimePath) { "终端管理器尚未初始化容器环境" }
 
     private fun awaitTerminalStart(startup: CompletableFuture<ManagedTerminal>): ManagedTerminal {
         var interrupted = false
@@ -433,6 +526,7 @@ internal class TerminalManager(
     }
 
     companion object {
+        private const val APP_PACKAGE = "io.github.bszapp.wifitoolbox"
         private const val TAG = "TerminalManager"
         private const val STOP_TIMEOUT_MILLIS = 1_500L
         private const val OWNER_THREAD_JOIN_MILLIS = 1_500L

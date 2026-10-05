@@ -71,6 +71,8 @@ open class MainService(
     }
 
     private val containerMounts: ContainerMountManager = ContainerMountManager(
+        isContainerInstalled = { terminalManager.isContainerSystemInstalled() },
+        startMountProcess = { terminalManager.startContainerMountProcess() },
         beforeUnmount = { mountPid -> terminalManager.stopChrootTerminals(mountPid) },
         onError = { error -> communication.broadcastServiceError(
             source = "Service.ContainerMountManager", operation = "容器挂载", error = error,
@@ -79,6 +81,8 @@ open class MainService(
 
     private val terminalManager: TerminalManager = TerminalManager(
         containerMounts = containerMounts,
+        trustedUidProvider = { initializer.requireStartupInfo().trustedUid },
+        androidApiProvider = { initializer.androidApi },
         onAliveTerminalsChanged = communication::broadcastAliveTerminalsChanged,
         onTerminalLogRangeChanged = communication::broadcastTerminalLogRangeChanged,
     )
@@ -89,6 +93,7 @@ open class MainService(
 
     private val containerSystemManager = ContainerSystemManager(
         trustedUid = { initializer.requireStartupInfo().trustedUid },
+        terminalBinaryProvider = terminalManager::resolveTerminalBinaryForContainerManager,
         mounts = containerMounts,
         beforeDelete = hybridWifiScanner::stop,
         onError = { operation, error ->
@@ -125,8 +130,8 @@ open class MainService(
         androidApiProvider = { initializer.androidApi },
         wifiLogAnalyzer = wifiLogAnalyzer,
         terminalManager = terminalManager,
-        hybridTaskEnvironmentProvider = wifiListController::getHybridTaskEnvironment,
-        networkCardTaskEnvironmentProvider = wifiListController::getNetworkCardTaskEnvironment,
+        hybridTaskReadyProvider = wifiListController::isHybridTaskReady,
+        networkCardTaskReadyProvider = wifiListController::isNetworkCardTaskReady,
         onSavedWifiNetworksChanged = wifiListController::refreshSavedNetworks,
         onError = { operation, error ->
             communication.broadcastServiceError(
@@ -272,9 +277,10 @@ open class MainService(
 
     private fun initializeFromStartupInfo(startupInfo: StartupInfo): StartupInfo {
         val completed = initializer.initialize(startupInfo)
-        containerSystemManager.initialize(initializer.requireContainerEnvironment())
-        val environment = containerSystemManager.taskEnvironment()
-        wifiListController.configureEnvironment(environment.rootfsPath, environment.runtimePath, environment.terminalPath)
+        val containerEnvironment = initializer.requireContainerEnvironment()
+        terminalManager.initialize(containerEnvironment.appDataPath)
+        containerSystemManager.initialize(containerEnvironment)
+        wifiListController.configureEnvironment()
         serviceNotifications.start()
         wifiEventMonitor.start()
         wifiListController.initialize()
@@ -410,14 +416,8 @@ open class MainService(
     }
 
     override fun setWifiMode(source: Int) = communication.callFromApp {
-        val environment = containerSystemManager.taskEnvironment()
         val resolvedSource = WifiMode.fromWireValue(source)
-        wifiListController.setMode(
-            mode = resolvedSource,
-            rootfsPath = environment.rootfsPath,
-            runtimePath = environment.runtimePath,
-            terminalPath = environment.terminalPath,
-        )
+        wifiListController.setMode(mode = resolvedSource)
     }
 
     override fun setHybridScanEnabled(enabled: Boolean) = communication.callFromApp {
@@ -441,13 +441,7 @@ open class MainService(
     }
 
     override fun enterMonitorMode(command: String) = communication.callFromApp {
-        val environment = containerSystemManager.taskEnvironment()
-        wifiListController.enterMonitorMode(
-            command = command,
-            rootfsPath = environment.rootfsPath,
-            runtimePath = environment.runtimePath,
-            terminalPath = environment.terminalPath,
-        )
+        wifiListController.enterMonitorMode(command = command)
     }
 
     override fun getMonitorChanges(sessionGeneration: Long, afterRevision: Long): ParcelFileDescriptor =
@@ -545,8 +539,7 @@ open class MainService(
     }
 
     override fun createServiceTerminal() = communication.callFromApp {
-        val environment = containerSystemManager.taskEnvironment()
-        terminalManager.createChrootTerminal(environment.rootfsPath, environment.runtimePath, environment.terminalPath)
+        terminalManager.createChrootTerminal()
         Unit
     }
 

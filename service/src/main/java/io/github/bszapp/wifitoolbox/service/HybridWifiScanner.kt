@@ -42,11 +42,7 @@ internal class HybridWifiScanner(
     private val currentScanOutput = StringBuilder()
     private var stopping = false
 
-    fun start(
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
-    ): CompletableFuture<Unit> {
+    fun start(): CompletableFuture<Unit> {
         val future = synchronized(lock) {
             if (status == STATUS_READY) return CompletableFuture.completedFuture(Unit)
             if (status == STATUS_STARTING) {
@@ -69,14 +65,8 @@ internal class HybridWifiScanner(
         executor.execute {
             try {
                 require(Process.myUid() == 0) { "Chroot 扫描终端要求 Root 工作模式" }
-                val rootfs = File(rootfsPath)
-                val runtime = File(runtimePath)
-                val terminal = File(terminalPath)
+                val rootfs = File(terminalManager.rootfsPathForFifo())
                 require(isContainerSystemInstalled(rootfs)) { "容器系统尚未安装" }
-                require(terminal.isFile && terminal.canExecute()) {
-                    "libterminal.so 不可执行: ${terminal.absolutePath}"
-                }
-                runtime.mkdirs()
 
                 val pipes = preparePipes(rootfs)
                 val eventStream = FileInputStream(
@@ -96,9 +86,6 @@ internal class HybridWifiScanner(
                 executor.execute { readEvents(eventStream) }
 
                 val createdTerminalId = terminalManager.createChrootTerminal(
-                    rootfsPath = rootfs.absolutePath,
-                    runtimePath = runtime.absolutePath,
-                    terminalPath = terminal.absolutePath,
                     onExit = ::onTerminalExited,
                 )
                 val stopImmediately = synchronized(lock) {

@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -26,9 +27,10 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
 
 @Composable
-fun DictionaryPage(state: DictionaryState) {
+fun DictionaryPage(state: DictionaryState, outerPadding: PaddingValues) {
     val context = LocalContext.current
     val navigator = LocalNavigator.current
+    val layoutDirection = LocalLayoutDirection.current
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -58,6 +60,7 @@ fun DictionaryPage(state: DictionaryState) {
             Box(
                 Modifier
                     .fillMaxSize()
+                    .padding(outerPadding)
                     .padding(paddingValues),
                 contentAlignment = Alignment.Center
             ) {
@@ -69,9 +72,16 @@ fun DictionaryPage(state: DictionaryState) {
         } else {
             LazyColumn(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentPadding = PaddingValues(bottom = 88.dp)
+                    .fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = outerPadding.calculateStartPadding(layoutDirection) +
+                        paddingValues.calculateStartPadding(layoutDirection),
+                    top = outerPadding.calculateTopPadding() + paddingValues.calculateTopPadding(),
+                    end = outerPadding.calculateEndPadding(layoutDirection) +
+                        paddingValues.calculateEndPadding(layoutDirection),
+                    bottom = outerPadding.calculateBottomPadding() +
+                        paddingValues.calculateBottomPadding() + 88.dp,
+                ),
             ) {
                 items(
                     items = visibleResources,

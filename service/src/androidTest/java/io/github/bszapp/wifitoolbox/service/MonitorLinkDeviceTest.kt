@@ -19,15 +19,22 @@ object MonitorLinkDeviceTest {
         require(args.size == 5) { "rootfs runtime libterminal.so base64进入预设 测试组" }
         require(Process.myUid() == 0)
         lateinit var terminals: TerminalManager
-        val mounts = ContainerMountManager({ pid -> terminals.stopChrootTerminals(pid) },
+        val mounts = ContainerMountManager({ terminals.isContainerSystemInstalled() },
+            { terminals.startContainerMountProcess() }, { pid -> terminals.stopChrootTerminals(pid) },
             { error -> println("MOUNT_ERROR $error") })
-        mounts.refresh(ContainerEnvironment(File(args[0]).parentFile!!.absolutePath, args[2]))
-        terminals = TerminalManager(mounts, {}, { range ->
-            if (range.lineCount > 0) runCatching {
-                terminals.getLogs(range.terminalId, range.latestId, range.latestId).entries
-                    .forEach { println("TERMINAL ${range.terminalId}: ${it.text}") }
-            }
-        })
+        terminals = TerminalManager(
+            containerMounts = mounts,
+            terminalBinaryOverride = { File(args[2]) },
+            onAliveTerminalsChanged = {},
+            onTerminalLogRangeChanged = { range ->
+                if (range.lineCount > 0) runCatching {
+                    terminals.getLogs(range.terminalId, range.latestId, range.latestId).entries
+                        .forEach { println("TERMINAL ${range.terminalId}: ${it.text}") }
+                }
+            },
+        )
+        terminals.initializeForTest(args[0], args[1])
+        mounts.refresh(ContainerEnvironment(File(args[0]).parentFile!!.absolutePath))
         val hybrid = HybridWifiScanner(terminals)
         val controller = WifiListController(
             { null }, hybrid, terminals, {}, {}, {}, { _, _ -> }, { _, _, _ -> },
@@ -71,7 +78,7 @@ object MonitorLinkDeviceTest {
             val result = CompletableFuture<Int>()
             val callback: (Int) -> Unit = { result.complete(it) }
             report("SCRIPT_BEGIN $label")
-            script.invoke(controller, command, args[0], args[1], args[2], callback)
+            script.invoke(controller, command, callback)
             try {
                 val code = result.get(30, TimeUnit.SECONDS)
                 report("SCRIPT_END $label code=$code ${snapshot()}")
@@ -183,10 +190,17 @@ object PersistentMonitorLinkDeviceTest {
         fun report(text: String) = println("TEST +${SystemClock.elapsedRealtime() - started}ms $text")
         val pending = java.util.concurrent.ConcurrentHashMap<String, CompletableFuture<Int>>()
         lateinit var terminals: TerminalManager
-        val mounts = ContainerMountManager({ pid -> terminals.stopChrootTerminals(pid) },
+        val mounts = ContainerMountManager({ terminals.isContainerSystemInstalled() },
+            { terminals.startContainerMountProcess() }, { pid -> terminals.stopChrootTerminals(pid) },
             { error -> report("MOUNT_ERROR $error") })
-        mounts.refresh(ContainerEnvironment(File(args[0]).parentFile!!.absolutePath, args[2]))
-        terminals = TerminalManager(mounts, {}, {})
+        terminals = TerminalManager(
+            containerMounts = mounts,
+            terminalBinaryOverride = { File(args[2]) },
+            onAliveTerminalsChanged = {},
+            onTerminalLogRangeChanged = {},
+        )
+        terminals.initializeForTest(args[0], args[1])
+        mounts.refresh(ContainerEnvironment(File(args[0]).parentFile!!.absolutePath))
         val hybrid = HybridWifiScanner(terminals)
         val api = AndroidApi()
         val controller = WifiListController(
@@ -221,7 +235,7 @@ object PersistentMonitorLinkDeviceTest {
         }
         api.setWifiEnabled(true)
         sample(5000)
-        val id = terminals.createChrootTerminal(args[0], args[1], args[2],
+        val id = terminals.createChrootTerminal(
             onOutputLines = { terminalId, lines ->
                 lines.forEach { line ->
                     report("TERMINAL $terminalId: $line")

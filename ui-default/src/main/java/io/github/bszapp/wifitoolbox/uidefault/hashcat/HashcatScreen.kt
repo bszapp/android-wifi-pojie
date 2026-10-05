@@ -14,14 +14,18 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -38,7 +42,13 @@ import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelState
 import kotlinx.coroutines.delay
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
+import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
+import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
+import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
 import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -54,6 +64,9 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
     val kernels by viewModel.kernels.collectAsStateWithLifecycle()
     LaunchedEffect(initialHandshake) { initialHandshake?.let(viewModel::openIncoming) }
     val navigator = LocalNavigator.current
+    val scrollBehavior = MiuixScrollBehavior()
+    val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
+    val barColor = if (backdrop != null) Color.Transparent else MiuixTheme.colorScheme.surface
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val sheetHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -61,26 +74,58 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
     }
     Scaffold(
         topBar = {
-            TopAppBar(title = "WPA Hashcat", navigationIcon = {
-                IconButton(onClick = { navigator.pop() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            BlurredBar(backdrop) {
+                Column {
+                    TopAppBar(
+                        color = barColor,
+                        title = "WPA Hashcat",
+                        scrollBehavior = scrollBehavior,
+                        navigationIcon = {
+                            IconButton(onClick = { navigator.pop() }) {
+                                val layoutDirection = LocalLayoutDirection.current
+                                Icon(
+                                    modifier = Modifier.graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                    imageVector = MiuixIcons.Back,
+                                    contentDescription = "返回",
+                                    tint = MiuixTheme.colorScheme.onBackground,
+                                )
+                            }
+                        },
+                    )
                 }
-            })
+            }
         },
-        contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal),
+        contentWindowInsets = WindowInsets.systemBars
+            .add(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Horizontal),
         snackbarHost = { SnackbarHost(state = snackbarHostState) },
-    ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
+        ) { padding ->
+        Box(
+            (if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
+                .fillMaxSize()
+        ) {
+            val layoutDirection = LocalLayoutDirection.current
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = safeBottom + 92.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .nestedScroll(scrollBehavior.nestedScrollConnection),
+                contentPadding = PaddingValues(
+                    start = padding.calculateStartPadding(layoutDirection) + 12.dp,
+                    end = padding.calculateEndPadding(layoutDirection) + 12.dp,
+                    top = padding.calculateTopPadding() + 12.dp,
+                    bottom = padding.calculateBottomPadding() + safeBottom + 92.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!connected) item { Text("服务未连接，历史记录仍可查看", style = MiuixTheme.textStyles.body2) }
                 if (tasks.any { it.active }) item { MemoryPanel(memory) }
                 if (tasks.isEmpty()) item { Text("暂无 WPA 字典安全评估任务") }
                 items(tasks, key = { it.id }) { task ->
-                    Card(Modifier.fillMaxWidth().clickable { viewModel.inspect(task.id) }) {
+                    Card(Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.inspect(task.id) }) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("WPA Hashcat · ${task.state.label()}", style = MiuixTheme.textStyles.subtitle)
                             Text(formatDate(task.createdAt), style = MiuixTheme.textStyles.body2)
@@ -89,12 +134,19 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                                 task.memoryLimitMiB?.let { Text("计算内存预算：$it MiB", style = MiuixTheme.textStyles.body2) }
                                 Progress(task)
                             }
-                            if (task.state == HashcatTaskState.SUCCEEDED) Text("已成功发现密码，点击查看详情", color = MiuixTheme.colorScheme.primary)
+                            if (task.state == HashcatTaskState.SUCCEEDED) {
+                                Text(
+                                    "已成功发现密码，点击查看详情",
+                                    color = MiuixTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
             }
-            FloatingActionButton(onClick = { viewModel.open() }, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = safeBottom + 16.dp)) {
+            FloatingActionButton(onClick = { viewModel.open() }, modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = safeBottom + 16.dp)) {
                 Icon(Icons.Filled.PlayArrow, contentDescription = "运行", tint = MiuixTheme.colorScheme.onPrimary)
             }
         }
@@ -106,7 +158,9 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
     ) {
         AnimatedContent(
             targetState = sheet.page,
-            modifier = Modifier.fillMaxWidth().heightIn(max = sheetHeight),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = sheetHeight),
             contentAlignment = Alignment.TopStart,
             transitionSpec = {
                 val movingForward = targetState.ordinal > initialState.ordinal
@@ -116,9 +170,13 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
             },
             label = "HashcatSheetPage",
         ) { page ->
-        Column(Modifier.fillMaxWidth().heightIn(max = sheetHeight), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier
+            .fillMaxWidth()
+            .heightIn(max = sheetHeight), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             LazyColumn(
-                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false),
                 contentPadding = PaddingValues(bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -130,7 +188,10 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                             item { Text("此功能仅供恢复密码以及检验授权网络的安全性使用。破解未经授权网络密码属于违法行为。",
                                 style = MiuixTheme.textStyles.body2) }
                             item {
-                                Row(Modifier.fillMaxWidth().clickable { viewModel.agree(!sheet.agreed) }.padding(vertical = 8.dp),
+                                Row(Modifier
+                                    .fillMaxWidth()
+                                    .clickable { viewModel.agree(!sheet.agreed) }
+                                    .padding(vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically) {
                                     Checkbox(state = if (sheet.agreed) ToggleableState.On else ToggleableState.Off,
                                         onClick = { viewModel.agree(!sheet.agreed) })
@@ -279,7 +340,9 @@ private fun MemoryPanel(
             val currentColor = colors.primary
             val freeColor = colors.surfaceVariant
             if (unreadable.isEmpty() && current + others <= used) {
-                Canvas(Modifier.fillMaxWidth().height(38.dp)) {
+                Canvas(Modifier
+                    .fillMaxWidth()
+                    .height(38.dp)) {
                     fun position(bytes: Long) = (bytes.toDouble() / memory.totalBytes * size.width).toFloat().coerceIn(0f, size.width)
                     val top = 14.dp.toPx()
                     var left = 0f

@@ -6,14 +6,12 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
 import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork
 import io.github.bszapp.wifitoolbox.contract.task.WpsPbcTaskInput
 import io.github.bszapp.wifitoolbox.service.AndroidApi
-import io.github.bszapp.wifitoolbox.service.HybridTaskEnvironment
 import io.github.bszapp.wifitoolbox.service.TerminalManager
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 internal class WpsPbcTask(
     input: WpsPbcTaskInput,
-    private val environment: HybridTaskEnvironment,
     private val terminalManager: TerminalManager,
     private val androidApi: AndroidApi,
     private val onSavedWifiNetworksChanged: () -> Unit,
@@ -115,9 +113,6 @@ internal class WpsPbcTask(
         val outputParser = AttemptOutputParser(targetMac)
         val settings = captureAttemptSettings()
         val id = terminalManager.createChrootTerminal(
-            rootfsPath = environment.rootfsPath,
-            runtimePath = environment.runtimePath,
-            terminalPath = environment.terminalPath,
             onOutputLines = { terminalId, lines ->
                 lines.forEach { line ->
                     events.offer(Event.OutputLine(terminalId, line))

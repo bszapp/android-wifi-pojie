@@ -59,10 +59,8 @@ class ServiceInitializer(
             val application = api.getApplicationInfo(APP_PACKAGE, launchInfo.trustedUid / 100_000)
             require(application.uid == launchInfo.trustedUid) { "系统安装记录的应用 UID 与可信 UID 不一致" }
             val data = File(requireNotNull(application.dataDir) { "系统安装记录缺少应用数据目录" })
-            val nativeDirectory = requireNotNull(application.nativeLibraryDir) { "系统安装记录缺少原生库目录" }
             containerEnvironment = ContainerEnvironment(
                 appDataPath = if (Process.myUid() == 0) data.canonicalPath else data.absolutePath,
-                terminalPath = File(nativeDirectory, "libterminal.so").absolutePath,
             )
             startupInfo = completed
             androidApi = api

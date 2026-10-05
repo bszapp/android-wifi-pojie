@@ -4,7 +4,6 @@ import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiStage
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTarget
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskConfig
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
-import io.github.bszapp.wifitoolbox.service.HybridTaskEnvironment
 import io.github.bszapp.wifitoolbox.service.TerminalManager
 import org.json.JSONArray
 import org.json.JSONObject
@@ -15,16 +14,12 @@ import java.util.concurrent.TimeUnit
 internal class NetworkCardConnectTask(
     private val target: ConnectWifiTarget.NetworkCard,
     private val config: ConnectWifiTaskConfig,
-    private val environment: HybridTaskEnvironment,
     private val terminalManager: TerminalManager,
     private val deviceName: String,
 ) : ServiceTask {
     override fun run(context: TaskContext) {
         val events = LinkedBlockingQueue<Event>()
         val id = terminalManager.createChrootTerminal(
-            rootfsPath = environment.rootfsPath,
-            runtimePath = environment.runtimePath,
-            terminalPath = environment.terminalPath,
             onOutputLines = { _, lines -> lines.forEach { events.offer(Event.Line(it)) } },
             onExit = { _, code -> events.offer(Event.Exit(code)) },
         )

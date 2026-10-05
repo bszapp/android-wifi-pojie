@@ -3,13 +3,13 @@ package io.github.bszapp.wifitoolbox.service.container
 import android.os.Process as AndroidProcess
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.container.ContainerEnvironment
-import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
-import java.io.File
 import java.io.IOException
 import org.json.JSONObject
 
 /** 服务持有唯一的私有挂载命名空间；终端加入该空间，终端退出不会解除挂载。 */
 internal class ContainerMountManager(
+    private val isContainerInstalled: () -> Boolean,
+    private val startMountProcess: () -> Process,
     private val beforeUnmount: (Int) -> Unit,
     private val onError: (Throwable) -> Unit,
 ) {
@@ -23,8 +23,7 @@ internal class ContainerMountManager(
         check(!closed) { "容器挂载管理器已关闭" }
         if (environment != next) unmountLocked()
         environment = next
-        val shouldMount = AndroidProcess.myUid() == 0 &&
-            isContainerSystemInstalled(File(next.appDataPath, "rootfs"))
+        val shouldMount = AndroidProcess.myUid() == 0 && isContainerInstalled()
         if (!shouldMount) {
             unmountLocked()
             return@synchronized
@@ -34,9 +33,7 @@ internal class ContainerMountManager(
             available = true
             return@synchronized
         }
-        val process = ProcessBuilder(next.terminalPath, "container", "mount",
-            "--rootfs", File(next.appDataPath, "rootfs").absolutePath,
-            "--host-path", HOST_TOOL_PATH).redirectErrorStream(true).start()
+        val process = startMountProcess()
         val reader = process.inputStream.bufferedReader()
         try {
             val output = StringBuilder()
@@ -57,7 +54,7 @@ internal class ContainerMountManager(
             val mounted = MountSession(process, pid)
             session = mounted
             available = true
-            Log.i(TAG, "容器已挂载：rootfs=${next.appDataPath}/rootfs namespacePid=$pid")
+            Log.i(TAG, "容器已挂载：namespacePid=$pid")
             Thread({
                 runCatching {
                     reader.useLines { lines -> lines.forEach { Log.d(TAG, it) } }
@@ -85,11 +82,9 @@ internal class ContainerMountManager(
     }
 
     /** 与终端创建串行，禁止在删除目录或卸载过程中产生新的 chroot 使用者。 */
-    fun <T> withMounted(rootfsPath: String, terminalPath: String, action: (Int) -> T): T = synchronized(lock) {
+    fun <T> withMounted(action: (Int) -> T): T = synchronized(lock) {
         require(AndroidProcess.myUid() == 0) { "Chroot 终端要求 Root 工作模式" }
-        val env = requireNotNull(environment) { "容器环境尚未配置" }
-        require(File(rootfsPath).canonicalPath == File(env.appDataPath, "rootfs").canonicalPath &&
-            terminalPath == env.terminalPath) { "终端环境与服务持有的容器环境不一致" }
+        requireNotNull(environment) { "容器环境尚未配置" }
         val mounted = session
         check(!closed && available && mounted != null) { "容器系统尚未挂载" }
         check(runCatching { mounted.process.exitValue() }.isFailure) { "容器挂载进程已退出" }
@@ -120,9 +115,6 @@ internal class ContainerMountManager(
 
     private companion object {
         const val TAG = "ContainerMountManager"
-        const val HOST_TOOL_PATH =
-            "/system/bin:/system/xbin:/system_ext/bin:/product/bin:/vendor/bin:/odm/bin:/apex/com.android.runtime/bin"
-
         fun waitForExit(process: Process): Int {
             var interrupted = false
             try {

@@ -13,7 +13,6 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
 import io.github.bszapp.wifitoolbox.service.AndroidApi
-import io.github.bszapp.wifitoolbox.service.HybridTaskEnvironment
 import io.github.bszapp.wifitoolbox.service.ITaskManagerCallback
 import io.github.bszapp.wifitoolbox.service.TerminalManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
@@ -29,8 +28,8 @@ internal class TaskManager(
     private val androidApiProvider: () -> AndroidApi?,
     private val wifiLogAnalyzer: WifiLogAnalyzer,
     private val terminalManager: TerminalManager,
-    private val hybridTaskEnvironmentProvider: () -> HybridTaskEnvironment?,
-    private val networkCardTaskEnvironmentProvider: () -> HybridTaskEnvironment?,
+    private val hybridTaskReadyProvider: () -> Boolean,
+    private val networkCardTaskReadyProvider: () -> Boolean,
     private val onSavedWifiNetworksChanged: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) : AutoCloseable {
@@ -57,7 +56,7 @@ internal class TaskManager(
     private var closed = false
 
     fun start(request: TaskStartRequest): Long {
-        val hybridEnvironment = validate(request)
+        validate(request)
         val record = synchronized(lock) {
             check(!closed) { "任务管理器已关闭" }
             check(currentTaskId == null) { "已有任务正在运行：taskId=$currentTaskId" }
@@ -70,7 +69,6 @@ internal class TaskManager(
                     state = TaskExecutionState.RUNNING,
                     progress = null,
                 ),
-                hybridEnvironment = hybridEnvironment,
             ).also {
                 records[taskId] = it
                 currentTaskId = taskId
@@ -273,8 +271,6 @@ internal class TaskManager(
                         NetworkCardConnectTask(
                             target = cardTarget,
                             config = connectRequest.config,
-                            environment = synchronized(lock) { records[taskId]?.hybridEnvironment }
-                                ?: error("网卡测试缺少启动时的容器环境"),
                             terminalManager = terminalManager,
                             deviceName = cardTarget.name ?: androidApi.getDeviceName(),
                         )
@@ -301,9 +297,6 @@ internal class TaskManager(
                 }
                 is TaskRequestPayload.WpsPbc -> WpsPbcTask(
                     input = payload.input,
-                    environment = synchronized(lock) {
-                        records[taskId]?.hybridEnvironment
-                    } ?: throw IllegalStateException("WPS-PBC 任务缺少启动时捕获的混合扫描环境"),
                     terminalManager = terminalManager,
                     androidApi = androidApi,
                     onSavedWifiNetworksChanged = onSavedWifiNetworksChanged,
@@ -346,15 +339,13 @@ internal class TaskManager(
             )
             if (currentTaskId == taskId) currentTaskId = null
             record.activeTask = null
-            record.hybridEnvironment = null
             record.pendingUpdates.clear()
             record.snapshot
         }
         broadcastManagerChanged(snapshot)
     }
 
-    private fun validate(request: TaskStartRequest): HybridTaskEnvironment? {
-        var taskEnvironment: HybridTaskEnvironment? = null
+    private fun validate(request: TaskStartRequest) {
         when (val payload = request.payload) {
             is TaskRequestPayload.ConnectWifi -> {
                 val connect = payload.request
@@ -376,14 +367,11 @@ internal class TaskManager(
                             require((mac.substringBefore(':').toInt(16) and 1) == 0 &&
                                 mac != "00:00:00:00:00:00") { "MAC 必须为有效单播地址" }
                         }
-                        val environment = checkNotNull(networkCardTaskEnvironmentProvider()) {
+                        check(networkCardTaskReadyProvider()) {
                             "网卡测试只能在普通模式且容器环境已配置时运行"
                         }
-                        taskEnvironment = environment
-                        require(io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled(
-                            java.io.File(environment.rootfsPath),
-                        )) { "容器系统尚未安装" }
-                        require(java.io.File(environment.rootfsPath, "wlantool/managed_connect.py").isFile) {
+                        require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
+                        require(terminalManager.hasRootfsFile("wlantool/managed_connect.py")) {
                             "容器缺少 managed_connect.py，请更新容器系统"
                         }
                     }
@@ -405,12 +393,11 @@ internal class TaskManager(
                 payload.input.targetMac?.let { mac ->
                     require(MAC_ADDRESS.matches(mac)) { "目标设备 MAC 格式非法：$mac" }
                 }
-                return checkNotNull(hybridTaskEnvironmentProvider()) {
+                check(hybridTaskReadyProvider()) {
                     "WPS-PBC 任务只能在已就绪的混合扫描模式运行"
                 }
             }
         }
-        return taskEnvironment
     }
 
     private fun validateUpdate(request: TaskStartRequest, update: TaskUpdateRequest) {
@@ -548,7 +535,6 @@ internal class TaskManager(
 
     private data class TaskRecord(
         var snapshot: TaskSnapshot,
-        var hybridEnvironment: HybridTaskEnvironment?,
         val logs: ArrayList<TaskLogEntry> = ArrayList(),
         val capturedNetworks: ArrayList<WpsCapturedNetwork> = ArrayList(),
         var nextLogId: Long = 0L,

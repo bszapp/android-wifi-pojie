@@ -14,7 +14,6 @@ import io.github.bszapp.wifitoolbox.contract.container.ContainerState
 import io.github.bszapp.wifitoolbox.contract.container.ContainerSystemStatus
 import io.github.bszapp.wifitoolbox.contract.container.isContainerSystemInstalled
 import io.github.bszapp.wifitoolbox.service.IContainerSystemCallback
-import io.github.bszapp.wifitoolbox.service.HybridTaskEnvironment
 import java.io.File
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -25,6 +24,7 @@ import org.json.JSONObject
 /** 容器状态与操作的唯一管理者；操作生命周期属于服务，与 App 回调的注册周期无关。 */
 internal class ContainerSystemManager(
     private val trustedUid: () -> Int,
+    private val terminalBinaryProvider: () -> File,
     private val mounts: ContainerMountManager,
     private val beforeDelete: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
@@ -46,11 +46,6 @@ internal class ContainerSystemManager(
 
     fun state(): ContainerState = synchronized(lock) { currentState }
 
-    fun taskEnvironment(): HybridTaskEnvironment = synchronized(lock) {
-        val env = requireNotNull(environment) { "服务容器环境尚未初始化" }
-        HybridTaskEnvironment(rootfs(env).absolutePath, runtime(env).absolutePath, env.terminalPath)
-    }
-
     fun initialize(next: ContainerEnvironment) {
         val data = File(next.appDataPath)
         require(data.isAbsolute && data.absolutePath != "/") {
@@ -61,7 +56,6 @@ internal class ContainerSystemManager(
             require(data.canonicalPath == data.absolutePath) { "容器数据目录必须为规范路径" }
             require(Os.stat(data.absolutePath).st_uid == trustedUid()) { "容器数据目录不属于可信 App" }
         }
-        require(File(next.terminalPath).isAbsolute) { "终端路径必须为绝对路径" }
         synchronized(lock) {
             check(!closed) { "容器管理器已关闭" }
             if (environment == next) return
@@ -210,10 +204,12 @@ internal class ContainerSystemManager(
     private fun deletePaths(env: ContainerEnvironment, operation: ContainerOperation, paths: List<File>) {
         val targets = paths.filter { runCatching { Os.lstat(it.absolutePath) }.isSuccess }
         if (targets.isEmpty()) return
-        val terminal = File(env.terminalPath)
-        check(terminal.isFile && terminal.canExecute()) { "未找到可执行的 libterminal.so: ${terminal.absolutePath}" }
         targets.forEachIndexed { index, target ->
             checkInterrupted()
+            val terminal = terminalBinaryProvider()
+            check(terminal.isFile && terminal.canExecute()) {
+                "未找到可执行的 libterminal.so: ${terminal.absolutePath}"
+            }
             // 使用现有原生删除器验证范围、解除子挂载并输出逐项进度；不启动 su 或另一个权限源。
             val process = ProcessBuilder(terminal.absolutePath, "container", "delete", "--path", target.absolutePath,
                 "--allowed-root", env.appDataPath).redirectErrorStream(true).start()

@@ -69,7 +69,7 @@ internal class WifiListController(
     private var savedWifiList: SavedWifiList? = null
 
     private var initialized = false
-    @Volatile private var environment: HybridTaskEnvironment? = null
+    @Volatile private var environmentConfigured = false
     @Volatile private var monitorCapturePlan: MonitorCapturePlan = MonitorCapturePlan.Stopped
     /** 仅保护服务内部异步网卡操作，不作为公开模式。 */
     private var monitorCaptureChangeActive = false
@@ -112,7 +112,7 @@ internal class WifiListController(
     private var lastSystemWifiEnabled: Boolean? = null
 
     @Volatile
-    private var hybridTaskEnvironment: HybridTaskEnvironment? = null
+    private var hybridTaskReady = false
 
     private val monitorModeController = MonitorModeController(
         terminalManager = terminalManager,
@@ -147,16 +147,14 @@ internal class WifiListController(
 
     fun getModeState(): WifiModeState = modeState
 
-    fun getHybridTaskEnvironment(): HybridTaskEnvironment? {
+    fun isHybridTaskReady(): Boolean {
         val mode = modeState
-        return hybridTaskEnvironment?.takeIf {
-            mode.mode == WifiMode.NORMAL && mode.hybridScanEnabled && !modeOperationInProgress
-        }
+        return hybridTaskReady && mode.mode == WifiMode.NORMAL &&
+            mode.hybridScanEnabled && !modeOperationInProgress
     }
 
-    fun getNetworkCardTaskEnvironment(): HybridTaskEnvironment? = environment?.takeIf {
+    fun isNetworkCardTaskReady(): Boolean = environmentConfigured &&
         modeState.mode == WifiMode.NORMAL && !modeOperationInProgress
-    }
 
     fun initialize() {
         execute {
@@ -169,7 +167,7 @@ internal class WifiListController(
                     setInterfaceUp(false)
                     publishWifiState(WifiState.Data.Enabled(emptyList(), false, null))
                     refreshSavedNetworksInternal()
-                    environment?.let { initializeMonitorSession(it) }
+                    if (environmentConfigured) initializeMonitorSession()
                 } else {
                     refreshWifiDataInternal()
                     startSystemWifiEnabledPolling()
@@ -183,24 +181,24 @@ internal class WifiListController(
         }
     }
 
-    fun configureEnvironment(rootfsPath: String, runtimePath: String, terminalPath: String) {
+    fun configureEnvironment() {
         execute {
-            environment = HybridTaskEnvironment(rootfsPath, runtimePath, terminalPath)
+            environmentConfigured = true
             if (modeState.mode == WifiMode.MONITOR && modeState.monitorStatistics == null) {
-                runCatching { initializeMonitorSession(requireNotNull(environment)) }
+                runCatching { initializeMonitorSession() }
                     .onFailure { reportError("初始化 monitor 会话", it) }
             }
         }
     }
 
-    private fun initializeMonitorSession(env: HybridTaskEnvironment) {
+    private fun initializeMonitorSession() {
         val previousOperation = modeOperationInProgress
         modeOperationInProgress = true
         try {
             monitorCapturePlan = MonitorCapturePlan.Stopped
             monitorCaptureChangeActive = false
-            monitorModeController.start(env.rootfsPath, env.runtimePath, env.terminalPath)
-            monitorScanner.initialize(env).get(SCAN_START_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            monitorModeController.start()
+            monitorScanner.initialize().get(SCAN_START_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             publishModeState(modeState.copy(
                 monitorStatistics = monitorModeController.statisticsHeader(),
                 availableChannels = monitorScanner.availableChannels(),
@@ -223,12 +221,12 @@ internal class WifiListController(
                 check(!modeOperationInProgress) { "网卡操作尚未完成" }
                 check(modeState.mode == WifiMode.NORMAL) { "混合扫描仅用于普通模式" }
                 if (modeState.hybridScanEnabled == enabled) return@runCatching
-                val env = requireNotNull(environment) { "容器环境尚未配置" }
+                check(environmentConfigured) { "容器环境尚未配置" }
                 val generation = ++modeGeneration
                 modeOperationInProgress = true
                 cancelScanInternal(true)
                 stopSystemWifiEnabledPolling()
-                if (enabled) switchToHybridSource(generation, env.rootfsPath, env.runtimePath, env.terminalPath)
+                if (enabled) switchToHybridSource(generation)
                 else switchToSystemSource(generation)
             }.onFailure { reportError("修改混合扫描方式", it) }
         }
@@ -294,7 +292,7 @@ internal class WifiListController(
 
                 if (enabled) {
                     // 故障后回放历史文件可能很大；异步等待就绪，停止和模式切换仍可处理。
-                    val ready = monitorModeController.ensureRunning(requireNotNull(environment))
+                    val ready = monitorModeController.ensureRunning()
                     awaitCapture(ready, bounded = false) {
                         setInterfaceUp(true)
                         awaitCapture(restoreMonitorReception(generation)) {
@@ -352,7 +350,8 @@ internal class WifiListController(
             monitorRestoreCompletion = completion
             try {
                 // 扫描进程异常退出后只重新准备信道执行器，已有抓包数据保持不动。
-                val ready = monitorScanner.initialize(requireNotNull(environment) { "容器环境尚未配置" })
+                check(environmentConfigured) { "容器环境尚未配置" }
+                val ready = monitorScanner.initialize()
                 awaitMonitorCommand(generation, ready, completion, "初始化信道执行器") {
                     val channels = monitorScanner.availableChannels()
                     if (channels != modeState.availableChannels) {
@@ -501,7 +500,7 @@ internal class WifiListController(
                 monitorCaptureChangeActive = false
                 monitorCaptureOperationId++
                 monitorScanActive = false
-                hybridTaskEnvironment = null
+                hybridTaskReady = false
                 publishDetectedMode(readInterfaceMode())
                 modeOperationInProgress = false
                 if (modeState.mode == WifiMode.MONITOR) {
@@ -561,7 +560,7 @@ internal class WifiListController(
             try {
                 check(isCurrentMode(requestedGeneration, WifiMode.MONITOR) && !modeOperationInProgress) { "monitor 模式已改变" }
                 check(!monitorScanActive && !monitorCaptureChangeActive && !modeState.clearingCapture) { "monitor 操作正在进行" }
-                val env = requireNotNull(environment) { "容器环境尚未配置" }
+                check(environmentConfigured) { "容器环境尚未配置" }
                 val generation = modeGeneration
                 val scanId = ++scanGeneration
                 requestedScanId.set(scanId)
@@ -571,7 +570,7 @@ internal class WifiListController(
                 setInterfaceUp(true)
                 val current = wifiState as? WifiState.Data.Enabled
                 publishWifiState(WifiState.Data.Enabled(current?.scanResults.orEmpty(), true, null))
-                monitorScanner.start(env, onMessage = { message ->
+                monitorScanner.start(onMessage = { message ->
                     execute {
                         if (isCurrentMode(generation, WifiMode.MONITOR) && scanGeneration == scanId) {
                             val state = message.optJSONObject("state") ?: return@execute
@@ -743,21 +742,17 @@ internal class WifiListController(
 
     fun setMode(
         mode: WifiMode,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
     ) {
         require(mode == WifiMode.NORMAL) { "监听模式通过命令编辑入口进入" }
         execute {
             val current = modeState
-            environment = HybridTaskEnvironment(rootfsPath, runtimePath, terminalPath)
             if (current.mode == mode && !modeOperationInProgress) return@execute
             stopInterfaceModePolling()
             modeOperationInProgress = true
             val generation = ++modeGeneration
             publishModeState(modeState.copy(modeSwitch = WifiModeSwitch(mode, true, generation)))
             try {
-                hybridTaskEnvironment = null
+                hybridTaskReady = false
                 stopSystemWifiEnabledPolling()
                 cancelScanInternal(true)
                 stopModeTransition()
@@ -770,9 +765,9 @@ internal class WifiListController(
                     monitorScanActive = false
                     monitorModeController.stop()
                     publishModeState(modeState.copy(capturing = false, hoppingCapture = false, clearingCapture = false))
-                    runMonitorExitScript(generation, mode, rootfsPath, runtimePath, terminalPath)
+                    runMonitorExitScript(generation, mode)
                 } else {
-                    continueModeSwitch(generation, mode, rootfsPath, runtimePath, terminalPath)
+                    continueModeSwitch(generation, mode)
                 }
             } catch (error: Throwable) {
                 finishModeFailure(generation, "切换网卡模式", error)
@@ -782,9 +777,6 @@ internal class WifiListController(
 
     fun enterMonitorMode(
         command: String,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
     ) {
         execute {
             if (modeState.mode == WifiMode.MONITOR) return@execute
@@ -793,7 +785,7 @@ internal class WifiListController(
             val generation = ++modeGeneration
             publishModeState(modeState.copy(modeSwitch = WifiModeSwitch(WifiMode.MONITOR, true, generation)))
             try {
-                hybridTaskEnvironment = null
+                hybridTaskReady = false
                 stopSystemWifiEnabledPolling()
                 cancelScanInternal(true)
                 stopModeTransition()
@@ -803,15 +795,14 @@ internal class WifiListController(
                 monitorCaptureChangeActive = false
                 monitorModeController.stop()
                 hybridWifiScanner.stop()
-                environment = HybridTaskEnvironment(rootfsPath, runtimePath, terminalPath)
-                runChrootTerminalScript(command, rootfsPath, runtimePath, terminalPath) { exitCode ->
+                runChrootTerminalScript(command) { exitCode ->
                     if (generation != modeGeneration || interruptedModeOperation.get() == generation) return@runChrootTerminalScript
                     try {
                         val detected = readInterfaceMode()
                         check(detected == WifiMode.MONITOR) { MONITOR_MODE_VERIFICATION_ERROR }
                         setInterfaceUp(false)
                         if (interruptedModeOperation.get() == generation) return@runChrootTerminalScript
-                        initializeMonitorSession(requireNotNull(environment))
+                        initializeMonitorSession()
                         if (interruptedModeOperation.get() == generation) return@runChrootTerminalScript
                         publishInitializedMonitorMode()
                         modeOperationInProgress = false
@@ -926,19 +917,15 @@ internal class WifiListController(
     private fun runMonitorExitScript(
         generation: Long,
         targetSource: WifiMode,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
     ) {
         try {
-            runChrootTerminalScript(MONITOR_EXIT_COMMAND, rootfsPath, runtimePath, terminalPath) { exitCode ->
+            runChrootTerminalScript(MONITOR_EXIT_COMMAND) { exitCode ->
                 if (generation != modeGeneration || interruptedModeOperation.get() == generation) return@runChrootTerminalScript
                 try {
                     if (exitCode != 0) {
                         Log.w(TAG, "监听模式退出脚本退出码=$exitCode，继续开启 Wi-Fi 并确认实际网卡模式")
                     }
-                    continueModeSwitch(generation, targetSource, rootfsPath, runtimePath, terminalPath,
-                        waitForNormalMode = true)
+                    continueModeSwitch(generation, targetSource, waitForNormalMode = true)
                 } catch (error: Throwable) {
                     finishModeFailure(generation, "退出监听模式", error)
                 }
@@ -951,9 +938,6 @@ internal class WifiListController(
     private fun continueModeSwitch(
         generation: Long,
         mode: WifiMode,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
         waitForNormalMode: Boolean = false,
     ) {
         if (generation != modeGeneration || interruptedModeOperation.get() == generation) return
@@ -962,7 +946,7 @@ internal class WifiListController(
 
         fun completeSwitch() {
             if (modeState.hybridScanEnabled) {
-                switchToHybridSource(generation, rootfsPath, runtimePath, terminalPath)
+                switchToHybridSource(generation)
             } else {
                 switchToSystemSource(generation)
             }
@@ -999,15 +983,9 @@ internal class WifiListController(
 
     private fun runChrootTerminalScript(
         command: String,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
         onExit: (exitCode: Int) -> Unit,
     ) {
         val terminalId = terminalManager.createChrootTerminal(
-            rootfsPath = rootfsPath,
-            runtimePath = runtimePath,
-            terminalPath = terminalPath,
             onExit = { exitedTerminalId, exitCode ->
                 execute {
                     if (informationSourceTransitionTerminalId == exitedTerminalId) {
@@ -1118,12 +1096,9 @@ internal class WifiListController(
 
     private fun switchToHybridSource(
         generation: Long,
-        rootfsPath: String,
-        runtimePath: String,
-        terminalPath: String,
     ) {
         val startup = try {
-            hybridWifiScanner.start(rootfsPath, runtimePath, terminalPath)
+            hybridWifiScanner.start()
         } catch (error: Throwable) {
             finishModeFailure(
                 generation = generation,
@@ -1146,11 +1121,7 @@ internal class WifiListController(
                     return@execute
                 }
 
-                hybridTaskEnvironment = HybridTaskEnvironment(
-                    rootfsPath = rootfsPath,
-                    runtimePath = runtimePath,
-                    terminalPath = terminalPath,
-                )
+                hybridTaskReady = true
 
                 modeOperationInProgress = false
                 publishModeState(
@@ -1200,7 +1171,7 @@ internal class WifiListController(
         if (generation != modeGeneration || interruptedModeOperation.get() == generation) return
         publishDetectedMode(readInterfaceMode())
         modeOperationInProgress = false
-        hybridTaskEnvironment = null
+        hybridTaskReady = false
         if (modeState.mode == WifiMode.NORMAL) {
             hybridWifiScanner.stop()
             publishModeState(modeState.copy(hybridScanEnabled = false))
@@ -1293,7 +1264,7 @@ internal class WifiListController(
         executor.execute {
             if (stopped) return@execute
             stopped = true
-            hybridTaskEnvironment = null
+            hybridTaskReady = false
             Log.d(TAG, "停止 Wi-Fi 控制器")
             cancelScanInternal(publishChange = false)
             stopModeTransition()
@@ -1372,7 +1343,7 @@ internal class WifiListController(
         val generation = ++modeGeneration
         try {
             cancelScanInternal(publishChange = true)
-            hybridTaskEnvironment = null
+            hybridTaskReady = false
             hybridWifiScanner.stop()
             publishDetectedMode(detected)
             if (previous == WifiMode.MONITOR) {
@@ -1386,7 +1357,7 @@ internal class WifiListController(
             } else {
                 setInterfaceUp(false)
                 refreshSavedNetworksInternal()
-                environment?.let { initializeMonitorSession(it) }
+                if (environmentConfigured) initializeMonitorSession()
             }
         } catch (error: Throwable) {
             reportError("同步网卡模式变化", error)
@@ -2038,9 +2009,3 @@ start vendor.wifi_hal_legacy
 svc wifi enable"""
     }
 }
-
-internal data class HybridTaskEnvironment(
-    val rootfsPath: String,
-    val runtimePath: String,
-    val terminalPath: String,
-)
