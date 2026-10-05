@@ -31,7 +31,6 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupState
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus.*
 import io.github.bszapp.wifitoolbox.ui.component.TaggedLinkText
-import io.github.bszapp.wifitoolbox.uidefault.component.SplicedGroupItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

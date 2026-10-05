@@ -15,7 +15,28 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -26,20 +47,16 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Router
+import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Wifi
-import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
-import io.github.bszapp.wifitoolbox.uidefault.screen.MonitorAccessPointCard
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,15 +67,92 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
+import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.Badge
+import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.TabRow
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.theme.LocalContentColor
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
 // ── 详情底部弹窗 ──────────────────────────────────────────────────────────────
+//
+// 三级结构：接入点列表 → 单个接入点的抓包数据 → 接入点与设备的详细信息。
+// 动画状态只记录当前处于三个页面中的哪一个，页面内容（选中的接入点 / 设备 / 列表滚动位置）单独记录。
 
-private enum class WifiDetailPage {
-    NETWORK,
+private enum class WifiDetailStage {
+    /** 接入点列表（扫描结果与抓包数据合并展示）。 */
+    LIST,
+
+    /** 单个接入点下的抓包数据。 */
+    ACCESS_POINT,
+
+    /** 接入点与设备的详细信息。 */
     DEVICE,
+}
+
+/** 扫描结果 / 虚拟接入点 / 抓包数据按 BSSID 合并后的接入点条目。 */
+private data class MergedAccessPoint(
+    val key: String,
+    val scanned: ScanResult? = null,
+    val virtual: WifiInfo? = null,
+    val captured: MonitorAccessPoint? = null,
+)
+
+/**
+ * 稳定选择标识：优先 BSSID。
+ * [key] 中的 `scan-$index` 依赖扫描结果下标，排序变化会位移，不能用于选中态。
+ */
+private val MergedAccessPoint.stableKey: String
+    get() = scanned?.BSSID?.lowercase()?.takeIf { it.isNotBlank() }
+        ?: virtual?.bssid?.lowercase()?.takeIf { it.isNotBlank() }
+        ?: captured?.bssid?.lowercase()?.takeIf { it.isNotBlank() }
+        ?: key
+
+private fun mergeAccessPoints(
+    group: MergedWifiGroup,
+    capturedAccessPoints: List<MonitorAccessPoint>,
+): List<MergedAccessPoint> {
+    val capturedByBssid = capturedAccessPoints.associateBy { it.bssid.lowercase() }
+    val used = HashSet<String>(capturedAccessPoints.size)
+    val entries = ArrayList<MergedAccessPoint>(group.networks.size + capturedAccessPoints.size + 1)
+
+    group.networks.forEachIndexed { index, network ->
+        val bssid = network.BSSID?.lowercase() ?: ""
+        val captured = capturedByBssid[bssid]?.takeIf { bssid.isNotEmpty() }
+        if (captured != null) used.add(bssid)
+        entries += MergedAccessPoint(key = "scan-$index", scanned = network, captured = captured)
+    }
+
+    group.virtualAccessPoint?.let { virtual ->
+        val bssid = virtual.bssid?.lowercase() ?: ""
+        val captured = capturedByBssid[bssid]?.takeIf { bssid.isNotEmpty() }
+        if (captured != null) used.add(bssid)
+        entries += MergedAccessPoint(key = "virtual", virtual = virtual, captured = captured)
+    }
+
+    capturedAccessPoints.forEach { captured ->
+        if (used.add(captured.bssid.lowercase())) {
+            entries += MergedAccessPoint(
+                key = "captured-${captured.bssid.lowercase()}",
+                captured = captured,
+            )
+        }
+    }
+    return entries
 }
 
 @Composable
@@ -68,93 +162,131 @@ fun WifiDetailSheet(
     capturedAccessPoints: List<MonitorAccessPoint> = emptyList(),
     deviceDetailContent: @Composable (MonitorAccessPoint, MonitorDevice) -> Unit = { _, _ -> },
 ) {
-    var selectedDevice by remember(group.ssid) { mutableStateOf<Pair<String, String>?>(null) }
-    var selectedPage by remember(group.ssid) { mutableStateOf(WifiDetailPage.NETWORK) }
+    // 动画状态：只记录当前是三个页面中的哪一个
+    var stage by remember(group.ssid) { mutableStateOf(WifiDetailStage.LIST) }
+
+    // 页面内容单独记录：只存选中标识，不持有对象引用（单一数据源）
+    var selectedAccessPointKey by remember(group.ssid) { mutableStateOf<String?>(null) }
+    var selectedDeviceMac by remember(group.ssid) { mutableStateOf<String?>(null) }
+
     val networkPagerState = rememberPagerState(pageCount = { 2 })
-    val networkScrollState = rememberScrollState()
-    val expandedCapture = remember(group.ssid) { mutableStateMapOf<String, Boolean>() }
-    val deviceTarget = selectedDevice?.takeIf { (bssid, mac) ->
-        capturedAccessPoints.any { accessPoint ->
-            accessPoint.bssid == bssid && accessPoint.devices.any { device -> device.mac == mac }
-        }
+    val accessPointGridState = rememberLazyGridState()
+    val deviceListState = rememberLazyListState()
+
+    val mergedAccessPoints = remember(group, capturedAccessPoints) {
+        mergeAccessPoints(group, capturedAccessPoints)
     }
-    LaunchedEffect(selectedPage, deviceTarget != null) {
-        if (selectedPage == WifiDetailPage.DEVICE && deviceTarget == null) {
-            selectedPage = WifiDetailPage.NETWORK
+
+    // 抓包数据刷新后选中项跟随最新数据重新查找，详情页因此保持实时
+    val selectedAccessPoint = selectedAccessPointKey?.let { key ->
+        mergedAccessPoints.find { it.stableKey == key }
+    }
+
+    val deviceTarget = selectedAccessPoint?.captured
+        ?.takeIf { selectedDeviceMac != null }
+        ?.let { accessPoint ->
+            selectedDeviceMac?.let { mac -> accessPoint.devices.firstOrNull { it.mac == mac } }
+                ?.let { device -> accessPoint to device }
+        }
+
+    LaunchedEffect(stage, selectedAccessPoint, deviceTarget) {
+        if (stage == WifiDetailStage.DEVICE && deviceTarget == null) {
+            stage = WifiDetailStage.ACCESS_POINT
+        }
+        if (stage == WifiDetailStage.ACCESS_POINT && selectedAccessPoint == null) {
+            stage = WifiDetailStage.LIST
         }
     }
 
+    // 标题栏交给 sheet 自带的 title/startAction，内容区不自绘标题行
+    val backAction: (@Composable () -> Unit)? = when (stage) {
+        WifiDetailStage.LIST -> null
+        else -> {
+            {
+                IconButton(onClick = {
+                    stage = if (stage == WifiDetailStage.DEVICE) {
+                        WifiDetailStage.ACCESS_POINT
+                    } else {
+                        WifiDetailStage.LIST
+                    }
+                }) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = MiuixTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+    }
     SingleOverlayBottomSheet(
         show = true,
-        title = null,
+        title = when (stage) {
+            WifiDetailStage.LIST -> null
+            WifiDetailStage.ACCESS_POINT -> accessPointTitle(selectedAccessPoint)
+            WifiDetailStage.DEVICE -> deviceTarget?.second
+                ?.name?.takeIf { it.isNotBlank() }
+                ?: deviceTarget?.second?.mac
+                ?: "设备详情"
+        },
+        startAction = backAction,
         allowDismiss = true,
         enableNestedScroll = true,
         renderInRootScaffold = true,
         onDismissRequest = onDismiss,
     ) {
         AnimatedContent(
-            targetState = selectedPage,
+            targetState = stage,
             modifier = Modifier.fillMaxWidth(),
             contentAlignment = Alignment.TopStart,
             transitionSpec = {
-                val movingToDevice = targetState == WifiDetailPage.DEVICE
-                (slideInHorizontally(tween(260)) { width -> if (movingToDevice) width else -width } togetherWith
-                    slideOutHorizontally(tween(260)) { width -> if (movingToDevice) -width else width })
+                val movingForward = targetState.ordinal > initialState.ordinal
+                (slideInHorizontally(tween(260)) { width -> if (movingForward) width else -width } togetherWith
+                    slideOutHorizontally(tween(260)) { width -> if (movingForward) -width else width })
                     .using(SizeTransform(clip = true) { _, _ -> tween(260) })
             },
-            label = "wifi-network-device-detail",
+            label = "wifi-detail-stage",
         ) { target ->
-            if (target == WifiDetailPage.NETWORK) {
-                WifiNetworkDetailContent(
+            when (target) {
+                WifiDetailStage.LIST -> WifiNetworkDetailContent(
                     group = group,
-                    capturedAccessPoints = capturedAccessPoints,
+                    accessPoints = mergedAccessPoints,
                     pagerState = networkPagerState,
-                    scrollState = networkScrollState,
-                    expandedCapture = expandedCapture,
-                    onDeviceClick = { accessPoint, device ->
-                        selectedDevice = accessPoint.bssid to device.mac
-                        selectedPage = WifiDetailPage.DEVICE
+                    gridState = accessPointGridState,
+                    onAccessPointClick = { entry ->
+                        selectedAccessPointKey = entry.stableKey
+                        selectedDeviceMac = null
+                        stage = WifiDetailStage.ACCESS_POINT
                     },
                 )
-            } else {
-                Column(Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 4.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        top.yukonga.miuix.kmp.basic.IconButton(onClick = { selectedPage = WifiDetailPage.NETWORK }) {
-                            top.yukonga.miuix.kmp.basic.Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回网络详情",
-                                tint = top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme.onSurface,
-                            )
-                        }
-                        top.yukonga.miuix.kmp.basic.Text("设备详情", style = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.title3)
-                    }
-                    val target = deviceTarget
-                    if (target != null) {
-                        val (bssid, mac) = target
-                        val targetAccessPoint = capturedAccessPoints.firstOrNull { it.bssid == bssid }
-                        val targetDevice = targetAccessPoint?.devices?.firstOrNull { it.mac == mac }
-                        if (targetAccessPoint != null && targetDevice != null) {
-                            deviceDetailContent(targetAccessPoint, targetDevice)
-                        }
-                    }
-                }
+
+                WifiDetailStage.ACCESS_POINT -> AccessPointCaptureContent(
+                    entry = selectedAccessPoint,
+                    deviceListState = deviceListState,
+                    onDeviceClick = { device ->
+                        selectedDeviceMac = device.mac
+                        stage = WifiDetailStage.DEVICE
+                    },
+                )
+
+                WifiDetailStage.DEVICE -> DeviceDetailContent(
+                    target = deviceTarget,
+                    deviceDetailContent = deviceDetailContent,
+                )
             }
         }
     }
 }
 
+// ── 第一级：接入点列表 ────────────────────────────────────────────────────────
+
 @Composable
-@OptIn(ExperimentalMaterial3Api::class)
 private fun WifiNetworkDetailContent(
     group: MergedWifiGroup,
-    capturedAccessPoints: List<MonitorAccessPoint>,
+    accessPoints: List<MergedAccessPoint>,
     pagerState: androidx.compose.foundation.pager.PagerState,
-    scrollState: androidx.compose.foundation.ScrollState,
-    expandedCapture: MutableMap<String, Boolean>,
-    onDeviceClick: (MonitorAccessPoint, MonitorDevice) -> Unit,
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    onAccessPointClick: (MergedAccessPoint) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -163,20 +295,20 @@ private fun WifiNetworkDetailContent(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(
                     modifier = Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer),
+                        .background(MiuixTheme.colorScheme.tertiaryContainer),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Rounded.Wifi, contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(26.dp))
+                        tint = MiuixTheme.colorScheme.onTertiaryContainer, modifier = Modifier.size(26.dp))
                 }
                 Column {
-                    Text(group.displaySsid, style = MaterialTheme.typography.titleLarge,
+                    Text(group.displaySsid, style = MiuixTheme.textStyles.title3,
                         fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        text = "${group.accessPointCount} 个接入点" +
+                        text = "${accessPoints.size} 个接入点" +
                             if (group.savedWifiList.isNotEmpty()) " · ${group.savedWifiList.size} 条已保存配置" else "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
@@ -186,136 +318,299 @@ private fun WifiNetworkDetailContent(
         val connection = group.connection
         if (connection != null) {
             val scope = rememberCoroutineScope()
-            SecondaryTabRow(selectedTabIndex = pagerState.currentPage) {
-                listOf("网络详情", "连接信息").forEachIndexed { index, title ->
-                    Tab(selected = pagerState.currentPage == index,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
-                        text = { Text(title) })
-                }
-            }
+            TabRow(
+                tabs = listOf("网络详情", "连接信息"),
+                selectedTabIndex = pagerState.currentPage,
+                onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) { page ->
                 when (page) {
-                    0 -> WifiNetworkDetailPage(group, capturedAccessPoints, onDeviceClick, scrollState, expandedCapture)
+                    0 -> WifiAccessPointGridPage(
+                        group = group,
+                        accessPoints = accessPoints,
+                        gridState = gridState,
+                        onAccessPointClick = onAccessPointClick,
+                    )
                     else -> WifiConnectionInfoPage(connection)
                 }
             }
         } else {
-            WifiNetworkDetailPage(group, capturedAccessPoints, onDeviceClick, scrollState, expandedCapture)
+            WifiAccessPointGridPage(
+                group = group,
+                accessPoints = accessPoints,
+                gridState = gridState,
+                onAccessPointClick = onAccessPointClick,
+            )
         }
     }
 }
 
 @Composable
-private fun WifiNetworkDetailPage(
+private fun WifiAccessPointGridPage(
     group: MergedWifiGroup,
-    capturedAccessPoints: List<MonitorAccessPoint>,
-    onDeviceClick: (MonitorAccessPoint, MonitorDevice) -> Unit,
-    scrollState: androidx.compose.foundation.ScrollState,
-    expandedCapture: MutableMap<String, Boolean>,
+    accessPoints: List<MergedAccessPoint>,
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    onAccessPointClick: (MergedAccessPoint) -> Unit,
 ) {
-    val accessPoints = buildList<DetailAccessPoint> {
-        group.networks.forEach { add(DetailAccessPoint.Scanned(it)) }
-        group.virtualAccessPoint?.let { add(DetailAccessPoint.Virtual(it)) }
-    }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .verticalScroll(scrollState)
-            .padding(top = 16.dp)
-            .padding(bottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding() + 16.dp),
+    val savedWifiConfigs = group.savedWifiList
+    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding() + 16.dp
+
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        state = gridState,
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        SectionHeader(
-            icon = {
+        item(key = "header-access-points", span = { GridItemSpan(maxLineSpan) }) {
+            SectionHeader(
+                icon = {
+                    Icon(
+                        Icons.Rounded.Router,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                },
+                title = "接入点",
+                badge = accessPoints.size.toString(),
+            )
+        }
+
+        items(
+            count = accessPoints.size,
+            key = { index -> accessPoints[index].key },
+        ) { index ->
+            val entry = accessPoints[index]
+            when {
+                entry.scanned != null -> ApCard(
+                    ap = entry.scanned,
+                    isCurrent = group.isCurrentAccessPoint(entry.scanned),
+                    captured = entry.captured,
+                    onClick = { onAccessPointClick(entry) },
+                )
+
+                entry.virtual != null -> VirtualApCard(
+                    info = entry.virtual,
+                    onClick = { onAccessPointClick(entry) },
+                )
+
+                else -> CapturedApCard(
+                    captured = entry.captured,
+                    onClick = { onAccessPointClick(entry) },
+                )
+            }
+        }
+
+        if (savedWifiConfigs.isNotEmpty()) {
+            item(key = "header-saved-configurations", span = { GridItemSpan(maxLineSpan) }) {
+                Column {
+                    Spacer(Modifier.height(8.dp))
+                    SectionHeader(
+                        icon = {
+                            Icon(
+                                Icons.Rounded.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                        title = "已保存的配置",
+                        badge = savedWifiConfigs.size.toString(),
+                    )
+                }
+            }
+            items(
+                count = savedWifiConfigs.size,
+                key = { index -> "saved-${savedWifiConfigs[index].networkId}-$index" },
+                span = { GridItemSpan(maxLineSpan) },
+            ) { index ->
+                SavedWifiConfigCard(
+                    config = savedWifiConfigs[index],
+                    isCurrent = group.isCurrentConfiguration(savedWifiConfigs[index]),
+                )
+            }
+        }
+    }
+}
+
+// ── 第二级：单个接入点的抓包数据 ──────────────────────────────────────────────
+
+@Composable
+private fun AccessPointCaptureContent(
+    entry: MergedAccessPoint?,
+    deviceListState: androidx.compose.foundation.lazy.LazyListState,
+    onDeviceClick: (MonitorDevice) -> Unit,
+) {
+    val captured = entry?.captured
+    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding() + 16.dp
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        LazyColumn(
+            state = deviceListState,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = bottomPadding),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            item(key = "access-point-overview") {
+                AccessPointOverviewCard(entry = entry, captured = captured)
+            }
+
+            if (captured == null) {
+                item(key = "access-point-empty-capture") {
+                    CaptureHintCard(text = "该接入点暂无抓包数据")
+                }
+            } else {
+                item(key = "header-devices") {
+                    SectionHeader(
+                        icon = {
+                            Icon(
+                                Icons.Rounded.Smartphone,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                        title = "设备",
+                        badge = captured.devices.size.toString(),
+                    )
+                }
+                if (captured.devices.isEmpty()) {
+                    item(key = "access-point-empty-devices") {
+                        CaptureHintCard(text = "尚未在此接入点下发现设备")
+                    }
+                } else {
+                    items(
+                        count = captured.devices.size,
+                        key = { index -> "device-${captured.devices[index].mac}" },
+                    ) { index ->
+                        DeviceCard(
+                            device = captured.devices[index],
+                            onClick = { onDeviceClick(captured.devices[index]) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AccessPointOverviewCard(
+    entry: MergedAccessPoint?,
+    captured: MonitorAccessPoint?,
+) {
+    val scanned = entry?.scanned
+    val virtual = entry?.virtual
+    val bssid = scanned?.BSSID ?: captured?.bssid ?: virtual?.bssid
+    val signalDbm = scanned?.level?.takeIf { it != 0 }
+        ?: captured?.signal?.latestDbm
+    val rows = buildList {
+        scanned?.SSID?.takeIf { it.isNotBlank() }?.let { add("网络名称" to it) }
+        captured?.ssid?.takeIf { it.isNotBlank() }?.let { add("抓包网络名称" to it) }
+        bssid?.takeIf { it.isNotBlank() }?.let { add("接入点 MAC" to it) }
+        scanned?.frequency?.takeIf { it > 0 }?.let { frequency ->
+            add("频率" to "$frequency MHz · ${frequencyBand(frequency)} · 信道 ${frequencyToChannel(frequency) ?: "未知"}")
+        }
+        if (scanned != null) {
+            add("安全能力" to (scanned.capabilities.takeIf { it.isNotBlank() }
+                ?.replace("[", "")?.replace("]", " ")?.trim()
+                ?: "未知"))
+        }
+        if (captured != null && captured.securityProtocols.isNotEmpty()) {
+            add("安全类型" to captured.securityProtocols.joinToString(" / "))
+        }
+        signalDbm?.let { add("信号强度" to "$it dBm") }
+        if (captured != null) {
+            add("设备数量" to "${captured.devices.size} 台")
+            add("成功握手" to "${captured.devices.sumOf(::successfulHandshakeCount)} 次")
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            rows.forEachIndexed { index, (label, value) ->
+                if (index > 0) {
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.6f),
+                    )
+                }
+                InfoRow(label = label, value = value)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceCard(
+    device: MonitorDevice,
+    onClick: () -> Unit,
+) {
+    val handshakeCount = successfulHandshakeCount(device)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+        showIndication = true,
+        pressFeedbackType = PressFeedbackType.Tilt,
+    ) {
+        BasicComponent(
+            title = device.name ?: device.mac,
+            summary = device.name?.let { device.mac },
+            startAction = {
                 Icon(
-                    Icons.Rounded.Router,
+                    imageVector = Icons.Rounded.Smartphone,
                     contentDescription = null,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.padding(end = 8.dp).size(24.dp),
+                    tint = MiuixTheme.colorScheme.onBackground,
                 )
             },
-            title = "接入点",
-            badge = group.accessPointCount.toString(),
+            endActions = {
+                if (handshakeCount > 0) {
+                    Badge(
+                        containerColor = MiuixTheme.colorScheme.primary,
+                        contentColor = MiuixTheme.colorScheme.onPrimary,
+                    ) {
+                        Text("${handshakeCount}次成功握手")
+                    }
+                }
+            },
+            onClick = onClick,
         )
+    }
+}
 
-        TwoColumnCardFlow(
-            items = accessPoints,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-        ) { item ->
-            when (item) {
-                is DetailAccessPoint.Scanned -> ApCard(
-                    ap = item.value,
-                    isCurrent = group.isCurrentAccessPoint(item.value),
-                )
-                is DetailAccessPoint.Virtual -> VirtualApCard(item.value)
-            }
-        }
+@Composable
+private fun CaptureHintCard(text: String) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = text,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 18.dp),
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
 
-        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
-            targetState = capturedAccessPoints,
-            contentKey = { it.isEmpty() },
-            label = "wifi-captured-access-points",
-        ) { visibleAccessPoints ->
-        if (visibleAccessPoints.isNotEmpty()) {
-            Column {
-                SectionHeader(icon = { Icon(Icons.Rounded.Router, null) },
-                    title = "抓包数据", badge = visibleAccessPoints.size.toString())
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    visibleAccessPoints.forEach { accessPoint ->
-                        MonitorAccessPointCard(
-                            accessPoint = accessPoint,
-                            expanded = expandedCapture[accessPoint.bssid] == true,
-                            onExpandedChange = { expandedCapture[accessPoint.bssid] = it },
-                            onDeviceClick = { onDeviceClick(accessPoint, it) },
-                        )
-                    }
-                }
-            }
-        }
-        }
+// ── 第三级：设备详情 ──────────────────────────────────────────────────────────
 
-        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
-            targetState = group.savedWifiList,
-            contentKey = { it.isEmpty() },
-            label = "wifi-saved-configurations",
-        ) { savedWifiConfigs ->
-        if (savedWifiConfigs.isNotEmpty()) {
-            Column {
-                Spacer(Modifier.height(8.dp))
-                SectionHeader(
-                    icon = {
-                        Icon(
-                            Icons.Rounded.Lock,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    },
-                    title = "已保存的配置",
-                    badge = savedWifiConfigs.size.toString(),
-                )
-                Spacer(Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    savedWifiConfigs.forEach { config ->
-                        SavedWifiConfigCard(
-                            config = config,
-                            isCurrent = group.isCurrentConfiguration(config),
-                        )
-                    }
-                }
-            }
-        }
+@Composable
+private fun DeviceDetailContent(
+    target: Pair<MonitorAccessPoint, MonitorDevice>?,
+    deviceDetailContent: @Composable (MonitorAccessPoint, MonitorDevice) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        if (target != null) {
+            val (accessPoint, device) = target
+            deviceDetailContent(accessPoint, device)
         }
     }
 }
 
-private sealed interface DetailAccessPoint {
-    data class Scanned(val value: ScanResult) : DetailAccessPoint
-    data class Virtual(val value: WifiInfo) : DetailAccessPoint
-}
+// ── 连接信息页 ────────────────────────────────────────────────────────────────
 
 @Composable
 private fun WifiConnectionInfoPage(info: WifiInfo) {
@@ -357,12 +652,10 @@ private fun WifiConnectionInfoPage(info: WifiInfo) {
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            colors = CardDefaults.defaultColors(
+                color = MiuixTheme.colorScheme.tertiaryContainer,
+                contentColor = MiuixTheme.colorScheme.onTertiaryContainer,
             ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -372,7 +665,7 @@ private fun WifiConnectionInfoPage(info: WifiInfo) {
                     if (index > 0) {
                         HorizontalDivider(
                             thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f),
+                            color = MiuixTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.2f),
                         )
                     }
                     ConnectionInfoRow(label, value)
@@ -390,13 +683,36 @@ private fun ConnectionInfoRow(label: String, value: String) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f),
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.onTertiaryContainer,
+            softWrap = true,
+        )
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.width(84.dp),
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+        Text(
+            text = value,
+            modifier = Modifier.weight(1f),
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.onSurface,
             softWrap = true,
         )
     }
@@ -413,68 +729,32 @@ private fun SectionHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 4.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.primary) {
+        CompositionLocalProvider(LocalContentColor provides MiuixTheme.colorScheme.onBackgroundVariant) {
             icon()
         }
         Text(
             text = title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
+            style = MiuixTheme.textStyles.subtitle,
+            color = MiuixTheme.colorScheme.onBackgroundVariant,
         )
         Spacer(Modifier.width(2.dp))
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
-                .background(MaterialTheme.colorScheme.primaryContainer)
+                .background(MiuixTheme.colorScheme.tertiaryContainer)
                 .padding(horizontal = 8.dp, vertical = 1.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = badge,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onTertiaryContainer,
                 fontWeight = FontWeight.Bold
             )
-        }
-    }
-}
-
-// ── 双列可变高卡片流 ──────────────────────────────────────────────────────────
-
-@Composable
-private fun <T> TwoColumnCardFlow(
-    items: List<T>,
-    modifier: Modifier = Modifier,
-    itemContent: @Composable (T) -> Unit,
-) {
-    // 使用 Row + 两列 Column 实现双列流式布局（奇偶分列）
-    Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        // 左列：偶数索引
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items.filterIndexed { idx, _ -> idx % 2 == 0 }.forEach { item ->
-                itemContent(item)
-            }
-        }
-        // 右列：奇数索引
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items.filterIndexed { idx, _ -> idx % 2 == 1 }.forEach { item ->
-                itemContent(item)
-            }
         }
     }
 }
@@ -485,40 +765,44 @@ private fun <T> TwoColumnCardFlow(
 private fun ApCard(
     ap: ScanResult,
     isCurrent: Boolean,
+    captured: MonitorAccessPoint?,
+    onClick: () -> Unit,
 ) {
     val isUnknownSignal = ap.level == 0
     val signalLevel = if (isUnknownSignal) 0 else WifiManager.calculateSignalLevel(ap.level, 5)
     val (signalLabel, signalColor) = if (isUnknownSignal) {
-        "未知" to MaterialTheme.colorScheme.onSurfaceVariant
+        "未知" to MiuixTheme.colorScheme.onSurfaceVariantSummary
     } else {
         signalInfo(signalLevel)
     }
     val isSecure = ap.capabilities.contains("WPA") || ap.capabilities.contains("WEP")
     val containerColor by animateColorAsState(
         targetValue = if (isCurrent) {
-            MaterialTheme.colorScheme.primaryContainer
+            MiuixTheme.colorScheme.tertiaryContainer
         } else {
-            MaterialTheme.colorScheme.surfaceContainerHigh
+            MiuixTheme.colorScheme.surfaceContainerHigh
         },
         label = "AccessPointContainer",
     )
     val contentColor by animateColorAsState(
         targetValue = if (isCurrent) {
-            MaterialTheme.colorScheme.onPrimaryContainer
+            MiuixTheme.colorScheme.onTertiaryContainer
         } else {
-            MaterialTheme.colorScheme.onSurface
+            MiuixTheme.colorScheme.onSurface
         },
         label = "AccessPointContent",
     )
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = containerColor,
+        cornerRadius = 16.dp,
+        colors = CardDefaults.defaultColors(
+            color = containerColor,
             contentColor = contentColor,
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        onClick = onClick,
+        showIndication = true,
+        pressFeedbackType = PressFeedbackType.Tilt,
     ) {
         Column(
             modifier = Modifier
@@ -547,7 +831,23 @@ private fun ApCard(
                             ) {
                                 Text(
                                     text = "当前接入点",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MiuixTheme.textStyles.footnote2,
+                                    color = contentColor,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                        }
+                    }
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = captured != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = contentColor.copy(alpha = 0.1f),
+                            ) {
+                                Text(
+                                    text = "抓包 ${captured?.devices?.size ?: 0} 台",
+                                    style = MiuixTheme.textStyles.footnote2,
                                     color = contentColor,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                 )
@@ -571,7 +871,7 @@ private fun ApCard(
             ) {
                 Text(
                     text = if (isUnknownSignal) "未知" else "${ap.level}",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MiuixTheme.textStyles.headline2,
                     fontWeight = FontWeight.Bold,
                     color = signalColor,
                     fontFamily = FontFamily.Monospace,
@@ -579,7 +879,7 @@ private fun ApCard(
                 io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = !isUnknownSignal) {
                     Text(
                         text = "dBm",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MiuixTheme.textStyles.footnote2,
                         color = contentColor.copy(alpha = 0.7f),
                         modifier = Modifier.padding(bottom = 1.dp),
                     )
@@ -587,7 +887,7 @@ private fun ApCard(
                 Spacer(Modifier.weight(1f))
                 Text(
                     text = signalLabel,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MiuixTheme.textStyles.footnote2,
                     color = signalColor,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -595,13 +895,13 @@ private fun ApCard(
 
             HorizontalDivider(
                 thickness = 0.5.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                color = MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.6f)
             )
 
             // BSSID
             Text(
                 text = ap.BSSID!!,
-                style = MaterialTheme.typography.labelMedium,
+                style = MiuixTheme.textStyles.footnote1,
                 fontFamily = FontFamily.Monospace,
                 color = contentColor,
                 maxLines = 1,
@@ -624,7 +924,7 @@ private fun ApCard(
                     .trim()
                 Text(
                     text = capShort,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MiuixTheme.textStyles.footnote2,
                     fontFamily = FontFamily.Monospace,
                     color = contentColor.copy(alpha = 0.7f),
                     lineHeight = 14.sp,
@@ -638,16 +938,21 @@ private fun ApCard(
 }
 
 @Composable
-private fun VirtualApCard(info: WifiInfo) {
-    val contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+private fun VirtualApCard(
+    info: WifiInfo,
+    onClick: () -> Unit,
+) {
+    val contentColor = MiuixTheme.colorScheme.onTertiaryContainer
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
+        cornerRadius = 16.dp,
+        colors = CardDefaults.defaultColors(
+            color = MiuixTheme.colorScheme.tertiaryContainer,
             contentColor = contentColor,
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        onClick = onClick,
+        showIndication = true,
+        pressFeedbackType = PressFeedbackType.Tilt,
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -669,7 +974,7 @@ private fun VirtualApCard(info: WifiInfo) {
                 ) {
                     Text(
                         text = "当前接入点",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MiuixTheme.textStyles.footnote2,
                         color = contentColor,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                     )
@@ -677,7 +982,7 @@ private fun VirtualApCard(info: WifiInfo) {
             }
             Text(
                 text = "未知",
-                style = MaterialTheme.typography.titleMedium,
+                style = MiuixTheme.textStyles.headline2,
                 fontWeight = FontWeight.Bold,
                 color = contentColor,
             )
@@ -688,7 +993,7 @@ private fun VirtualApCard(info: WifiInfo) {
             info.bssid?.takeIf { it.isNotBlank() }?.let {
                 Text(
                     text = it,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MiuixTheme.textStyles.footnote1,
                     color = contentColor,
                     softWrap = true,
                 )
@@ -702,7 +1007,7 @@ private fun VirtualApCard(info: WifiInfo) {
                 Text(
                     text = "$frequency MHz · ${frequencyBand(frequency)} · " +
                         "信道 ${frequencyToChannel(frequency) ?: "未知"}",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MiuixTheme.textStyles.footnote2,
                     color = contentColor.copy(alpha = 0.75f),
                     softWrap = true,
                 )
@@ -711,10 +1016,99 @@ private fun VirtualApCard(info: WifiInfo) {
             wifiSecurityType(info)?.let {
                 Text(
                     text = it,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MiuixTheme.textStyles.footnote2,
                     color = contentColor.copy(alpha = 0.75f),
                     softWrap = true,
                 )
+            }
+        }
+    }
+}
+
+/** 仅存在于抓包数据中的接入点（扫描列表里没有对应的 ScanResult）。 */
+@Composable
+private fun CapturedApCard(
+    captured: MonitorAccessPoint?,
+    onClick: () -> Unit,
+) {
+    if (captured == null) return
+
+    val signalDbm = captured.signal?.latestDbm
+    val signalLevel = signalDbm?.let { WifiManager.calculateSignalLevel(it, 5) } ?: 0
+    val (signalLabel, signalColor) = if (signalDbm == null) {
+        "未知" to MiuixTheme.colorScheme.onSurfaceVariantSummary
+    } else {
+        signalInfo(signalLevel)
+    }
+    val handshakeDeviceCount = captured.devices
+        .asSequence()
+        .filter { successfulHandshakeCount(it) > 0 }
+        .distinctBy { it.mac.lowercase() }
+        .count()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 16.dp,
+        onClick = onClick,
+        showIndication = true,
+        pressFeedbackType = PressFeedbackType.Tilt,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SignalBars(
+                    level = signalLevel,
+                    color = signalColor,
+                    modifier = Modifier.size(width = 22.dp, height = 16.dp),
+                )
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = MiuixTheme.colorScheme.primary.copy(alpha = 0.12f),
+                ) {
+                    Text(
+                        text = "抓包数据",
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            Text(
+                text = signalDbm?.let { "$it" } ?: "未知",
+                style = MiuixTheme.textStyles.headline2,
+                fontWeight = FontWeight.Bold,
+                color = signalColor,
+                fontFamily = FontFamily.Monospace,
+            )
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.6f),
+            )
+            Text(
+                text = captured.ssid?.takeIf { it.isNotBlank() } ?: "<未知网络>",
+                style = MiuixTheme.textStyles.body2,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = captured.bssid,
+                style = MiuixTheme.textStyles.footnote1,
+                fontFamily = FontFamily.Monospace,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ApChip(text = "${captured.devices.size} 台设备")
+                if (handshakeDeviceCount > 0) {
+                    ApChip(text = "${handshakeDeviceCount} 台已握手")
+                }
             }
         }
     }
@@ -725,14 +1119,14 @@ private fun ApChip(text: String) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f))
+            .background(MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f))
             .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.labelSmall,
+            style = MiuixTheme.textStyles.footnote2,
             fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSecondaryContainer
+            color = MiuixTheme.colorScheme.onSecondaryContainer
         )
     }
 }
@@ -761,7 +1155,7 @@ private fun SignalBars(
                     .clip(RoundedCornerShape(2.dp))
                     .background(
                         if (active) color
-                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        else MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.5f)
                     )
             )
         }
@@ -778,28 +1172,27 @@ private fun SavedWifiConfigCard(
 ) {
     val containerColor by animateColorAsState(
         targetValue = if (isCurrent) {
-            MaterialTheme.colorScheme.primaryContainer
+            MiuixTheme.colorScheme.tertiaryContainer
         } else {
-            MaterialTheme.colorScheme.surfaceContainerHigh
+            MiuixTheme.colorScheme.surfaceContainerHigh
         },
         label = "SavedConfigContainer",
     )
     val contentColor by animateColorAsState(
         targetValue = if (isCurrent) {
-            MaterialTheme.colorScheme.onPrimaryContainer
+            MiuixTheme.colorScheme.onTertiaryContainer
         } else {
-            MaterialTheme.colorScheme.onSurface
+            MiuixTheme.colorScheme.onSurface
         },
         label = "SavedConfigContent",
     )
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = containerColor,
+        cornerRadius = 16.dp,
+        colors = CardDefaults.defaultColors(
+            color = containerColor,
             contentColor = contentColor,
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier
@@ -815,8 +1208,7 @@ private fun SavedWifiConfigCard(
             ) {
                 Text(
                     text = config.SSID?.trim('"') ?: "<未知>",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
+                    style = MiuixTheme.textStyles.subtitle,
                     modifier = Modifier.weight(1f)
                 )
                 io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = isCurrent) {
@@ -827,7 +1219,7 @@ private fun SavedWifiConfigCard(
                     ) {
                         Text(
                             text = "正在使用",
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MiuixTheme.textStyles.footnote2,
                             color = contentColor,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         )
@@ -836,14 +1228,14 @@ private fun SavedWifiConfigCard(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(MaterialTheme.colorScheme.tertiaryContainer)
+                        .background(MiuixTheme.colorScheme.tertiaryContainer)
                         .padding(horizontal = 8.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = "ID ${config.networkId}",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MiuixTheme.textStyles.footnote2,
                         fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        color = MiuixTheme.colorScheme.onTertiaryContainer,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -852,7 +1244,7 @@ private fun SavedWifiConfigCard(
             Spacer(Modifier.height(6.dp))
             HorizontalDivider(
                 thickness = 0.5.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                color = MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.6f)
             )
             Spacer(Modifier.height(6.dp))
 
@@ -997,13 +1389,13 @@ private fun SavedInfoRow(label: String, value: String) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.bodySmall,
+            style = MiuixTheme.textStyles.footnote1,
             color = contentColor.copy(alpha = 0.7f),
             modifier = Modifier.weight(0.38f)
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.bodySmall,
+            style = MiuixTheme.textStyles.footnote1,
             fontFamily = FontFamily.Monospace,
             color = contentColor,
             modifier = Modifier.weight(0.62f),
@@ -1014,13 +1406,27 @@ private fun SavedInfoRow(label: String, value: String) {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
+private fun successfulHandshakeCount(device: MonitorDevice): Int = device.handshakes.count { record ->
+    record.status == MonitorHandshakeStatus.SUCCESS &&
+        record.captureQuality != MonitorHandshakeCaptureQuality.DATA_INCOMPLETE
+}
+
+private fun accessPointTitle(entry: MergedAccessPoint?): String =
+    entry?.scanned?.SSID?.takeIf { it.isNotBlank() }
+        ?: entry?.captured?.ssid?.takeIf { it.isNotBlank() }
+        ?: entry?.virtual?.ssid?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }
+        ?: entry?.captured?.bssid
+        ?: entry?.scanned?.BSSID
+        ?: entry?.virtual?.bssid
+        ?: "接入点"
+
 @Composable
 private fun signalInfo(level: Int): Pair<String, Color> = when (level) {
-    4 -> "优秀" to MaterialTheme.colorScheme.primary
-    3 -> "良好" to MaterialTheme.colorScheme.tertiary
-    2 -> "一般" to MaterialTheme.colorScheme.secondary
-    1 -> "较弱" to MaterialTheme.colorScheme.onSurfaceVariant
-    else -> "很弱" to MaterialTheme.colorScheme.error
+    4 -> "优秀" to MiuixTheme.colorScheme.primary
+    3 -> "良好" to MiuixTheme.colorScheme.secondary
+    2 -> "一般" to MiuixTheme.colorScheme.onSurfaceVariantActions
+    1 -> "较弱" to MiuixTheme.colorScheme.onSurfaceVariantSummary
+    else -> "很弱" to MiuixTheme.colorScheme.error
 }
 
 private fun wifiSecurityType(info: WifiInfo): String? {

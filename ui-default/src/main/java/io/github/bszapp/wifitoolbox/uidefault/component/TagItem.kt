@@ -5,15 +5,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 
 enum class TagStyle { Primary, Secondary, Tertiary }
@@ -25,20 +26,21 @@ fun TagItem(
     icon: ImageVector? = null,
     style: TagStyle = TagStyle.Primary,
 ) {
+    val colorScheme = MiuixTheme.colorScheme
     val containerColor = when (style) {
-        TagStyle.Primary -> MaterialTheme.colorScheme.primaryContainer
-        TagStyle.Secondary -> MaterialTheme.colorScheme.secondaryContainer
-        TagStyle.Tertiary -> MaterialTheme.colorScheme.tertiaryContainer
+        TagStyle.Primary -> colorScheme.primaryContainer
+        TagStyle.Secondary -> colorScheme.secondaryContainer
+        TagStyle.Tertiary -> colorScheme.tertiaryContainer
     }
     val contentColor = when (style) {
-        TagStyle.Primary -> MaterialTheme.colorScheme.onPrimaryContainer
-        TagStyle.Secondary -> MaterialTheme.colorScheme.onSecondaryContainer
-        TagStyle.Tertiary -> MaterialTheme.colorScheme.onTertiaryContainer
+        TagStyle.Primary -> colorScheme.onPrimaryContainer
+        TagStyle.Secondary -> colorScheme.onSecondaryContainer
+        TagStyle.Tertiary -> colorScheme.onTertiaryContainer
     }
 
     Surface(
         color = containerColor,
-        shape = MaterialTheme.shapes.small,
+        shape = RoundedCornerShape(4.dp),
         modifier = modifier.padding(horizontal = 2.dp),
     ) {
         Row(
@@ -56,7 +58,7 @@ fun TagItem(
             }
             Text(
                 text = text,
-                style = MaterialTheme.typography.labelSmall,
+                style = MiuixTheme.textStyles.footnote2,
                 color = contentColor,
             )
         }

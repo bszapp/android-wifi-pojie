@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.platform.LocalContext
@@ -21,16 +20,15 @@ import io.github.bszapp.wifitoolbox.uidefault.dictionary.*
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.*
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.*
 import kotlinx.coroutines.*
+import top.yukonga.miuix.kmp.basic.FloatingActionButton
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.Text
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DictionaryPage(state: DictionaryState) {
     val context = LocalContext.current
     val navigator = LocalNavigator.current
-    val uiScope = rememberCoroutineScope()
-    val sheetState = rememberModalBottomSheetState(
-        skipPartiallyExpanded = true
-    )
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -96,25 +94,20 @@ fun DictionaryPage(state: DictionaryState) {
         ResourceDetailSheet(
             isVisible = state.showDetailSheet,
             resource = state.selectedResource,
-            sheetState = sheetState,
             onDismiss = {
                 state.showDetailSheet = false
                 state.selectedResource = null
             },
             onEdit = { currentRes ->
-                uiScope.launch {
-                    sheetState.hide()
-                    if (!sheetState.isVisible) {
-                        state.showDetailSheet = false
-                        if (currentRes.type == 1) {
-                            state.openEditorForScript(currentRes, false)
-                            navigator.push(Route.DictionaryEditor)
-                        } else {
-                            state.draftState = currentRes
-                            state.originalIdForEdit = currentRes.id
-                            state.showEditDialog = true
-                        }
-                    }
+                state.showDetailSheet = false
+                state.selectedResource = null
+                if (currentRes.type == 1) {
+                    state.openEditorForScript(currentRes, false)
+                    navigator.push(Route.DictionaryEditor)
+                } else {
+                    state.draftState = currentRes
+                    state.originalIdForEdit = currentRes.id
+                    state.showEditDialog = true
                 }
             },
             onDelete = { state.deleteResource(it) }

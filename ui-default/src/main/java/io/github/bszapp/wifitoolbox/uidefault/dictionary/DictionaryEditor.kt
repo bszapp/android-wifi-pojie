@@ -2,19 +2,14 @@ package io.github.bszapp.wifitoolbox.uidefault.dictionary
 
 import androidx.compose.foundation.LocalOverscrollFactory
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberPlatformOverscrollFactory
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
@@ -32,6 +28,14 @@ import io.github.bszapp.wifitoolbox.uidefault.R
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.theme.isInDarkTheme
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.scripta.editor.CodeEditor
 import top.yukonga.scripta.editor.CodeEditorController
@@ -118,15 +122,12 @@ fun DictionaryEditorScreen(state: DictionaryState) {
             val systemOverscroll = rememberPlatformOverscrollFactory()
             // Override Miuix overscroll with the platform's stretch/glow effect.
             CompositionLocalProvider(LocalOverscrollFactory provides systemOverscroll) {
-                MaterialTheme {
-                    DictionaryEditorPage(state.editor, dark)
-                }
+                DictionaryEditorPage(state.editor, dark)
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
     val keyboard = LocalSoftwareKeyboardController.current
@@ -155,11 +156,11 @@ fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
     )
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
+        color = MiuixTheme.colorScheme.surface,
     ) {
         Column(Modifier.fillMaxSize()) {
             TopAppBar(
-                title = { Text(stringResource(R.string.dictionary_code_editor)) },
+                title = stringResource(R.string.dictionary_code_editor),
                 navigationIcon = {
                     IconButton(onClick = {
                         state.handleBackPress()
@@ -168,10 +169,11 @@ fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
                     }
                 },
                 actions = {
-                    TextButton(onClick = { state.save() }) {
-                        Text(stringResource(R.string.dictionary_save))
-                    }
-                }
+                    TextButton(
+                        text = stringResource(R.string.dictionary_save),
+                        onClick = { state.save() },
+                    )
+                },
             )
             CodeEditor(
                 controller = controller,
@@ -186,41 +188,47 @@ fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
         }
     }
 
-    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = state.showExitConfirmDialog) {
-        AlertDialog(
-            onDismissRequest = { state.showExitConfirmDialog = false },
-            title = { Text(stringResource(R.string.dictionary_default_alert_title)) },
-            text = { Text(stringResource(R.string.dictionary_dialog_exit_confirm_text)) },
-            confirmButton = {
-                TextButton(onClick = { state.save(closeAfterSave = true) }) {
-                    Text(stringResource(R.string.dictionary_save))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { state.close() }) {
-                    Text(stringResource(R.string.dictionary_btn_save_not))
-                }
-            },
-        )
-    }
-    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
-        targetState = state.errorMessage,
-        label = "dictionary-editor-error",
-    ) { errorMessage ->
-        if (errorMessage != null) {
-        AlertDialog(
-            onDismissRequest = { state.errorMessage = null },
-            title = { Text(stringResource(R.string.dictionary_save_failed)) },
-            text = { Text(errorMessage) },
-            confirmButton = {
-                TextButton(onClick = {
-                    state.errorMessage = null
-                    state.showExitConfirmDialog = false
-                }) {
-                    Text(stringResource(R.string.dictionary_btn_ok))
-                }
-            },
-        )
-        }
-    }
+    OverlayDialog(
+        show = state.showExitConfirmDialog,
+        title = stringResource(R.string.dictionary_default_alert_title),
+        summary = stringResource(R.string.dictionary_dialog_exit_confirm_text),
+        onDismissRequest = { state.showExitConfirmDialog = false },
+        content = {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    text = stringResource(R.string.dictionary_btn_save_not),
+                    onClick = { state.close() },
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(20.dp))
+                TextButton(
+                    text = stringResource(R.string.dictionary_save),
+                    onClick = { state.save(closeAfterSave = true) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        },
+    )
+    val errorMessage = state.errorMessage
+    OverlayDialog(
+        show = errorMessage != null,
+        title = stringResource(R.string.dictionary_save_failed),
+        summary = errorMessage.orEmpty(),
+        onDismissRequest = { state.errorMessage = null },
+        content = {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    text = stringResource(R.string.dictionary_btn_ok),
+                    onClick = {
+                        state.errorMessage = null
+                        state.showExitConfirmDialog = false
+                    },
+                    modifier = Modifier.width(120.dp),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        },
+    )
 }

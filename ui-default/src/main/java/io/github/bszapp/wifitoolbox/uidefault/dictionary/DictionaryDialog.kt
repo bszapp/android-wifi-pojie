@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,20 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.EditNote
-import androidx.compose.material.icons.filled.FileOpen
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,6 +39,15 @@ import io.github.bszapp.wifitoolbox.uidefault.R
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryResource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.RadioButton
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 
 @Composable
 fun AddResourceDialog(
@@ -61,54 +58,53 @@ fun AddResourceDialog(
     onImport: () -> Unit,
     onContinue: () -> Unit
 ) {
-    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = isVisible) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            title = { Text(stringResource(R.string.dictionary_add_resource)) },
-            text = {
-                Column(Modifier.selectableGroup()) {
-                    ResourceOptionItem(
-                        icon = Icons.Default.Description,
-                        title = stringResource(R.string.dictionary_resource_normal),
-                        description = stringResource(R.string.dictionary_resource_normal_desc),
-                        selected = selectedOption == 0,
-                        onClick = { onOptionSelect(0) }
+    OverlayDialog(
+        show = isVisible,
+        title = stringResource(R.string.dictionary_add_resource),
+        onDismissRequest = onDismiss,
+        content = {
+            Column(Modifier.selectableGroup()) {
+                ResourceOptionItem(
+                    icon = Icons.Default.Description,
+                    title = stringResource(R.string.dictionary_resource_normal),
+                    description = stringResource(R.string.dictionary_resource_normal_desc),
+                    selected = selectedOption == 0,
+                    onClick = { onOptionSelect(0) }
+                )
+                ResourceOptionItem(
+                    icon = Icons.Default.Code,
+                    title = stringResource(R.string.dictionary_tag_script),
+                    description = stringResource(R.string.dictionary_resource_script_desc),
+                    selected = selectedOption == 1,
+                    onClick = { onOptionSelect(1) }
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    text = stringResource(R.string.dictionary_import_external),
+                    onClick = onImport,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        text = stringResource(R.string.dictionary_btn_cancel),
+                        onClick = onDismiss,
                     )
-                    ResourceOptionItem(
-                        icon = Icons.Default.Code,
-                        title = stringResource(R.string.dictionary_tag_script),
-                        description = stringResource(R.string.dictionary_resource_script_desc),
-                        selected = selectedOption == 1,
-                        onClick = { onOptionSelect(1) }
-                    )
-                }
-            },
-            confirmButton = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = onImport) {
-                        Text(stringResource(R.string.dictionary_import_external))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = onDismiss) {
-                            Text(stringResource(R.string.dictionary_btn_cancel))
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Button(
-                            enabled = selectedOption != null,
-                            onClick = onContinue
-                        ) {
-                            Text(stringResource(R.string.dictionary_continue_text))
-                        }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        enabled = selectedOption != null,
+                        onClick = onContinue
+                    ) {
+                        Text(stringResource(R.string.dictionary_continue_text))
                     }
                 }
             }
-        )
-    }
+        }
+    )
 }
 
 @Composable
@@ -168,43 +164,53 @@ fun EditResourceDialog(
         content = contentState
     )
 
-    AlertDialog(
+    OverlayDialog(
+        show = true,
+        title = if (isNew) stringResource(R.string.dictionary_new_resource) else stringResource(R.string.dictionary_edit_resource),
         onDismissRequest = onDismiss,
-        title = { Text(if (isNew) stringResource(R.string.dictionary_new_resource) else stringResource(R.string.dictionary_edit_resource)) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                OutlinedTextField(
+        content = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                TextField(
                     value = id,
                     onValueChange = { id = it },
-                    label = { Text(stringResource(R.string.dictionary_id_required)) },
+                    label = stringResource(R.string.dictionary_id_required),
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
+                TextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text(stringResource(R.string.dictionary_label_name)) },
+                    label = stringResource(R.string.dictionary_label_name),
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
+                TextField(
                     value = description,
                     onValueChange = { description = it },
-                    label = { Text(stringResource(R.string.dictionary_description)) },
+                    label = stringResource(R.string.dictionary_description),
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
+                    TextField(
                         value = author,
                         onValueChange = { author = it },
-                        label = { Text(stringResource(R.string.dictionary_developer)) },
+                        label = stringResource(R.string.dictionary_developer),
+                        singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
-                    OutlinedTextField(
+                    TextField(
                         value = version,
                         onValueChange = { version = it },
-                        label = { Text(stringResource(R.string.dictionary_version)) },
+                        label = stringResource(R.string.dictionary_version),
+                        singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -213,7 +219,8 @@ fun EditResourceDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
+                    TextButton(
+                        text = stringResource(R.string.dictionary_clipboard),
                         onClick = {
                             scope.launch {
                                 clipboardManager.getClipEntry()?.clipData?.getItemAt(0)?.text?.let {
@@ -222,53 +229,48 @@ fun EditResourceDialog(
                             }
                         },
                         modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.ContentPaste, null)
-                        Spacer(Modifier.width(4.dp))
-                        Text(stringResource(R.string.dictionary_clipboard))
-                    }
-                    OutlinedButton(
+                    )
+                    TextButton(
+                        text = stringResource(R.string.dictionary_import_file),
                         onClick = { filePickerLauncher.launch(arrayOf("text/plain")) },
                         modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.FileOpen, null)
-                        Spacer(Modifier.width(4.dp))
-                        Text(stringResource(R.string.dictionary_import_file))
-                    }
+                    )
                 }
-                OutlinedButton(
+                TextButton(
+                    text = stringResource(R.string.dictionary_text_editor),
                     onClick = { onContentEdit(getCurrentResource()) },
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                ) {
-                    Icon(Icons.Default.EditNote, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.dictionary_text_editor))
-                }
+                )
                 Text(
                     text = stringResource(R.string.dictionary_data_count_tip, lineCount),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
                 )
             }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    try {
-                        onSave(getCurrentResource())
-                    } catch (e: Exception) {
-                        app.alert(context.getString(R.string.dictionary_save_failed), e.message.toString())
-                    }
-                },
-                enabled = id.isNotBlank()
-            ) {
-                Text(stringResource(R.string.dictionary_save))
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    text = stringResource(R.string.dictionary_btn_cancel),
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(20.dp))
+                Button(
+                    onClick = {
+                        try {
+                            onSave(getCurrentResource())
+                        } catch (e: Exception) {
+                            app.alert(context.getString(R.string.dictionary_save_failed), e.message.toString())
+                        }
+                    },
+                    enabled = id.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(stringResource(R.string.dictionary_save))
+                }
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.dictionary_btn_cancel)) }
         }
     )
 }
@@ -282,10 +284,9 @@ fun ResourceOptionItem(
     onClick: () -> Unit
 ) {
     Surface(
-        selected = selected,
         onClick = onClick,
         shape = RoundedCornerShape(12.dp),
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        color = if (selected) MiuixTheme.colorScheme.primaryContainer else MiuixTheme.colorScheme.surfaceContainer,
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
         Row(
@@ -295,8 +296,8 @@ fun ResourceOptionItem(
             Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
-                Text(text = title, style = MaterialTheme.typography.titleMedium)
-                Text(text = description, style = MaterialTheme.typography.bodySmall)
+                Text(text = title, style = MiuixTheme.textStyles.headline2)
+                Text(text = description, style = MiuixTheme.textStyles.footnote1)
             }
             RadioButton(selected = selected, onClick = null)
         }

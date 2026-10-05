@@ -1,101 +1,40 @@
 package io.github.bszapp.wifitoolbox.uidefault.component
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.ButtonGroupDefaults
-import androidx.compose.material3.DropdownMenuGroup
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.DropdownMenuPopup
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MenuDefaults
-import androidx.compose.material3.MenuItemShapes
-import androidx.compose.material3.PlainTooltip
-import androidx.compose.material3.Text
-import androidx.compose.material3.ToggleButton
-import androidx.compose.material3.ToggleButtonDefaults
-import androidx.compose.material3.TooltipAnchorPosition
-import androidx.compose.material3.TooltipBox
-import androidx.compose.material3.TooltipDefaults
-import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEachIndexed
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.DropdownImpl
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.ListPopupColumn
+import top.yukonga.miuix.kmp.basic.PopupPositionProvider
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TooltipBox
+import top.yukonga.miuix.kmp.basic.TooltipAnchorPosition
+import top.yukonga.miuix.kmp.basic.DropdownItem
+import top.yukonga.miuix.kmp.overlay.OverlayListPopup
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private val CornerLarge = 12.dp
-private val CornerMedium = 6.dp
-private val CornerSmall = 4.dp
-private val CornerAnimSpec = tween<Dp>(durationMillis = 200)
-
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-private fun animatedMenuItemShapes(
-    index: Int,
-    count: Int,
-    groupIndex: Int = 0,
-    groupCount: Int = 1,
-    checked: Boolean,
-): MenuItemShapes {
-    val isFirst = index == 0
-    val isLast = index == count - 1
-
-    val topCorner by animateDpAsState(
-        targetValue = when {
-            checked || (isFirst && groupIndex == 0) -> CornerLarge   // 选中 或 整体顶部
-            isFirst -> CornerMedium                                   // 组内首项但非顶部组
-            else -> CornerSmall
-        },
-        animationSpec = CornerAnimSpec,
-        label = "menuItemTopCorner",
-    )
-    val bottomCorner by animateDpAsState(
-        targetValue = when {
-            checked || (isLast && groupIndex == groupCount - 1) -> CornerLarge   // 选中 或 整体底部
-            isLast -> CornerMedium                                                // 组内末项但非底部组
-            else -> CornerSmall
-        },
-        animationSpec = CornerAnimSpec,
-        label = "menuItemBottomCorner",
-    )
-
-    val shape = RoundedCornerShape(
-        topStart = topCorner,
-        topEnd = topCorner,
-        bottomStart = bottomCorner,
-        bottomEnd = bottomCorner,
-    )
-
-    return MenuItemShapes(
-        shape,
-        selectedShape = shape
-    )
-}
 
 // ──────────────────────────────────────────────
 // 数据模型
@@ -130,7 +69,6 @@ data class MenuItemConfig(
     val onCheckedChange: (Boolean) -> Unit,
 )
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ActionButtonGroupWithMenu(
     buttonConfig: ActionButtonConfig,
@@ -139,47 +77,45 @@ fun ActionButtonGroupWithMenu(
     menuExpanded: Boolean = false,
     onMenuExpandedChange: (Boolean) -> Unit = {},
 ) {
-    val groupInteractionSource = remember { MutableInteractionSource() }
     val customContainerColor = buttonConfig.containerColor
     val customContentColor = buttonConfig.contentColor
-    val leadingButtonColors = if (customContainerColor != null && customContentColor != null) {
-        ToggleButtonDefaults.toggleButtonColors(
-            containerColor = customContainerColor,
+    val hasCustomColors = customContainerColor != null && customContentColor != null
+    val leadingButtonColors = if (hasCustomColors) {
+        ButtonDefaults.buttonColors(
+            color = customContainerColor,
             contentColor = customContentColor,
-            checkedContainerColor = customContainerColor,
-            checkedContentColor = customContentColor,
         )
     } else {
-        ToggleButtonDefaults.toggleButtonColors()
+        ButtonDefaults.buttonColors()
     }
-    val trailingButtonColors = if (customContainerColor != null && customContentColor != null) {
-        ToggleButtonDefaults.toggleButtonColors(
-            containerColor = customContainerColor,
+    val trailingButtonColors = when {
+        hasCustomColors -> ButtonDefaults.buttonColors(
+            color = customContainerColor,
             contentColor = customContentColor,
-            checkedContainerColor = customContainerColor,
-            checkedContentColor = customContentColor,
         )
-    } else {
-        ToggleButtonDefaults.toggleButtonColors(
-            checkedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-            checkedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+
+        menuExpanded -> ButtonDefaults.buttonColors(
+            color = MiuixTheme.colorScheme.primaryContainer,
+            contentColor = MiuixTheme.colorScheme.onPrimaryContainer,
         )
+
+        else -> ButtonDefaults.buttonColors()
     }
 
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        // ── 左侧主操作按钮（无持久选中态）──────────────────
-        ToggleButton(
-            checked = false,
-            onCheckedChange = { buttonConfig.onClick() },
-            shapes = ButtonGroupDefaults.connectedLeadingButtonShapes(),
-            colors = leadingButtonColors,
-            contentPadding = PaddingValues(horizontal = 12.dp),
+        // ── 左侧主操作按钮 ─────────────────────────────
+        Button(
+            onClick = { buttonConfig.onClick() },
             modifier = Modifier
                 .requiredWidthIn(min = 0.dp)
                 .height(40.dp),
+            cornerRadius = CornerLarge,
+            minWidth = 0.dp,
+            colors = leadingButtonColors,
+            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
         ) {
             AnimatedContent(
                 targetState = buttonConfig.icon to buttonConfig.text,
@@ -192,7 +128,7 @@ fun ActionButtonGroupWithMenu(
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.size(6.dp))
-                    Text(text)
+                    Text(text, style = MiuixTheme.textStyles.body2)
                 }
             }
         }
@@ -200,115 +136,103 @@ fun ActionButtonGroupWithMenu(
         // ── 右侧更多按钮 + 下拉菜单 ──────────────────────
         Box(modifier = Modifier.wrapContentSize(Alignment.TopStart)) {
             TooltipBox(
-                positionProvider = TooltipDefaults.rememberTooltipPositionProvider(
-                    TooltipAnchorPosition.Above
-                ),
-                tooltip = { PlainTooltip { Text("更多") } },
-                state = rememberTooltipState(),
+                text = "更多",
+                positioning = TooltipAnchorPosition.Above,
             ) {
-                ToggleButton(
-                    checked = menuExpanded,
-                    onCheckedChange = onMenuExpandedChange,
-                    shapes = ButtonGroupDefaults.connectedTrailingButtonShapes(),
-                    colors = trailingButtonColors,
-                    contentPadding = PaddingValues(horizontal = 4.dp),
+                Button(
+                    onClick = { onMenuExpandedChange(!menuExpanded) },
                     modifier = Modifier
                         .requiredWidthIn(min = 0.dp)
                         .width(36.dp)
                         .height(40.dp),
+                    cornerRadius = CornerLarge,
+                    minWidth = 0.dp,
+                    colors = trailingButtonColors,
+                    insideMargin = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
                 ) {
                     Icon(
                         imageVector = Icons.Filled.MoreVert,
                         contentDescription = "更多",
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(18.dp)
+                            .align(Alignment.CenterVertically),
                     )
                 }
             }
 
-            DropdownMenuPopup(
-                expanded = menuExpanded,
-                onDismissRequest = {
-                    onMenuExpandedChange(false)
-                },
+            OverlayListPopup(
+                show = menuExpanded,
+                popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
+                alignment = PopupPositionProvider.Align.TopEnd,
+                onDismissRequest = { onMenuExpandedChange(false) },
             ) {
-                val groupCount = menuGroups.size
-                menuGroups.fastForEachIndexed { groupIndex, group ->
-                    DropdownMenuGroup(
-                        shapes = MenuDefaults.groupShape(groupIndex, groupCount),
-                        interactionSource = groupInteractionSource,
-                    ) {
+                ListPopupColumn {
+                    val groupCount = menuGroups.size
+                    val lastIndex = groupCount - 1
+                    menuGroups.fastForEachIndexed { groupIndex, group ->
                         // icon 或 title 任意非空才渲染标题区域
                         io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
                             visible = group.icon != null || group.title != null,
                         ) {
-                            MenuDefaults.DropdownMenuGroupLabel {
-                                Row {
-                                    group.icon?.let { icon ->
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = icon,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.size(15.dp),
-                                            )
-                                            Spacer(Modifier.size(4.dp))
-                                        }
-                                    }
-                                    group.title?.let { title ->
-                                        Text(
-                                            text = title,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            style = MaterialTheme.typography.labelSmall,
-                                        )
-                                    }
+                            Row(
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                group.icon?.let { icon ->
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = null,
+                                        tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Spacer(Modifier.size(4.dp))
+                                }
+                                group.title?.let { title ->
+                                    Text(
+                                        text = title,
+                                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                        style = MiuixTheme.textStyles.footnote2,
+                                    )
                                 }
                             }
                         }
 
                         val itemCount = group.items.size
                         group.items.fastForEachIndexed { itemIndex, item ->
-                            val resolvedCheckedIcon = item.checkedIcon ?: item.icon
+                            val resolvedCheckedIcon = if (item.checked) {
+                                item.checkedIcon ?: item.icon
+                            } else {
+                                item.icon
+                            }
 
-                            DropdownMenuItem(
-                                text = { Text(item.title) },
-                                shapes = animatedMenuItemShapes(
-                                    index = itemIndex,
-                                    count = itemCount,
-                                    groupIndex = groupIndex,
-                                    groupCount = groupCount,
-                                    checked = item.checked,
-                                ),
-                                checked = item.checked,
-                                onCheckedChange = { item.onCheckedChange(!item.checked) },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = item.icon,
-                                        modifier = Modifier.size(MenuDefaults.LeadingIconSize),
-                                        contentDescription = null,
-                                    )
-                                },
-                                checkedLeadingIcon = {
-                                    Icon(
-                                        imageVector = resolvedCheckedIcon,
-                                        modifier = Modifier.size(MenuDefaults.LeadingIconSize),
-                                        contentDescription = null,
-                                    )
-                                },
-                                trailingIcon = {
-                                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = item.checked) {
+                            DropdownImpl(
+                                item = DropdownItem(
+                                    text = item.title,
+                                    selected = item.checked,
+                                    icon = { iconModifier ->
                                         Icon(
-                                            imageVector = Icons.Filled.Check,
-                                            modifier = Modifier.size(MenuDefaults.TrailingIconSize),
+                                            imageVector = resolvedCheckedIcon,
                                             contentDescription = null,
+                                            modifier = iconModifier.size(20.dp),
                                         )
-                                    }
+                                    },
+                                ),
+                                optionSize = itemCount,
+                                index = itemIndex,
+                                isSelected = item.checked,
+                                isFirst = groupIndex == 0 && itemIndex == 0,
+                                isLast = groupIndex == lastIndex && itemIndex == itemCount - 1,
+                                onSelectedIndexChange = { selectedIndex ->
+                                    val target = group.items[selectedIndex]
+                                    target.onCheckedChange(!target.checked)
                                 },
                             )
                         }
-                    }
 
-                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = groupIndex != groupCount - 1) {
-                        Spacer(Modifier.height(MenuDefaults.GroupSpacing))
+                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                            visible = groupIndex != lastIndex,
+                        ) {
+                            Spacer(Modifier.height(8.dp))
+                        }
                     }
                 }
             }

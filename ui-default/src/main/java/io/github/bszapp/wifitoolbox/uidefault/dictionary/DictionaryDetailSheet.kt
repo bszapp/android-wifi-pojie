@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -12,70 +11,53 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.SheetState
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.uidefault.R
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryResource
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.TagItem
-import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ResourceDetailSheet(
     isVisible: Boolean,
     resource: DictionaryResource?,
-    sheetState: SheetState,
     onDismiss: () -> Unit,
     onEdit: (DictionaryResource) -> Unit,
     onDelete: (String) -> Unit
 ) {
     var lastResource by remember { mutableStateOf<DictionaryResource?>(null) }
     if (resource != null) lastResource = resource
-    val scope = rememberCoroutineScope()
 
-    if (isVisible || sheetState.isVisible) {
-        ModalBottomSheet(
-            onDismissRequest = onDismiss,
-            sheetState = sheetState,
-            contentWindowInsets = { WindowInsets(0) }
-        ) {
-            lastResource?.let { res ->
-                ResourceDetailContent(
-                    resource = res,
-                    onEdit = { onEdit(res) },
-                    onDelete = {
-                        scope.launch { sheetState.hide() }.invokeOnCompletion {
-                            if (!sheetState.isVisible) {
-                                onDismiss()
-                                onDelete(res.id)
-                            }
-                        }
-                    }
-                )
-            }
+    SingleOverlayBottomSheet(
+        show = isVisible,
+        onDismissRequest = onDismiss,
+    ) {
+        lastResource?.let { res ->
+            ResourceDetailContent(
+                resource = res,
+                onEdit = { onEdit(res) },
+                onDelete = {
+                    onDismiss()
+                    onDelete(res.id)
+                }
+            )
         }
     }
 }
@@ -99,7 +81,7 @@ fun ResourceDetailContent(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = stringResource(R.string.dictionary_resource_details), style = MaterialTheme.typography.headlineSmall)
+            Text(text = stringResource(R.string.dictionary_resource_details), style = MiuixTheme.textStyles.title2)
 
             IconButton(onClick = {
                 val file = if (resource.localPath != null) {
@@ -145,13 +127,13 @@ fun ResourceDetailContent(
                 .padding(vertical = 4.dp)) {
                 Text(
                     text = stringResource(R.string.dictionary_label_name),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.primary
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = resource.name ?: stringResource(R.string.dictionary_none),
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MiuixTheme.textStyles.body1,
                         modifier = Modifier.weight(1f, false)
                     )
                     io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = resource.type == 1) {
@@ -199,15 +181,12 @@ fun ResourceDetailContent(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when (resource.isBuiltin) {
                 1 -> {
-                    OutlinedButton(
+                    TextButton(
+                        text = stringResource(R.string.dictionary_builtin_resource),
                         onClick = {},
                         modifier = Modifier.weight(1f),
                         enabled = false
-                    ) {
-                        Icon(Icons.Default.Lock, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.dictionary_builtin_resource))
-                    }
+                    )
                     Button(onClick = onEdit, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Default.Edit, null)
                         Spacer(Modifier.width(8.dp))
@@ -216,14 +195,11 @@ fun ResourceDetailContent(
                 }
 
                 2 -> {
-                    OutlinedButton(
+                    TextButton(
+                        text = stringResource(R.string.dictionary_restore_builtin),
                         onClick = onDelete,
                         modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.SettingsBackupRestore, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.dictionary_restore_builtin))
-                    }
+                    )
                     Button(onClick = onEdit, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Default.Edit, null)
                         Spacer(Modifier.width(8.dp))
@@ -232,15 +208,14 @@ fun ResourceDetailContent(
                 }
 
                 else -> {
-                    OutlinedButton(
+                    TextButton(
+                        text = stringResource(R.string.dictionary_delete),
                         onClick = onDelete,
                         modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Icon(Icons.Default.Delete, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.dictionary_delete))
-                    }
+                        colors = ButtonDefaults.textButtonColors(
+                            textColor = MiuixTheme.colorScheme.error,
+                        )
+                    )
                     Button(onClick = onEdit, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Default.Edit, null)
                         Spacer(Modifier.width(8.dp))
@@ -258,9 +233,9 @@ fun DetailItem(label: String, value: String?) {
     Column(Modifier.padding(vertical = 4.dp)) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary
+            style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.primary
         )
-        Text(text = value ?: stringResource(R.string.dictionary_none), style = MaterialTheme.typography.bodyLarge)
+        Text(text = value ?: stringResource(R.string.dictionary_none), style = MiuixTheme.textStyles.body1)
     }
 }

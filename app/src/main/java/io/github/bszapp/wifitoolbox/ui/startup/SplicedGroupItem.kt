@@ -1,4 +1,4 @@
-package io.github.bszapp.wifitoolbox.uidefault.component
+package io.github.bszapp.wifitoolbox.ui.startup
 
 import android.util.Log
 import androidx.compose.animation.core.animateDpAsState

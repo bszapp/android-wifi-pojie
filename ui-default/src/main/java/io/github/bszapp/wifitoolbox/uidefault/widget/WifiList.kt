@@ -29,15 +29,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -75,10 +66,14 @@ import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiGroupCardActions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun WifiList(
     modifier: Modifier = Modifier,
@@ -224,7 +219,9 @@ fun WifiList(
             onDismiss = { selectedSsid = null },
             capturedAccessPoints = capturedAccessPoints.filter { ap ->
                 group.networks.any { it.BSSID.equals(ap.bssid, ignoreCase = true) } ||
-                    group.virtualAccessPoint?.bssid.equals(ap.bssid, ignoreCase = true)
+                    group.virtualAccessPoint?.bssid.equals(ap.bssid, ignoreCase = true) ||
+                    // 扫描列表里已消失、但抓包仍在记录的同名接入点，一并合并展示
+                    (group.ssid.isNotBlank() && ap.ssid == group.ssid)
             },
             deviceDetailContent = { accessPoint, device ->
                 val bssid = accessPoint.bssid
@@ -381,10 +378,11 @@ private fun RunningTaskCard(
     onClick: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        colors = androidx.compose.material3.CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+        colors = CardDefaults.defaultColors(
+            color = MiuixTheme.colorScheme.primaryContainer,
+            contentColor = MiuixTheme.colorScheme.onPrimaryContainer,
         ),
     ) {
         Row(
@@ -400,12 +398,12 @@ private fun RunningTaskCard(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "任务运行中 · #$taskId",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MiuixTheme.textStyles.headline2,
                 )
                 Text(
                     text = stage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                 )
             }
         }
@@ -435,13 +433,13 @@ private fun WifiEmptyContent(
                 imageVector = Icons.Rounded.Inbox,
                 contentDescription = null,
                 modifier = Modifier.size(96.dp),
-                tint = MaterialTheme.colorScheme.outlineVariant,
+                tint = MiuixTheme.colorScheme.dividerLine,
             )
             Spacer(Modifier.height(12.dp))
             Text(
                 text = "空空如也",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MiuixTheme.textStyles.body1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
         }
     }
@@ -500,8 +498,8 @@ private fun WifiErrorContent(message: String) {
     ) {
         Text(
             text = message,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.error,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 32.dp),
         )
@@ -510,7 +508,6 @@ private fun WifiErrorContent(message: String) {
 
 // ── 单个 Wi-Fi 卡片 ───────────────────────────────────────────────────────────
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun WifiGroupCard(
     vm: DefaultViewModel,
@@ -526,7 +523,7 @@ private fun WifiGroupCard(
     } ?: 0
     val backgroundColor by animateColorAsState(
         targetValue = if (isConnected) {
-            MaterialTheme.colorScheme.primaryContainer
+            MiuixTheme.colorScheme.primaryContainer
         } else {
             Color.Transparent
         },
@@ -534,9 +531,9 @@ private fun WifiGroupCard(
     )
     val contentColor by animateColorAsState(
         targetValue = if (isConnected) {
-            MaterialTheme.colorScheme.onPrimaryContainer
+            MiuixTheme.colorScheme.onPrimaryContainer
         } else {
-            MaterialTheme.colorScheme.onSurface
+            MiuixTheme.colorScheme.onSurface
         },
         label = "WifiCardContent",
     )
@@ -570,7 +567,7 @@ private fun WifiGroupCard(
                 ) {
                     Text(
                         text = group.displaySsid,
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MiuixTheme.textStyles.body1,
                         fontWeight = FontWeight.SemiBold,
                         color = contentColor,
                         overflow = TextOverflow.Visible,
@@ -586,7 +583,7 @@ private fun WifiGroupCard(
                             ) {
                                 Text(
                                     text = "已连接",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MiuixTheme.textStyles.footnote2,
                                     fontWeight = FontWeight.Medium,
                                     color = contentColor,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -617,7 +614,7 @@ private fun WifiGroupCard(
 
                 Text(
                     text = group.signalDisplay,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MiuixTheme.textStyles.footnote1,
                     lineHeight = 16.sp,
                     color = contentColor.copy(alpha = 0.7f),
                 )
@@ -627,8 +624,8 @@ private fun WifiGroupCard(
             WifiGroupCardActions(
                 group = group,
                 isConnected = isConnected,
-                buttonContainerColor = MaterialTheme.colorScheme.primary.takeIf { isConnected },
-                buttonContentColor = MaterialTheme.colorScheme.onPrimary.takeIf { isConnected },
+                buttonContainerColor = MiuixTheme.colorScheme.primary.takeIf { isConnected },
+                buttonContentColor = MiuixTheme.colorScheme.onPrimary.takeIf { isConnected },
                 onConnect = onConnect,
                 onDisconnect = {
                     group.connection?.networkId?.let(vm.wifiList::disconnectCurrentNetwork)

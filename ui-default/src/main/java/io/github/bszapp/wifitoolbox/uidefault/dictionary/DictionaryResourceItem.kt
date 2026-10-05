@@ -6,10 +6,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -19,6 +15,11 @@ import io.github.bszapp.wifitoolbox.uidefault.R
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryResource
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.dictionary.TagType
+import androidx.compose.ui.state.ToggleableState
+import top.yukonga.miuix.kmp.basic.Checkbox
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
 fun DictionaryResourceItem(
@@ -34,7 +35,7 @@ fun DictionaryResourceItem(
         Icon(
             imageVector = if (res.type == 1) Icons.Default.Code else Icons.Default.Description,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
+            tint = MiuixTheme.colorScheme.onSurfaceVariantSummary
         )
 
         Column(
@@ -45,7 +46,7 @@ fun DictionaryResourceItem(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = res.name ?: res.id,
-                    style = MaterialTheme.typography.bodyLarge
+                    style = MiuixTheme.textStyles.body1
                 )
                 val tagResources = buildList {
                     if (res.isBuiltin == 1) add(R.string.dictionary_tag_builtin to TagType.Secondary)
@@ -59,8 +60,8 @@ fun DictionaryResourceItem(
             Text(
                 text = res.description ?: stringResource(R.string.dictionary_no_description),
                 maxLines = 2,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
             )
         }
 
@@ -69,8 +70,8 @@ fun DictionaryResourceItem(
                 label = "dictionary-resource-selection",
             ) { checked ->
                 if (checked != null) Checkbox(
-                    checked = checked,
-                    onCheckedChange = null,
+                    state = if (checked) ToggleableState.On else ToggleableState.Off,
+                    onClick = null,
                 )
             }
     }

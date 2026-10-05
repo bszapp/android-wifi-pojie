@@ -1,7 +1,5 @@
 package io.github.bszapp.wifitoolbox.uidefault.component
 
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -10,12 +8,14 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
 fun WifiIcon(
     modifier: Modifier = Modifier,
     level: Int = 0,
-    color: Color = MaterialTheme.colorScheme.onSurface,
+    color: Color = MiuixTheme.colorScheme.onSurface,
 ) {
     val baseIconColor = color
 

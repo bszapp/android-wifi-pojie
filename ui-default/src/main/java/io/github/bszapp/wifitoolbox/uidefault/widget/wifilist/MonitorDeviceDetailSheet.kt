@@ -30,7 +30,6 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -756,14 +755,14 @@ private fun HandshakeRecordsCard(
                                 MonitorHandshakeCaptureQuality.DATA_INCOMPLETE -> ({
                                     Text(
                                         text = "数据不完整",
-                                        color = MaterialTheme.colorScheme.error,
+                                        color = MiuixTheme.colorScheme.error,
                                         style = MiuixTheme.textStyles.body2,
                                     )
                                 })
                                 MonitorHandshakeCaptureQuality.PARTIALLY_MISSING -> ({
                                     Text(
                                         text = "部分缺失",
-                                        color = MaterialTheme.colorScheme.error,
+                                        color = MiuixTheme.colorScheme.error,
                                         style = MiuixTheme.textStyles.body2,
                                     )
                                 })
