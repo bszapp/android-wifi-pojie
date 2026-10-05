@@ -86,7 +86,7 @@ fun SplicedGroupItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            if (showArrow) {
+                io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = showArrow) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                     contentDescription = null,

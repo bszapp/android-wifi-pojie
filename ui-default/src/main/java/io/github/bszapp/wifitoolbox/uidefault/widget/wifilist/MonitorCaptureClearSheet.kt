@@ -32,17 +32,27 @@ internal fun MonitorCaptureClearSheet(progress: MonitorCaptureClearProgress?, on
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (progress != null && progress.stage == MonitorCaptureClearStage.PREPARING && progress.totalBytes > 0L) {
-                val processed = progress.processedBytes.coerceIn(0L, progress.totalBytes)
-                Text(
-                    "${formatMonitorByteCount(processed)} / ${formatMonitorByteCount(progress.totalBytes)}",
-                    style = MiuixTheme.textStyles.footnote1,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                )
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    progress = (processed.toDouble() / progress.totalBytes).toFloat(),
-                )
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = progress?.takeIf {
+                    it.stage == MonitorCaptureClearStage.PREPARING && it.totalBytes > 0L
+                },
+                contentKey = { it == null },
+                label = "monitor-clear-progress",
+            ) { visibleProgress ->
+            if (visibleProgress != null) {
+                val processed = visibleProgress.processedBytes.coerceIn(0L, visibleProgress.totalBytes)
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "${formatMonitorByteCount(processed)} / ${formatMonitorByteCount(visibleProgress.totalBytes)}",
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        progress = (processed.toDouble() / visibleProgress.totalBytes).toFloat(),
+                    )
+                }
+            }
             }
         }
     }

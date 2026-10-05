@@ -238,21 +238,25 @@ fun ActionButtonGroupWithMenu(
                         interactionSource = groupInteractionSource,
                     ) {
                         // icon 或 title 任意非空才渲染标题区域
-                        if (group.icon != null || group.title != null) {
+                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                            visible = group.icon != null || group.title != null,
+                        ) {
                             MenuDefaults.DropdownMenuGroupLabel {
                                 Row {
-                                    if (group.icon != null) {
-                                        Icon(
-                                            imageVector = group.icon,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(15.dp),
-                                        )
-                                        Spacer(Modifier.size(4.dp))
+                                    group.icon?.let { icon ->
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = icon,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(15.dp),
+                                            )
+                                            Spacer(Modifier.size(4.dp))
+                                        }
                                     }
-                                    if (group.title != null) {
+                                    group.title?.let { title ->
                                         Text(
-                                            text = group.title,
+                                            text = title,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             style = MaterialTheme.typography.labelSmall,
                                         )
@@ -290,20 +294,20 @@ fun ActionButtonGroupWithMenu(
                                         contentDescription = null,
                                     )
                                 },
-                                trailingIcon = if (item.checked) {
-                                    {
+                                trailingIcon = {
+                                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = item.checked) {
                                         Icon(
                                             imageVector = Icons.Filled.Check,
                                             modifier = Modifier.size(MenuDefaults.TrailingIconSize),
                                             contentDescription = null,
                                         )
                                     }
-                                } else null,
+                                },
                             )
                         }
                     }
 
-                    if (groupIndex != groupCount - 1) {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = groupIndex != groupCount - 1) {
                         Spacer(Modifier.height(MenuDefaults.GroupSpacing))
                     }
                 }

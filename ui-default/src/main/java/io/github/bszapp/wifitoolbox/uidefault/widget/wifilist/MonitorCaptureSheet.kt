@@ -71,13 +71,19 @@ internal fun MonitorCaptureSheet(
                 modifier = Modifier.fillMaxWidth().weight(1f, fill = false).scrollEndHaptic().overScrollVertical(),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (channels.isEmpty()) item { Text("尚未获取到可用信道") }
-                if (channels.isNotEmpty()) item(key = "hopping") {
-                    Card {
-                        BasicComponent(title = "跳频录制", summary = "自动循环监听所有可用信道",
-                            role = Role.RadioButton,
-                            onClick = { hopping = true },
-                            endActions = { RadioButton(selected = hopping, onClick = null) })
+                item(key = "channels-empty") {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = channels.isEmpty()) {
+                        Text("尚未获取到可用信道")
+                    }
+                }
+                item(key = "hopping") {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = channels.isNotEmpty()) {
+                        Card {
+                            BasicComponent(title = "跳频录制", summary = "自动循环监听所有可用信道",
+                                role = Role.RadioButton,
+                                onClick = { hopping = true },
+                                endActions = { RadioButton(selected = hopping, onClick = null) })
+                        }
                     }
                 }
                 items(MonitorChartBand.entries, key = { it.name }) { band ->
@@ -97,9 +103,15 @@ internal fun MonitorCaptureSheet(
                     } ?: "点击图表选择信道，或选择跳频录制",
                     style = MiuixTheme.textStyles.body2,
                 )
-                if (!hopping && selectedChannel != null) {
+                io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                    targetState = selectedChannel?.takeUnless { hopping }?.let { it to hitNetworks.toList() },
+                    contentKey = { it?.first?.frequencyMhz },
+                    label = "monitor-capture-hit-networks",
+                ) { channelAndNetworks ->
+                if (channelAndNetworks != null) {
+                    val (_, visibleNetworks) = channelAndNetworks
                     Text(
-                        text = if (hitNetworks.isEmpty()) "命中：暂无网络" else "命中：" + hitNetworks.joinToString("、") {
+                        text = if (visibleNetworks.isEmpty()) "命中：暂无网络" else "命中：" + visibleNetworks.joinToString("、") {
                             it.SSID?.takeIf(String::isNotBlank) ?: "<隐藏的网络>（${it.BSSID}）"
                         },
                         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -107,6 +119,7 @@ internal fun MonitorCaptureSheet(
                         style = MiuixTheme.textStyles.footnote1,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     )
+                }
                 }
             }
             Row(Modifier.fillMaxWidth()) {

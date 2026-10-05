@@ -61,7 +61,7 @@ fun AddResourceDialog(
     onImport: () -> Unit,
     onContinue: () -> Unit
 ) {
-    if (isVisible) {
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = isVisible) {
         AlertDialog(
             onDismissRequest = onDismiss,
             containerColor = MaterialTheme.colorScheme.surfaceContainer,

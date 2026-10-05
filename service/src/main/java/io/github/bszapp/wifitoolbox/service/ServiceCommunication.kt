@@ -53,6 +53,11 @@ class ServiceCommunication(
     private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
     }
+    // Both terminal callback broadcast paths share this executor because RemoteCallbackList
+    // allows only one active beginBroadcast()/finishBroadcast() interval at a time.
+    private val terminalCallbackDeliveryExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "wifi-terminal-ipc-delivery").apply { isDaemon = true }
+    }
     private val snapshotGeneration = AtomicLong(0L)
     private val publisherLock = Any()
     private val sdk = Build.VERSION.SDK_INT
@@ -139,7 +144,7 @@ class ServiceCommunication(
     }
 
     internal fun broadcastAliveTerminalsChanged(snapshot: AliveTerminalSnapshot) {
-        deliveryExecutor.execute {
+        terminalCallbackDeliveryExecutor.execute {
             forEachTerminalManagerCallback { callback ->
                 pushAliveTerminalsChanged(callback, snapshot)
             }
@@ -173,7 +178,7 @@ class ServiceCommunication(
 
     private fun scheduleTerminalLogDelivery() {
         if (!terminalLogDeliveryScheduled.compareAndSet(false, true)) return
-        deliveryExecutor.execute {
+        terminalCallbackDeliveryExecutor.execute {
             try {
                 while (true) {
                     val ranges = synchronized(terminalLogRangeLock) {

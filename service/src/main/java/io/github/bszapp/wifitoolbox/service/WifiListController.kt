@@ -752,6 +752,7 @@ internal class WifiListController(
             val current = modeState
             environment = HybridTaskEnvironment(rootfsPath, runtimePath, terminalPath)
             if (current.mode == mode && !modeOperationInProgress) return@execute
+            stopInterfaceModePolling()
             modeOperationInProgress = true
             val generation = ++modeGeneration
             publishModeState(modeState.copy(modeSwitch = WifiModeSwitch(mode, true, generation)))
@@ -787,6 +788,7 @@ internal class WifiListController(
     ) {
         execute {
             if (modeState.mode == WifiMode.MONITOR) return@execute
+            stopInterfaceModePolling()
             modeOperationInProgress = true
             val generation = ++modeGeneration
             publishModeState(modeState.copy(modeSwitch = WifiModeSwitch(WifiMode.MONITOR, true, generation)))
@@ -806,12 +808,12 @@ internal class WifiListController(
                     if (generation != modeGeneration || interruptedModeOperation.get() == generation) return@runChrootTerminalScript
                     try {
                         val detected = readInterfaceMode()
-                        publishDetectedMode(detected)
                         check(detected == WifiMode.MONITOR) { MONITOR_MODE_VERIFICATION_ERROR }
                         setInterfaceUp(false)
                         if (interruptedModeOperation.get() == generation) return@runChrootTerminalScript
                         initializeMonitorSession(requireNotNull(environment))
                         if (interruptedModeOperation.get() == generation) return@runChrootTerminalScript
+                        publishInitializedMonitorMode()
                         modeOperationInProgress = false
                         finishModeSwitch()
                         Log.i(TAG, "监听模式已启动，进入脚本退出码=$exitCode")
@@ -1211,8 +1213,23 @@ internal class WifiListController(
     }
 
     private fun finishModeSwitch() {
-        val progress = modeState.modeSwitch ?: return
-        if (progress.isRunning) publishModeState(modeState.copy(modeSwitch = progress.copy(isRunning = false)))
+        val progress = modeState.modeSwitch
+        if (progress?.isRunning == true) {
+            publishModeState(modeState.copy(modeSwitch = progress.copy(isRunning = false)))
+        }
+        startInterfaceModePolling(immediate = true)
+    }
+
+    /** 用户请求进入 monitor 时，等监听扫描与统计会话初始化成功后再发布新模式。 */
+    private fun publishInitializedMonitorMode() {
+        val previous = modeState
+        if (previous.mode == WifiMode.MONITOR) return
+        monitorScanHistory.clear()
+        monitorCapturePlan = MonitorCapturePlan.Stopped
+        monitorCaptureChangeActive = false
+        stopSystemWifiEnabledPolling()
+        publishModeState(previous.copy(mode = WifiMode.MONITOR, hybridScanEnabled = false))
+        publishWifiState(WifiState.Data.Enabled(emptyList(), false, null))
     }
 
     private fun readInterfaceMode(fallback: WifiMode = modeState.mode): WifiMode =
@@ -1323,7 +1340,7 @@ internal class WifiListController(
     }
 
     /** 独立读取线程，避免扫描或容器脚本等待阻塞每秒的网卡类型检测。 */
-    private fun startInterfaceModePolling() {
+    private fun startInterfaceModePolling(immediate: Boolean = false) {
         if (stopped || interfaceModePollingFuture != null) return
         interfaceModePollingFuture = interfaceModePollingExecutor.scheduleAtFixedRate(
             {
@@ -1339,10 +1356,15 @@ internal class WifiListController(
                     }
                 }
             },
-            INTERFACE_MODE_REFRESH_INTERVAL_MS,
+            if (immediate) 0L else INTERFACE_MODE_REFRESH_INTERVAL_MS,
             INTERFACE_MODE_REFRESH_INTERVAL_MS,
             TimeUnit.MILLISECONDS,
         )
+    }
+
+    private fun stopInterfaceModePolling() {
+        interfaceModePollingFuture?.cancel(false)
+        interfaceModePollingFuture = null
     }
 
     private fun handleExternalInterfaceModeChange(detected: WifiMode) {

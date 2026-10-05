@@ -8,7 +8,7 @@ import kotlinx.parcelize.Parcelize
 /**
  * App 与特权 service 之间共享的启动信息。
  *
- * App 创建启动信息时填写 trustedUid / startupMode / version；service 初始化时补齐
+ * App 创建启动信息时填写可信 UID、启动模式、版本和服务崩溃报告回传路径；service 初始化时补齐
  * serviceUid / servicePid / serviceUidText 后返回给 App 查询状态。
  */
 @Parcelize
@@ -18,6 +18,7 @@ data class StartupInfo(
     val startupMode: String,
     val versionName: String,
     val versionCode: Long,
+    val serviceCrashReportPath: String = "",
     val serviceUid: Int = -1,
     val servicePid: Int = -1,
     val serviceUidText: String = "",
@@ -36,13 +37,20 @@ data class StartupInfo(
     fun isTrustedForAppUid(appUid: Int): Boolean = trustedUid == appUid && trustedUid > 0
 
     companion object {
-        fun forAppLaunch(mode: StartupMode, uid: Int, versionName: String, versionCode: Long): StartupInfo =
+        fun forAppLaunch(
+            mode: StartupMode,
+            uid: Int,
+            versionName: String,
+            versionCode: Long,
+            serviceCrashReportPath: String = "",
+        ): StartupInfo =
             StartupInfo(
                 trustedUid = uid,
                 trustedUidText = "uid=$uid",
                 startupMode = mode.name,
                 versionName = versionName,
                 versionCode = versionCode,
+                serviceCrashReportPath = serviceCrashReportPath,
             ).requireLaunchInfo()
     }
 }

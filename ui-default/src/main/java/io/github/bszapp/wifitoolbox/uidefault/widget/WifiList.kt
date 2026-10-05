@@ -86,22 +86,26 @@ fun WifiList(
     listState: LazyListState = rememberLazyListState(),
     contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     onSaveHc22000: (content: String, fileName: String) -> Unit = { _, _ -> },
+    onInlineConnectTaskChanged: (Long?) -> Unit = {},
 ) {
     val wifiState by vm.wifiList.state.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
     val modeState by vm.wifiList.modeState.collectAsStateWithLifecycle()
     val handshakeTest by vm.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
-    var selectedCaptureDevice by remember { mutableStateOf<Pair<String, String>?>(null) }
     val capturedAccessPoints = modeState?.monitorStatistics?.accessPoints.orEmpty()
     val currentTask by vm.currentTask.collectAsStateWithLifecycle()
+    val displayedTask by vm.displayedTask.collectAsStateWithLifecycle()
     val connectWifiSheetCloseRequest by
         vm.connectWifiSheetCloseRequest.collectAsStateWithLifecycle()
     var selectedSsid by rememberSaveable { mutableStateOf<String?>(null) }
     var connectSheetContent by remember { mutableStateOf<ConnectWifiSheetContent?>(null) }
+    var inlineConnectTaskId by remember { mutableStateOf<Long?>(null) }
     var dismissConnectSheet by remember { mutableStateOf(false) }
     var isSubmittingTask by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val connectSheetInstanceId = remember(connectSheetContent) { java.util.UUID.randomUUID().toString() }
+    val connectSheetInstanceId = remember(connectSheetContent != null) {
+        java.util.UUID.randomUUID().toString()
+    }
 
     LaunchedEffect(connectWifiSheetCloseRequest?.id) {
         connectWifiSheetCloseRequest?.let { request ->
@@ -177,17 +181,17 @@ fun WifiList(
                         )
                     }
                 }
-                if (groups.isEmpty()) {
-                    item(key = "wifi-empty") {
+                item(key = "wifi-empty") {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = groups.isEmpty()) {
                         // 空状态仍放在可滚动容器中，保证 PullToRefresh 能收到 nested scroll。
                         WifiEmptyContent(
                             modifier = Modifier.fillParentMaxSize(),
                         )
                     }
-                } else {
-                    groups.forEach { group ->
-                        item(key = group.ssid) {
-                            WifiGroupCard(
+                }
+                groups.forEach { group ->
+                    item(key = group.ssid) {
+                        WifiGroupCard(
                                 vm = vm,
                                 group = group,
                                 modifier = Modifier.animateItem(),
@@ -207,8 +211,7 @@ fun WifiList(
                                         ssid = group.displaySsid,
                                     )
                                 },
-                            )
-                        }
+                        )
                     }
                 }
             }
@@ -223,34 +226,30 @@ fun WifiList(
                 group.networks.any { it.BSSID.equals(ap.bssid, ignoreCase = true) } ||
                     group.virtualAccessPoint?.bssid.equals(ap.bssid, ignoreCase = true)
             },
-            onDeviceClick = { accessPoint, device ->
-                selectedSsid = null
-                selectedCaptureDevice = accessPoint.bssid to device.mac
+            deviceDetailContent = { accessPoint, device ->
+                val bssid = accessPoint.bssid
+                val mac = device.mac
+                MonitorDeviceDetailSheet(
+                    accessPoint = accessPoint,
+                    device = device,
+                    savedNetworks = savedNetworks,
+                    handshakeTest = handshakeTest,
+                    onClearHandshakeTestResult = vm.wifiList::clearMonitorHandshakeTestResult,
+                    onDismiss = { selectedSsid = null },
+                    onExport = { vm.wifiList.exportMonitorDevicePcap(bssid, mac, it) },
+                    onTestHandshake = { id, password -> vm.wifiList.testMonitorHandshake(bssid, mac, id, password) },
+                    onExportHandshake = { id -> vm.wifiList.exportMonitorHandshakePcap(bssid, mac, id) },
+                    onSaveHc22000 = onSaveHc22000,
+                    renderSheet = false,
+                )
             },
         )
-    }
-
-    selectedCaptureDevice?.let { (bssid, mac) ->
-        val accessPoint = capturedAccessPoints.firstOrNull { it.bssid == bssid }
-        val device = accessPoint?.devices?.firstOrNull { it.mac == mac }
-        if (accessPoint != null && device != null) {
-            MonitorDeviceDetailSheet(
-                accessPoint = accessPoint, device = device, savedNetworks = savedNetworks,
-                handshakeTest = handshakeTest,
-                onClearHandshakeTestResult = vm.wifiList::clearMonitorHandshakeTestResult,
-                onDismiss = { selectedCaptureDevice = null },
-                onExport = { vm.wifiList.exportMonitorDevicePcap(bssid, mac, it) },
-                onTestHandshake = { id, password -> vm.wifiList.testMonitorHandshake(bssid, mac, id, password) },
-                onExportHandshake = { vm.wifiList.exportMonitorHandshakePcap(bssid, mac, it) },
-                onSaveHc22000 = onSaveHc22000,
-            )
-        }
     }
 
     connectSheetContent?.let { content ->
         ConnectWifiTaskSheet(
             content = content,
-            trackedTask = null,
+            trackedTask = displayedTask?.takeIf { it.snapshot.taskId == inlineConnectTaskId },
             isSubmitting = isSubmittingTask,
             dismissRequested = dismissConnectSheet,
             onSubmit = { submission ->
@@ -283,8 +282,10 @@ fun WifiList(
                                             type = ConnectWifiTaskType.USE_SAVED_NETWORK,
                                             config = submission.config,
                                         )
-                                    }.onSuccess {
-                                        connectSheetContent = null
+                                    }.onSuccess { taskId ->
+                                        inlineConnectTaskId = taskId
+                                        onInlineConnectTaskChanged(taskId)
+                                        connectSheetContent = ConnectWifiSheetContent.Task
                                     }
                                 }
                             }
@@ -297,8 +298,10 @@ fun WifiList(
                                             password = submission.password,
                                             config = submission.config,
                                         )
-                                    }.onSuccess {
-                                        connectSheetContent = null
+                                    }.onSuccess { taskId ->
+                                        inlineConnectTaskId = taskId
+                                        onInlineConnectTaskChanged(taskId)
+                                        connectSheetContent = ConnectWifiSheetContent.Task
                                     }
                                 }
                             }
@@ -313,7 +316,11 @@ fun WifiList(
                                             name = submission.name,
                                             config = submission.config,
                                         )
-                                    }.onSuccess { connectSheetContent = null }
+                                    }.onSuccess { taskId ->
+                                        inlineConnectTaskId = taskId
+                                        onInlineConnectTaskChanged(taskId)
+                                        connectSheetContent = ConnectWifiSheetContent.Task
+                                    }
                                 }
                             }
                             is ConnectWifiSheetSubmission.SaveOnly -> {
@@ -339,8 +346,10 @@ fun WifiList(
                                             type = ConnectWifiTaskType.CONNECT_TO_NETWORK,
                                             config = submission.config,
                                         )
-                                    }.onSuccess {
-                                        connectSheetContent = null
+                                    }.onSuccess { taskId ->
+                                        inlineConnectTaskId = taskId
+                                        onInlineConnectTaskChanged(taskId)
+                                        connectSheetContent = ConnectWifiSheetContent.Task
                                     }
                                 }
                             }
@@ -351,6 +360,9 @@ fun WifiList(
             },
             onStop = vm::stopDisplayedTask,
             onDismiss = {
+                if (inlineConnectTaskId != null) vm.closeDisplayedTask()
+                inlineConnectTaskId = null
+                onInlineConnectTaskChanged(null)
                 connectSheetContent = null
                 dismissConnectSheet = false
                 isSubmittingTask = false
@@ -565,38 +577,39 @@ private fun WifiGroupCard(
                         softWrap = true,
                     )
 
-                    if (isConnected) {
-                        Spacer(Modifier.width(4.dp))
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = contentColor.copy(alpha = 0.1f),
-                        ) {
-                            Text(
-                                text = "已连接",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Medium,
-                                color = contentColor,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            )
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = isConnected) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(Modifier.width(4.dp))
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = contentColor.copy(alpha = 0.1f),
+                            ) {
+                                Text(
+                                    text = "已连接",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = contentColor,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
                         }
                     }
 
-                    val hasTags = group.accessPointCount > 1 || group.savedWifiList.isNotEmpty()
-                    if (hasTags) {
-                        Spacer(Modifier.width(4.dp))
+                    val tags = buildList {
                         if (group.accessPointCount > 1) {
-                            TagItem(
-                                text = group.accessPointCount.toString(),
-                                icon = Icons.Default.Layers,
-                                style = TagStyle.Tertiary
-                            )
+                            add(Triple(group.accessPointCount.toString(), TagStyle.Tertiary, Icons.Default.Layers))
                         }
                         if (group.savedWifiList.isNotEmpty()) {
-                            TagItem(
-                                text = "已保存",
-                                style = TagStyle.Primary
-                            )
+                            add(Triple("已保存", TagStyle.Primary, null))
                         }
+                    }
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                        visible = tags.isNotEmpty(),
+                    ) {
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    tags.forEach { (text, style, icon) ->
+                        TagItem(text = text, style = style, icon = icon)
                     }
                 }
 

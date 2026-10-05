@@ -47,13 +47,13 @@ fun DictionaryResourceItem(
                     text = res.name ?: res.id,
                     style = MaterialTheme.typography.bodyLarge
                 )
-                if (res.isBuiltin == 1) {
-                    TagItem(stringResource(R.string.dictionary_tag_builtin))
-                } else if (res.isBuiltin == 2) {
-                    TagItem(stringResource(R.string.dictionary_tag_overwrite))
+                val tagResources = buildList {
+                    if (res.isBuiltin == 1) add(R.string.dictionary_tag_builtin to TagType.Secondary)
+                    if (res.isBuiltin == 2) add(R.string.dictionary_tag_overwrite to TagType.Secondary)
+                    if (res.type == 1) add(R.string.dictionary_tag_script to TagType.Tertiary)
                 }
-                if (res.type == 1) {
-                    TagItem(text = stringResource(R.string.dictionary_tag_script), type = TagType.Tertiary)
+                tagResources.forEach { (textResource, type) ->
+                    TagItem(text = stringResource(textResource), type = type)
                 }
             }
             Text(
@@ -64,11 +64,14 @@ fun DictionaryResourceItem(
             )
         }
 
-        if (checkbox != null) {
-            Checkbox(
-                checked = checkbox,
-                onCheckedChange = null
-            )
-        }
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = checkbox,
+                label = "dictionary-resource-selection",
+            ) { checked ->
+                if (checked != null) Checkbox(
+                    checked = checked,
+                    onCheckedChange = null,
+                )
+            }
     }
 }

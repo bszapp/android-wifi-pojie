@@ -39,6 +39,9 @@ class ServiceInitializer(
                 require(old.versionCode == launchInfo.versionCode) {
                     "重复初始化版本编号不一致：old=${old.versionCode} new=${launchInfo.versionCode}"
                 }
+                require(old.serviceCrashReportPath == launchInfo.serviceCrashReportPath) {
+                    "重复初始化崩溃报告路径不一致"
+                }
                 return old
             }
 

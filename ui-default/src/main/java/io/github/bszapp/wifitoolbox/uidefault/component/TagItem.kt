@@ -46,9 +46,9 @@ fun TagItem(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            if (icon != null) {
+            icon?.let { visibleIcon ->
                 Icon(
-                    imageVector = icon,
+                    imageVector = visibleIcon,
                     contentDescription = null,
                     modifier = Modifier.size(11.dp),
                     tint = contentColor,

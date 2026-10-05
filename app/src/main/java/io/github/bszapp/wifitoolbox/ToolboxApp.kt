@@ -1,6 +1,8 @@
 package io.github.bszapp.wifitoolbox
 
 import android.app.Application
+import android.app.ActivityManager
+import android.os.Build
 import android.os.Process
 import android.util.Log
 import io.github.bszapp.wifitoolbox.hashcat.HashcatStartupCheck
@@ -8,6 +10,8 @@ import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.error.AppErrorFormatter
 import io.github.bszapp.wifitoolbox.error.ErrorReportManager
+import io.github.bszapp.wifitoolbox.error.ServiceCrashException
+import io.github.bszapp.wifitoolbox.error.ServiceCrashReport
 import io.github.bszapp.wifitoolbox.container.ContainerController
 import io.github.bszapp.wifitoolbox.contract.container.IContainerController
 import io.github.bszapp.wifitoolbox.contract.error.AppError
@@ -36,6 +40,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
+import java.io.BufferedOutputStream
+import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 class ToolboxApp : Application(), IAppController {
 
@@ -127,15 +136,17 @@ class ToolboxApp : Application(), IAppController {
     override fun onCreate() {
         super.onCreate()
         errorReports = ErrorReportManager(this)
-        errorReports.install(
-            captureLogs = { file ->
-                if (::appLogController.isInitialized) appLogController.saveCapturedLogs(file)
-            },
-            onFatalError = {
-                // Only App-owned work is cancelled. No service shutdown request is sent.
-                appScope.cancel()
-            },
-        )
+        if (isMainAppProcess()) {
+            errorReports.install(
+                captureLogs = { file ->
+                    if (::appLogController.isInitialized) appLogController.saveCapturedLogs(file)
+                },
+                onFatalError = {
+                    // Only App-owned work is cancelled. No service shutdown request is sent.
+                    appScope.cancel()
+                },
+            )
+        }
         // MainActivity selects report-only or normal startup from its launch Intent.
         // Cached reports alone never put a newly opened App into report mode.
     }
@@ -147,6 +158,18 @@ class ToolboxApp : Application(), IAppController {
 
     /** Start a fresh App process through normal onCreate; leave the service untouched. */
     fun restartFromErrorReport() = errorReports.restartApplication()
+
+    private fun isMainAppProcess(): Boolean {
+        val processName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Application.getProcessName()
+        } else {
+            getSystemService(ActivityManager::class.java)
+                ?.runningAppProcesses
+                ?.firstOrNull { it.pid == Process.myPid() }
+                ?.processName
+        }
+        return processName == packageName
+    }
 
     private fun initializeRuntime() {
         if (normalStartupStarted) return
@@ -205,12 +228,73 @@ class ToolboxApp : Application(), IAppController {
                 containerController.disconnect()
                 hashcatController.disconnect()
             },
+            onServiceCrash = ::captureServiceCrash,
         )
         AppControllerProvider.register(this)
         processLauncher.tryAutoReconnect()
         appScope.launch(Dispatchers.IO) {
             HashcatStartupCheck.run(this@ToolboxApp)
         }
+    }
+
+    /** Merge the service-created crash ZIP with the App log before disconnect clears service state. */
+    private fun captureServiceCrash(): Exception? {
+        val reportBase = File(cacheDir, SERVICE_CRASH_REPORT_BASE_NAME)
+        val report = runCatching { ServiceCrashReport.read(reportBase) }
+            .onFailure { Log.e(TAG, "读取服务未捕获异常报告失败", it) }
+            .getOrNull() ?: return null
+
+        val reportDirectory = File(cacheDir, "error_reports")
+        if (!reportDirectory.isDirectory && !reportDirectory.mkdirs()) {
+            return ServiceCrashException(report)
+        }
+        val timestamp = System.currentTimeMillis()
+        val archive = File(reportDirectory, "service_crash_$timestamp.zip")
+        val temporary = File(archive.path + ".tmp")
+        val appLogSnapshot = File(cacheDir, "service-crash-app.log")
+        appLogSnapshot.delete()
+        val hasAppLogSnapshot = if (::appLogController.isInitialized) {
+            runCatching {
+                appLogController.saveCapturedLogs(appLogSnapshot)
+                appLogSnapshot.isFile
+            }.onFailure { error -> Log.w(TAG, "保存崩溃时的应用日志快照失败", error) }
+                .getOrDefault(false)
+        } else false
+        val appEntries = if (hasAppLogSnapshot) emptyList() else {
+            if (::appLogController.isInitialized) appLogController.entries.value else emptyList()
+        }
+        runCatching {
+            temporary.delete()
+            ZipOutputStream(BufferedOutputStream(temporary.outputStream())).use { output ->
+                ZipInputStream(report.archiveFile.inputStream().buffered()).use { input ->
+                    while (true) {
+                        val entry = input.nextEntry ?: break
+                        output.putNextEntry(ZipEntry(entry.name))
+                        input.copyTo(output)
+                        output.closeEntry()
+                        input.closeEntry()
+                    }
+                }
+                output.putNextEntry(ZipEntry("应用日志.log"))
+                if (hasAppLogSnapshot) {
+                    appLogSnapshot.inputStream().buffered().use { it.copyTo(output) }
+                } else {
+                    appEntries.forEach { entry ->
+                        output.write(entry.rawLine.toByteArray(Charsets.UTF_8))
+                        output.write('\n'.code)
+                    }
+                }
+                output.closeEntry()
+            }
+            check(!archive.exists() || archive.delete()) { "无法替换旧的服务崩溃 ZIP" }
+            check(temporary.renameTo(archive)) { "无法保存完整服务崩溃 ZIP" }
+        }.onFailure { error ->
+            Log.e(TAG, "补入应用日志失败，保留服务进程生成的日志 ZIP", error)
+            temporary.delete()
+        }.also {
+            appLogSnapshot.delete()
+        }
+        return ServiceCrashException(report.copy(archiveFile = archive.takeIf { it.isFile } ?: report.archiveFile))
     }
 
     /** App 内唯一错误发布入口。UI 只监听 [errors]。 */
@@ -258,5 +342,6 @@ class ToolboxApp : Application(), IAppController {
 
     private companion object {
         const val TAG = "ToolboxApp"
+        const val SERVICE_CRASH_REPORT_BASE_NAME = "service-crash-report"
     }
 }

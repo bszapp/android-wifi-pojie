@@ -111,6 +111,7 @@ internal fun MonitorDeviceDetailSheet(
     onExportHandshake: (handshakeId: String) -> String,
     onSaveHc22000: (content: String, fileName: String) -> Unit,
     showDeviceDetails: Boolean = true,
+    renderSheet: Boolean = true,
     initialHandshakeId: String? = null,
     initialHandshakeAction: MonitorHandshakeAction? = null,
     onInitialActionFinished: () -> Unit = {},
@@ -178,14 +179,7 @@ internal fun MonitorDeviceDetailSheet(
         }
     }
 
-    SingleOverlayBottomSheet(
-        show = showDeviceDetails,
-        title = if (page == DeviceSheetPage.DETAILS) "设备详情" else "导出 PCAP",
-        allowDismiss = true,
-        enableNestedScroll = true,
-        renderInRootScaffold = true,
-        onDismissRequest = onDismiss,
-    ) {
+    val deviceDetailsContent: @Composable () -> Unit = {
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -329,6 +323,19 @@ internal fun MonitorDeviceDetailSheet(
             }
         }
     }
+    if (renderSheet) {
+        SingleOverlayBottomSheet(
+            show = showDeviceDetails,
+            title = if (page == DeviceSheetPage.DETAILS) "设备详情" else "导出 PCAP",
+            allowDismiss = true,
+            enableNestedScroll = true,
+            renderInRootScaffold = true,
+            onDismissRequest = onDismiss,
+            content = deviceDetailsContent,
+        )
+    } else if (showDeviceDetails) {
+        deviceDetailsContent()
+    }
 
     val activeHandshakeTestTarget = handshakeTestTarget?.let { selected ->
         device.handshakes.firstOrNull { it.id == selected.id } ?: selected
@@ -345,7 +352,11 @@ internal fun MonitorDeviceDetailSheet(
             if (initialHandshakeAction != null) onInitialActionFinished()
         },
         content = {
-            val target = activeHandshakeTestTarget
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = activeHandshakeTestTarget,
+                contentKey = { it?.id },
+                label = "monitor-handshake-test-target",
+            ) { target ->
             if (target != null) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
@@ -437,6 +448,7 @@ internal fun MonitorDeviceDetailSheet(
                     }
                 }
             }
+            }
         },
     )
 
@@ -453,7 +465,12 @@ internal fun MonitorDeviceDetailSheet(
             hc22000ActionConsent = false
         },
         content = {
-            if (hc22000ActionTarget != null) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = hc22000ActionTarget,
+                contentKey = { it?.id },
+                label = "monitor-hc22000-action-target",
+            ) { actionTarget ->
+            if (actionTarget != null) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -497,11 +514,11 @@ internal fun MonitorDeviceDetailSheet(
                             text = when (hc22000Action) { Hc22000Action.SAVE -> "保存"; Hc22000Action.RUN -> "继续"; else -> "复制" },
                             enabled = hc22000ActionConsent,
                             onClick = {
-                                val hc22000 = hc22000ActionTarget.hc22000.orEmpty()
+                                val hc22000 = actionTarget.hc22000.orEmpty()
                                 if (hc22000Action == Hc22000Action.SAVE) {
                                     onSaveHc22000(
                                         hc22000,
-                                        "${hc22000ActionTarget.startUnixMillis}.hc22000",
+                                        "${actionTarget.startUnixMillis}.hc22000",
                                     )
                                 } else if (hc22000Action == Hc22000Action.RUN) {
                                     handshakeTestTarget = null
@@ -525,6 +542,7 @@ internal fun MonitorDeviceDetailSheet(
                         )
                     }
                 }
+            }
             }
         },
     )
@@ -570,7 +588,12 @@ internal fun MonitorDeviceDetailSheet(
             if (initialHandshakeAction != null) onInitialActionFinished()
         },
         content = {
-            if (exportTarget != null) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = exportTarget,
+                contentKey = { it?.id },
+                label = "monitor-handshake-export-target",
+            ) { visibleExportTarget ->
+            if (visibleExportTarget != null) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -592,23 +615,23 @@ internal fun MonitorDeviceDetailSheet(
                             BasicComponent(title = "目标设备 MAC", summary = device.mac)
                             BasicComponent(
                                 title = "开始时间",
-                                summary = formatHandshakeStartTime(exportTarget.startUnixMillis),
+                                summary = formatHandshakeStartTime(visibleExportTarget.startUnixMillis),
                             )
                             BasicComponent(
                                 title = "持续时间",
-                                summary = formatHandshakeDuration(exportTarget.durationMillis),
+                                summary = formatHandshakeDuration(visibleExportTarget.durationMillis),
                             )
                             BasicComponent(
                                 title = "握手结果",
-                                summary = handshakeStatusText(exportTarget),
+                                summary = handshakeStatusText(visibleExportTarget),
                             )
                             BasicComponent(
                                 title = "已捕获阶段",
-                                summary = exportTarget.capturedSteps
+                                summary = visibleExportTarget.capturedSteps
                                     .joinToString("、", transform = ::handshakeStepText)
                                     .ifEmpty { "暂无" },
                             )
-                            exportTarget.failedAtStep?.let { failedAtStep ->
+                            visibleExportTarget.failedAtStep?.let { failedAtStep ->
                                 BasicComponent(
                                     title = "失败阶段",
                                     summary = handshakeStepText(failedAtStep),
@@ -616,11 +639,11 @@ internal fun MonitorDeviceDetailSheet(
                             }
                             BasicComponent(
                                 title = "M2 捕获次数",
-                                summary = exportTarget.m2AttemptCount.toString(),
+                                summary = visibleExportTarget.m2AttemptCount.toString(),
                             )
                             BasicComponent(
                                 title = "导出包数量",
-                                summary = exportTarget.exportPacketCount.toString(),
+                                summary = visibleExportTarget.exportPacketCount.toString(),
                             )
                         }
                     }
@@ -664,7 +687,7 @@ internal fun MonitorDeviceDetailSheet(
                             text = "导出",
                             enabled = handshakeExportConsent,
                             onClick = {
-                                onExportHandshake(exportTarget.id)
+                                onExportHandshake(visibleExportTarget.id)
                                 handshakeExportTarget = null
                                 handshakeExportConsent = false
                                 if (initialHandshakeAction != null) onInitialActionFinished()
@@ -674,6 +697,7 @@ internal fun MonitorDeviceDetailSheet(
                         )
                     }
                 }
+            }
             }
         },
     )
@@ -687,59 +711,67 @@ private fun HandshakeRecordsCard(
     onExport: (MonitorHandshakeRecord) -> Unit,
 ) {
     Card {
-        if (records.isEmpty()) {
-            BasicComponent(title = "暂无握手包")
-        } else {
-            records.forEachIndexed { index, record ->
-                BasicComponent(
-                    title = "握手包 ${index + 1}",
-                    summary = buildString {
-                        append("开始时间：")
-                        append(formatHandshakeStartTime(record.startUnixMillis))
-                        append("\n持续时间：")
-                        append(formatHandshakeDuration(record.durationMillis))
-                        append(" · ")
-                        append(handshakeStatusText(record))
-                        record.failedAtStep?.let { failedAtStep ->
-                            append("\n失败阶段：")
-                            append(handshakeStepText(failedAtStep))
-                        }
-                    },
-                    endActions = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (record.canValidate) {
-                                TextButton(
-                                    text = if (testing) "校验中" else "校验",
-                                    enabled = !testing,
-                                    onClick = { onTest(record) },
-                                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                                )
-                            }
-                            TextButton(
-                                text = "立即导出",
-                                onClick = { onExport(record) },
-                                colors = ButtonDefaults.textButtonColorsPrimary(),
-                            )
-                        }
-                    },
-                    bottomAction = when (record.captureQuality) {
-                        MonitorHandshakeCaptureQuality.DATA_INCOMPLETE -> ({
-                            Text(
-                                text = "数据不完整",
-                                color = MaterialTheme.colorScheme.error,
-                                style = MiuixTheme.textStyles.body2,
-                            )
-                        })
-                        MonitorHandshakeCaptureQuality.PARTIALLY_MISSING -> ({
-                            Text(
-                                text = "部分缺失",
-                                color = MaterialTheme.colorScheme.error,
-                                style = MiuixTheme.textStyles.body2,
-                            )
-                        })
-                        MonitorHandshakeCaptureQuality.COMPLETE -> null
-                    },
-                )
+        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+            targetState = records,
+            contentKey = { it.isEmpty() },
+            label = "monitor-handshake-records",
+        ) { visibleRecords ->
+            Column {
+                if (visibleRecords.isEmpty()) {
+                    BasicComponent(title = "暂无握手包")
+                } else {
+                    visibleRecords.forEachIndexed { index, record ->
+                        BasicComponent(
+                            title = "握手包 ${index + 1}",
+                            summary = buildString {
+                                append("开始时间：")
+                                append(formatHandshakeStartTime(record.startUnixMillis))
+                                append("\n持续时间：")
+                                append(formatHandshakeDuration(record.durationMillis))
+                                append(" · ")
+                                append(handshakeStatusText(record))
+                                record.failedAtStep?.let { failedAtStep ->
+                                    append("\n失败阶段：")
+                                    append(handshakeStepText(failedAtStep))
+                                }
+                            },
+                            endActions = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = record.canValidate) {
+                                        TextButton(
+                                            text = if (testing) "校验中" else "校验",
+                                            enabled = !testing,
+                                            onClick = { onTest(record) },
+                                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                                        )
+                                    }
+                                    TextButton(
+                                        text = "立即导出",
+                                        onClick = { onExport(record) },
+                                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                                    )
+                                }
+                            },
+                            bottomAction = when (record.captureQuality) {
+                                MonitorHandshakeCaptureQuality.DATA_INCOMPLETE -> ({
+                                    Text(
+                                        text = "数据不完整",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MiuixTheme.textStyles.body2,
+                                    )
+                                })
+                                MonitorHandshakeCaptureQuality.PARTIALLY_MISSING -> ({
+                                    Text(
+                                        text = "部分缺失",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MiuixTheme.textStyles.body2,
+                                    )
+                                })
+                                MonitorHandshakeCaptureQuality.COMPLETE -> null
+                            },
+                        )
+                    }
+                }
             }
         }
     }
@@ -866,7 +898,7 @@ private fun FrameGroupCard(
                 .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (selectedSubtypeIds != null) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = selectedSubtypeIds != null) {
                 Checkbox(
                     state = groupToggleState,
                     onClick = toggleGroup,
@@ -935,12 +967,20 @@ private fun FrameSubtypeRow(
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (selected != null) {
-            Checkbox(
-                state = if (selected) ToggleableState.On else ToggleableState.Off,
-                onClick = { onSelectedChange(!selected) },
-            )
-            Spacer(Modifier.width(12.dp))
+        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+            targetState = selected,
+            contentKey = { it == null },
+            label = "monitor-frame-subtype-selection",
+        ) { isSelected ->
+            if (isSelected != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        state = if (isSelected) ToggleableState.On else ToggleableState.Off,
+                        onClick = { onSelectedChange(!isSelected) },
+                    )
+                    Spacer(Modifier.width(12.dp))
+                }
+            }
         }
         Text(
             text = subtype.displayName,

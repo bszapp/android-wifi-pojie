@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.uidefault.screen
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -158,7 +159,12 @@ fun SettingsScreen(
                             .padding(bottom = 12.dp)
                             .fillMaxWidth(),
                     ) {
-                        if (!containerState.installed) {
+                io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                    targetState = containerState.installed,
+                    label = "container-install-options",
+                ) { installed ->
+                    Column {
+                        if (!installed) {
                             ArrowPreference(
                                 title = "安装容器系统",
                                 summary = "解压所选来源的容器系统",
@@ -213,6 +219,8 @@ fun SettingsScreen(
                                 onClick = { showUninstallConfirmation = true },
                             )
                         }
+                    }
+                }
                     }
                 }
 

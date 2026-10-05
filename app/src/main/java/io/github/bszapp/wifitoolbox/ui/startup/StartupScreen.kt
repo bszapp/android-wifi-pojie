@@ -1,6 +1,10 @@
 package io.github.bszapp.wifitoolbox.ui.startup
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,21 +14,77 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.bszapp.wifitoolbox.error.ServiceCrashException
+import io.github.bszapp.wifitoolbox.error.ServiceCrashReport
 import io.github.bszapp.wifitoolbox.contract.startup.RunningException
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
+import io.github.bszapp.wifitoolbox.contract.startup.StartupState
 import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus.*
 import io.github.bszapp.wifitoolbox.ui.component.TaggedLinkText
 import io.github.bszapp.wifitoolbox.uidefault.component.SplicedGroupItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val serviceCrash = state.errorException as? ServiceCrashException
+    val exportCrashArchive = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        val archive = serviceCrash?.report?.archiveFile
+        if (uri != null && archive?.isFile == true) {
+            scope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    val output = context.contentResolver.openOutputStream(uri, "wt")
+                        ?: error("无法打开 ZIP 保存位置")
+                    output.use { destination -> archive.inputStream().use { it.copyTo(destination) } }
+                }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        if (result.isSuccess) "崩溃日志已导出" else "导出崩溃日志失败：${result.exceptionOrNull()?.message}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+    StartupScreenContent(
+        state = state,
+        onLaunch = viewModel::launch,
+        onCancel = viewModel::cancel,
+        onExportCrashArchive = {
+            exportCrashArchive.launch("service_crash_${System.currentTimeMillis()}.zip")
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun StartupScreenContent(
+    state: StartupState,
+    onLaunch: (StartupMode) -> Unit,
+    onCancel: () -> Unit,
+    onExportCrashArchive: () -> Unit,
+) {
+    val serviceCrash = state.errorException as? ServiceCrashException
     val allModes = listOf(StartupMode.SHIZUKU, StartupMode.SHIZUKU_TERMINAL, StartupMode.ROOT)
 
     val contentMaxWidth = 480.dp
@@ -134,36 +194,83 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                                 .animateItem(),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            Icon(
-                                imageVector = if (state.errorException is RunningException) Icons.TwoTone.BugReport else Icons.TwoTone.ErrorOutline,
-                                contentDescription = "Error",
-                                modifier = Modifier
-                                    .size(120.dp)
-                                    .padding(bottom = 16.dp),
-                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
-                            )
-                            Text(
-                                text = if (state.errorException is RunningException) "崩溃啦" else "启动失败",
-                                style = MaterialTheme.typography.headlineMedium,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(bottom = 8.dp),
-                                fontWeight = FontWeight.SemiBold,
-                                textAlign = TextAlign.Center
-                            )
-                            TaggedLinkText(
-                                text = state.errorException?.message.toString(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 8.dp),
-                                textAlign = TextAlign.Center
-                            )
+                            if (serviceCrash != null) {
+                                Icon(
+                                    imageVector = Icons.TwoTone.BugReport,
+                                    contentDescription = "Error",
+                                    modifier = Modifier
+                                        .size(120.dp)
+                                        .padding(bottom = 16.dp),
+                                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                                )
+                                Text(
+                                    text = "崩溃啦",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(bottom = 8.dp),
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center,
+                                )
+                                Text(
+                                    text = serviceCrash.report.exceptionMessage,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 4.dp),
+                                    textAlign = TextAlign.Center,
+                                )
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = buildAnnotatedString {
+                                            withStyle(
+                                                SpanStyle(
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    textDecoration = TextDecoration.Underline,
+                                                ),
+                                            ) {
+                                                append("导出服务日志")
+                                            }
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier
+                                            .padding(top = 4.dp)
+                                            .clickable(onClick = onExportCrashArchive),
+                                    )
+                                }
+                            } else {
+                                Icon(
+                                    imageVector = if (state.errorException is RunningException) Icons.TwoTone.BugReport else Icons.TwoTone.ErrorOutline,
+                                    contentDescription = "Error",
+                                    modifier = Modifier
+                                        .size(120.dp)
+                                        .padding(bottom = 16.dp),
+                                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                                )
+                                Text(
+                                    text = if (state.errorException is RunningException) "崩溃啦" else "启动失败",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(bottom = 8.dp),
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center
+                                )
+                                TaggedLinkText(
+                                    text = state.errorException?.message.toString(),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 8.dp),
+                                    textAlign = TextAlign.Center
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            // 工作模式选项
             // 工作模式选项
             items(displayList, key = { it.name }) { mode ->
                 val index = displayList.indexOf(mode)
@@ -187,7 +294,7 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                     showArrow = state.status == IDLE,
                     isFirst = index == 0,
                     isEnd = index == displayList.size - 1,
-                    onClick = { if (state.status == IDLE) viewModel.launch(mode) },
+                    onClick = { if (state.status == IDLE) onLaunch(mode) },
                     modifier = Modifier.animateItem()
                 )
             }
@@ -209,7 +316,7 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Button(
-                                onClick = { viewModel.cancel() },
+                                onClick = onCancel,
                                 shape = RoundedCornerShape(16.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -226,7 +333,7 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
                             }
                             if (state.status == ERROR) {
                                 Button(
-                                    onClick = { state.selectedMode?.let { viewModel.launch(it) } },
+                                    onClick = { state.selectedMode?.let(onLaunch) },
                                     shape = RoundedCornerShape(16.dp),
                                     contentPadding = PaddingValues(vertical = 16.dp),
                                     modifier = Modifier.weight(1f)
@@ -249,4 +356,72 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
         }
     }
 
+}
+
+@Composable
+private fun StartupScreenPreviewContent(state: StartupState) {
+    MaterialTheme {
+        StartupScreenContent(
+            state = state,
+            onLaunch = {},
+            onCancel = {},
+            onExportCrashArchive = {},
+        )
+    }
+}
+
+@Preview(name = "启动页 · 空闲", showBackground = true)
+@Composable
+private fun StartupScreenIdlePreview() {
+    StartupScreenPreviewContent(StartupState())
+}
+
+@Preview(name = "启动页 · 启动中", showBackground = true)
+@Composable
+private fun StartupScreenLaunchingPreview() {
+    StartupScreenPreviewContent(
+        StartupState(
+            status = LAUNCHING,
+            selectedMode = StartupMode.SHIZUKU,
+        ),
+    )
+}
+
+@Preview(name = "启动页 · 运行成功", showBackground = true)
+@Composable
+private fun StartupScreenRunningPreview() {
+    StartupScreenPreviewContent(StartupState(status = RUNNING))
+}
+
+@Preview(name = "启动页 · 启动失败", showBackground = true)
+@Composable
+private fun StartupScreenErrorPreview() {
+    StartupScreenPreviewContent(
+        StartupState(
+            status = ERROR,
+            selectedMode = StartupMode.ROOT,
+            errorException = Exception("Root 权限不可用，请检查授权状态。"),
+        ),
+    )
+}
+
+@Preview(name = "启动页 · 服务崩溃", showBackground = true)
+@Composable
+private fun StartupScreenServiceCrashPreview() {
+    StartupScreenPreviewContent(
+        StartupState(
+            status = ERROR,
+            selectedMode = StartupMode.ROOT,
+            errorException = ServiceCrashException(
+                ServiceCrashReport(
+                    processId = "1234",
+                    thread = "main",
+                    exceptionType = "java.lang.IllegalStateException",
+                    exceptionMessage = "示例服务异常消息",
+                    stackTrace = "",
+                    archiveFile = File("preview-service-crash.zip"),
+                ),
+            ),
+        ),
+    )
 }

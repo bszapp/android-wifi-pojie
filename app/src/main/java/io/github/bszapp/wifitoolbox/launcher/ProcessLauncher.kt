@@ -13,6 +13,7 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.service.IMainService
 import io.github.bszapp.wifitoolbox.service.MainServiceStarter
 import io.github.bszapp.wifitoolbox.tools.AndroidApiClient
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,7 @@ class ProcessLauncher(
     private val onAndroidApiError: (operation: String, error: Throwable) -> Unit,
     private val onServiceConnected: (IMainService, AndroidApiClient) -> Unit,
     private val onServiceDisconnected: () -> Unit,
+    private val onServiceCrash: () -> Exception?,
     private val onBeforeServiceStop: suspend (IMainService) -> Unit,
 ) {
 
@@ -198,11 +200,16 @@ class ProcessLauncher(
                         stoppingBinder !== binder &&
                         _state.value.status == StartupStatus.RUNNING
                     ) {
+                        val crashException = runCatching {
+                            withContext(Dispatchers.IO) { onServiceCrash() }
+                        }.onFailure { error ->
+                            Log.e(TAG, "读取服务进程崩溃报告失败", error)
+                        }.getOrNull()
                         cleanupActive()
                         _state.value = StartupState(
                             status = StartupStatus.ERROR,
                             selectedMode = serviceMode,
-                            errorException = RunningException("服务进程被强制停止")
+                            errorException = crashException ?: RunningException("服务进程被强制停止")
                         )
                     }
                 }
@@ -397,12 +404,13 @@ class ProcessLauncher(
         return launcher to launcher.getServiceBinder(MainServiceStarter::class.java.name)
     }
 
-    private fun createStartupInfo(mode: StartupMode): StartupInfo = StartupInfo.forAppLaunch(
-        mode = mode,
-        uid = Process.myUid(),
-        versionName = BuildConfig.VERSION_NAME,
-        versionCode = BuildConfig.VERSION_CODE.toLong(),
-    )
+        private fun createStartupInfo(mode: StartupMode): StartupInfo = StartupInfo.forAppLaunch(
+            mode = mode,
+            uid = Process.myUid(),
+            versionName = BuildConfig.VERSION_NAME,
+            versionCode = BuildConfig.VERSION_CODE.toLong(),
+            serviceCrashReportPath = File(context.cacheDir, "service-crash-report").absolutePath,
+        )
 
     companion object {
         private const val TAG = "ProcessLauncher"

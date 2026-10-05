@@ -154,7 +154,7 @@ fun ResourceDetailContent(
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier.weight(1f, false)
                     )
-                    if (resource.type == 1) {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = resource.type == 1) {
                         TagItem(text = stringResource(R.string.dictionary_tag_script), modifier = Modifier.padding(4.dp))
                     }
                 }
@@ -182,9 +182,16 @@ fun ResourceDetailContent(
 
         DetailItem(stringResource(R.string.dictionary_description), resource.description)
 
-        if (resource.localPath != null) {
-            Spacer(Modifier.height(12.dp))
-            DetailItem(stringResource(R.string.dictionary_local_path), resource.localPath)
+        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+            targetState = resource.localPath,
+            label = "dictionary-local-path",
+        ) { localPath ->
+            if (localPath != null) {
+                Column {
+                    Spacer(Modifier.height(12.dp))
+                    DetailItem(stringResource(R.string.dictionary_local_path), localPath)
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(24.dp))

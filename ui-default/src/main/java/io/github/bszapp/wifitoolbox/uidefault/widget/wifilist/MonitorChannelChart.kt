@@ -271,7 +271,7 @@ internal fun MonitorChannelChart(
                     }
                 }
             }
-            if (networks.size > visible.size) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = networks.size > visible.size) {
                 Text("${networks.size - visible.size} 个接入点信号未知，未绘制", style = labelStyle, color = axisColor)
             }
         }

@@ -21,6 +21,12 @@ import io.github.bszapp.wifitoolbox.service.task.TaskManager
 import io.github.bszapp.wifitoolbox.service.container.ContainerSystemManager
 import io.github.bszapp.wifitoolbox.service.container.ContainerMountManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 @Keep
 open class MainService(
@@ -31,10 +37,17 @@ open class MainService(
     private val systemWifiLogRecorder = ServiceLogRecorders.systemWifi
 
     init {
+        installCrashReporter(serviceContext?.let {
+            File(it.cacheDir, SERVICE_CRASH_REPORT_BASE_NAME).absolutePath
+        }) { zip ->
+            writeLogcatEntry(zip, "日志.log", serviceLogRecorder)
+            writeLogcatEntry(zip, "系统wifi日志.log", systemWifiLogRecorder)
+        }
         ServiceLogRecorders.start()
     }
 
     constructor(startupInfo: StartupInfo) : this(serviceContext = null) {
+        installCrashReporter(startupInfo.serviceCrashReportPath)
         Log.d(TAG, "使用启动参数初始化服务")
         initializeFromStartupInfo(startupInfo)
     }
@@ -162,6 +175,80 @@ open class MainService(
 
     init {
         taskManager.registerCallback(notificationTaskCallback)
+        installCrashReporter(serviceContext?.let {
+            File(it.cacheDir, SERVICE_CRASH_REPORT_BASE_NAME).absolutePath
+        })
+    }
+
+    private fun installCrashReporter(
+        path: String?,
+        logsWriter: (ZipOutputStream) -> Unit = ::writeCrashLogs,
+    ) {
+        ServiceCrashReporter.install(path, logsWriter)
+    }
+
+    private fun writeCrashLogs(zip: ZipOutputStream) {
+        writeLogcatEntry(zip, "日志.log", serviceLogRecorder)
+        writeLogcatEntry(zip, "系统wifi日志.log", systemWifiLogRecorder)
+
+        zip.writeEntry("任务日志.log") {
+            val range = taskManager.globalLogRange()
+            var from = range.oldestAvailableId
+            while (from <= range.latestId) {
+                val batch = taskManager.globalLogs(from, minOf(from + LOG_BATCH_SIZE - 1L, range.latestId))
+                if (batch.entries.isEmpty()) break
+                batch.entries.forEach { entry ->
+                    val timestamp = TASK_LOG_TIME_FORMAT.get().format(Date(entry.timestampMillis))
+                    emit("$timestamp [任务 #${entry.taskId}] ${entry.text}")
+                }
+                from = batch.entries.last().globalLineId + 1L
+            }
+        }
+
+        terminalManager.terminalSnapshots().forEach { range ->
+            zip.writeEntry("终端${range.terminalId}.log") {
+                var from = range.oldestAvailableId
+                while (from <= range.latestId) {
+                    val batch = terminalManager.getLogs(
+                        range.terminalId,
+                        from,
+                        minOf(from + LOG_BATCH_SIZE - 1L, range.latestId),
+                    )
+                    if (batch.entries.isEmpty()) break
+                    batch.entries.forEach { entry -> emit(entry.text) }
+                    from = batch.entries.last().id + 1L
+                }
+            }
+        }
+    }
+
+    private fun writeLogcatEntry(zip: ZipOutputStream, name: String, recorder: LogcatRecorder) {
+        val (oldest, latest) = recorder.visibleRange()
+        zip.writeEntry(name) {
+            var from = oldest
+            while (from <= latest) {
+                val batch = recorder.getRange(from, minOf(from + LOG_BATCH_SIZE - 1L, latest))
+                if (batch.entries.isEmpty()) break
+                batch.entries.forEach { entry -> emit(entry.rawLine) }
+                from = batch.entries.last().id + 1L
+            }
+        }
+    }
+
+    private fun ZipOutputStream.writeEntry(name: String, content: CrashZipEntryWriter.() -> Unit) {
+        putNextEntry(ZipEntry(name))
+        try {
+            CrashZipEntryWriter(this).content()
+        } finally {
+            closeEntry()
+        }
+    }
+
+    private class CrashZipEntryWriter(private val zip: ZipOutputStream) {
+        fun emit(line: String) {
+            zip.write(line.toByteArray(Charsets.UTF_8))
+            zip.write('\n'.code)
+        }
     }
 
     private val wifiEventMonitor = ServiceWifiBroadcastLogger(
@@ -178,6 +265,7 @@ open class MainService(
 
     override fun initializeStartupInfo(startupInfo: StartupInfo) {
         communication.enforceStartupInitializer(startupInfo)
+        installCrashReporter(startupInfo.serviceCrashReportPath)
         Log.d(TAG, "应用补充启动参数")
         initializeFromStartupInfo(startupInfo)
     }
@@ -683,5 +771,10 @@ open class MainService(
 
     companion object {
         private const val TAG = "ToolboxMainService"
+        private const val SERVICE_CRASH_REPORT_BASE_NAME = "service-crash-report"
+        private const val LOG_BATCH_SIZE = 500L
+        private val TASK_LOG_TIME_FORMAT = object : ThreadLocal<SimpleDateFormat>() {
+            override fun initialValue() = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.getDefault())
+        }
     }
 }

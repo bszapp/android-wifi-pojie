@@ -843,7 +843,12 @@ private fun ConnectWifiTaskLogContent(
                 .fillMaxWidth()
                 .height(TASK_LOG_HEIGHT),
         ) {
-            if (entries.isEmpty()) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = entries,
+                contentKey = { it.isEmpty() },
+                label = "connect-wifi-task-log",
+            ) { visibleEntries ->
+            if (visibleEntries.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -870,7 +875,7 @@ private fun ConnectWifiTaskLogContent(
                         Arrangement.spacedBy(8.dp),
                 ) {
                     items(
-                        items = entries,
+                        items = visibleEntries,
                         key = {
                             it.taskLineId
                         },
@@ -884,6 +889,7 @@ private fun ConnectWifiTaskLogContent(
                         )
                     }
                 }
+            }
             }
         }
     }

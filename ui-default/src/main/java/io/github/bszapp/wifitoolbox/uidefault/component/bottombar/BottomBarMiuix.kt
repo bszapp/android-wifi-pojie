@@ -49,10 +49,14 @@ fun BottomBarMiuix(
         NavigationItem(label = destination.label, icon = destination.icon)
     }
 
-    if (!enableFloatingBottomBar) {
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = enableFloatingBottomBar,
+        modifier = modifier,
+        label = "navigation-bar-style",
+    ) { useFloatingBottomBar ->
+    if (!useFloatingBottomBar) {
         BlurredBar(blurBackdrop) {
             NavigationBar(
-                modifier = modifier,
                 color = if (blurBackdrop != null) Color.Transparent else MiuixTheme.colorScheme.surface,
             ) {
                 items.forEachIndexed { index, item ->
@@ -68,7 +72,7 @@ fun BottomBarMiuix(
         }
     } else {
         FloatingBottomBar(
-            modifier = modifier
+            modifier = Modifier
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -103,6 +107,7 @@ fun BottomBarMiuix(
                 }
             }
         }
+    }
     }
 }
 

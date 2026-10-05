@@ -17,6 +17,7 @@ object MainServiceStarter {
             ?: throw IllegalArgumentException("缺少启动信息参数")
         val startupInfo = StartupInfoParcelCodec.decode(startupInfoArg).requireLaunchInfo()
 
+        ServiceCrashReporter.install(startupInfo.serviceCrashReportPath) { }
         ServiceLogRecorders.start()
         Log.d(
             TAG,

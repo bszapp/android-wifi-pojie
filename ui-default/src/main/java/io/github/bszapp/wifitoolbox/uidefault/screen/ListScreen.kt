@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -164,6 +165,7 @@ fun ListScreen(
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
     var showStatistics by remember { mutableStateOf(false) }
+    var inlineConnectTaskId by remember { mutableStateOf<Long?>(null) }
     var showMonitorCommand by rememberSaveable { mutableStateOf(false) }
     var showCaptureChannels by rememberSaveable { mutableStateOf(false) }
     var pendingMonitorExport by remember { mutableStateOf<MonitorPcapExportResult?>(null) }
@@ -254,51 +256,55 @@ fun ListScreen(
                         }
                     },
                     actions = {
-                        if (selectedSource == WifiMode.NORMAL && modeState?.hybridScanEnabled == true) {
+                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                            visible = selectedSource == WifiMode.NORMAL && modeState?.hybridScanEnabled == true,
+                        ) {
                             IconButton(onClick = { taskActionScope.launch { runCatching { viewModel.startWpsPbcTask() } } }) {
                                 Icon(Icons.Rounded.WifiProtectedSetup, "启动 WPS-PBC", tint = colorScheme.onSurface)
                             }
                         }
-                        if (selectedSource == WifiMode.MONITOR) {
-                            IconButton(onClick = { viewModel.wifiList.exportAllMonitorPcap() }) {
-                                Icon(Icons.Rounded.Download, "导出全部 PCAP", tint = colorScheme.onSurface)
-                            }
-                            Box {
-                                val showClear = remember { mutableStateOf(false) }
-                                OverlayListPopup(
-                                    show = showClear.value,
-                                    popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
-                                    alignment = PopupPositionProvider.Align.TopEnd,
-                                    onDismissRequest = { showClear.value = false },
-                                ) {
-                                    ListPopupColumn {
-                                        // 在 Popup 内容组合中读取实时状态，展开后也持续刷新。
-                                        val statistics = modeState?.monitorStatistics
-                                        listOf(
-                                            "清空抓取数据（${formatMonitorByteCount(statistics?.recordedBytes ?: 0L)}）",
-                                            "仅清空非握手数据（${formatMonitorByteCount(statistics?.nonHandshakeBytes ?: 0L)}）",
-                                        ).forEachIndexed { index, title ->
-                                            DropdownImpl(text = title, isSelected = false, optionSize = 2, index = index,
-                                                onSelectedIndexChange = {
-                                                    showClear.value = false
-                                                    viewModel.wifiList.clearMonitorCapture(index == 1)
-                                                })
+                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = selectedSource == WifiMode.MONITOR) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { viewModel.wifiList.exportAllMonitorPcap() }) {
+                                    Icon(Icons.Rounded.Download, "导出全部 PCAP", tint = colorScheme.onSurface)
+                                }
+                                Box {
+                                    val showClear = remember { mutableStateOf(false) }
+                                    OverlayListPopup(
+                                        show = showClear.value,
+                                        popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
+                                        alignment = PopupPositionProvider.Align.TopEnd,
+                                        onDismissRequest = { showClear.value = false },
+                                    ) {
+                                        ListPopupColumn {
+                                            // 在 Popup 内容组合中读取实时状态，展开后也持续刷新。
+                                            val statistics = modeState?.monitorStatistics
+                                            listOf(
+                                                "清空抓取数据（${formatMonitorByteCount(statistics?.recordedBytes ?: 0L)}）",
+                                                "仅清空非握手数据（${formatMonitorByteCount(statistics?.nonHandshakeBytes ?: 0L)}）",
+                                            ).forEachIndexed { index, title ->
+                                                DropdownImpl(text = title, isSelected = false, optionSize = 2, index = index,
+                                                    onSelectedIndexChange = {
+                                                        showClear.value = false
+                                                        viewModel.wifiList.clearMonitorCapture(index == 1)
+                                                    })
+                                            }
                                         }
                                     }
+                                    IconButton(onClick = { showClear.value = true }, enabled = !controlsBusy && modeState?.clearingCapture != true) {
+                                        Icon(Icons.Rounded.DeleteSweep, "清理抓取数据", tint = colorScheme.onSurface)
+                                    }
                                 }
-                                IconButton(onClick = { showClear.value = true }, enabled = !controlsBusy && modeState?.clearingCapture != true) {
-                                    Icon(Icons.Rounded.DeleteSweep, "清理抓取数据", tint = colorScheme.onSurface)
+                                IconButton(onClick = { showStatistics = true }) {
+                                    Icon(Icons.Rounded.BarChart, "抓取统计", tint = colorScheme.onSurface)
                                 }
-                            }
-                            IconButton(onClick = { showStatistics = true }) {
-                                Icon(Icons.Rounded.BarChart, "抓取统计", tint = colorScheme.onSurface)
                             }
                         }
                         IconButton(onClick = { viewModel.wifiList.startScan() },
                             enabled = !controlsBusy && modeState?.clearingCapture != true) {
                             Icon(MiuixIcons.Refresh, "刷新", tint = colorScheme.onSurface)
                         }
-                        if (selectedSource == WifiMode.NORMAL) {
+                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = selectedSource == WifiMode.NORMAL) {
                             Box {
                                 val showMore = remember { mutableStateOf(false) }
                                 OverlayListPopup(
@@ -357,6 +363,7 @@ fun ListScreen(
                         .nestedScroll(scrollBehavior.nestedScrollConnection),
                     vm = viewModel,
                     listState = listState,
+                    onInlineConnectTaskChanged = { inlineConnectTaskId = it },
                     onSaveHc22000 = { content, fileName ->
                         pendingHc22000Export = PendingHc22000Export(content, fileName)
                         hc22000SaveLauncher.launch(fileName)
@@ -368,13 +375,15 @@ fun ListScreen(
                         bottom = bottomInnerPadding + if (selectedSource == WifiMode.MONITOR) 84.dp else 8.dp,
                     ),
                 )
-                if (selectedSource == WifiMode.MONITOR) {
+                io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                    visible = selectedSource == WifiMode.MONITOR,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = bottomInnerPadding + 16.dp),
+                ) {
                     FloatingActionButton(
                         onClick = {
                             if (modeState?.capturing == true) viewModel.wifiList.setMonitorCapture(false)
                             else showCaptureChannels = true
                         },
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = bottomInnerPadding + 16.dp),
                     ) {
                         Icon(
                             if (modeState?.capturing == true) Icons.Rounded.Stop else Icons.Rounded.AirplanemodeActive,
@@ -432,7 +441,9 @@ fun ListScreen(
     }
 
     displayedTask?.let { task ->
-        DisplayedTaskSheet(viewModel = viewModel, task = task)
+        if (task.snapshot.taskId != inlineConnectTaskId) {
+            DisplayedTaskSheet(viewModel = viewModel, task = task)
+        }
     }
 }
 
@@ -544,12 +555,18 @@ private fun MonitorStatisticsContent(
                 contentPadding = listContentPadding,
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
             ) {
-                if (statistics != null && page == 0) {
-                    item {
-                        SmallTitle(text = "数据总览")
-                    }
-                    item {
-                        MonitorModeOverviewCard(statistics = statistics, hopping = hopping)
+                item(key = "monitor-overview") {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                        targetState = statistics.takeIf { page == 0 },
+                        contentKey = { it == null },
+                        label = "monitor-overview-visibility",
+                    ) { visibleStatistics ->
+                        if (visibleStatistics != null) {
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                SmallTitle(text = "数据总览")
+                                MonitorModeOverviewCard(statistics = visibleStatistics, hopping = hopping)
+                            }
+                        }
                     }
                 }
                 stickyHeader(key = "monitor-mode-tabs-$page") {
@@ -562,16 +579,21 @@ private fun MonitorStatisticsContent(
                         },
                     )
                 }
-                if (page == 1) {
-                    if (connectionLogItems.isEmpty()) {
-                        item { Card { BasicComponent(title = "暂无连接日志") } }
-                    } else {
-                        items(
-                            count = connectionLogItems.size,
-                            key = { index -> connectionLogItems[index].stableKey },
-                        ) { index ->
+                item(key = "connection-log-empty") {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                        visible = page == 1 && connectionLogItems.isEmpty(),
+                    ) {
+                        Card { BasicComponent(title = "暂无连接日志") }
+                    }
+                }
+                items(
+                    count = connectionLogItems.size,
+                    key = { index -> connectionLogItems[index].stableKey },
+                ) { index ->
+                    val logItem = connectionLogItems[index]
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = page == 1) {
                             MonitorConnectionLogCard(
-                                item = connectionLogItems[index],
+                                item = logItem,
                                 onTestHandshake = { accessPoint, device, record ->
                                     handshakeAction = MonitorHandshakeActionSelection(
                                         bssid = accessPoint.bssid,
@@ -593,17 +615,26 @@ private fun MonitorStatisticsContent(
                                     disconnectionExportTarget = record
                                 },
                             )
-                        }
                     }
                 }
             }
         }
     }
 
-    handshakeAction?.let { selection ->
-        val accessPoint = accessPoints.firstOrNull { it.bssid == selection.bssid }
-        val device = accessPoint?.devices?.firstOrNull { it.mac == selection.deviceMac }
-        if (accessPoint != null && device != null) {
+    val handshakeDetailTarget = handshakeAction?.let { selection ->
+        accessPoints.firstOrNull { it.bssid == selection.bssid }?.let { accessPoint ->
+            accessPoint.devices.firstOrNull { it.mac == selection.deviceMac }?.let { device ->
+                Triple(selection, accessPoint, device)
+            }
+        }
+    }
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = handshakeDetailTarget,
+        contentKey = { it?.first },
+        label = "monitor-handshake-detail",
+    ) { detail ->
+        if (detail != null) {
+            val (selection, accessPoint, device) = detail
             MonitorDeviceDetailSheet(
                 accessPoint = accessPoint,
                 device = device,
@@ -760,7 +791,7 @@ private fun MonitorConnectionLogCard(
                             horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (item.record.canValidate) {
+                            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = item.record.canValidate) {
                                 TextButton(
                                     text = "校验",
                                     onClick = {
@@ -836,35 +867,41 @@ private fun MonitorDisconnectionExportDialog(
         summary = "将导出这一次解除认证或解除关联事件的原始 802.11 数据包。",
         onDismissRequest = onDismiss,
         content = {
-            if (record != null) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = record?.let { it to accessPoint },
+                contentKey = { it == null },
+                label = "disconnection-export-detail",
+            ) { exportDetail ->
+            if (exportDetail != null) {
+                val (visibleRecord, visibleAccessPoint) = exportDetail
                 Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)) {
                     Card {
                         BasicComponent(
                             title = "网络名称",
-                            summary = accessPoint?.ssid
-                                ?: accessPoint?.let(::monitorUnknownName)
+                            summary = visibleAccessPoint?.ssid
+                                ?: visibleAccessPoint?.let(::monitorUnknownName)
                                 ?: "<未知网络>",
                         )
-                        BasicComponent(title = "接入点 MAC", summary = record.bssid)
-                        BasicComponent(title = "目标设备 MAC", summary = record.deviceMac)
+                        BasicComponent(title = "接入点 MAC", summary = visibleRecord.bssid)
+                        BasicComponent(title = "目标设备 MAC", summary = visibleRecord.deviceMac)
                         BasicComponent(
                             title = "发生时间",
-                            summary = formatHandshakeStartTime(record.timestampUnixMillis),
+                            summary = formatHandshakeStartTime(visibleRecord.timestampUnixMillis),
                         )
                         BasicComponent(
                             title = "事件类型",
-                            summary = when (record.type) {
+                            summary = when (visibleRecord.type) {
                                 MonitorDisconnectionType.DISASSOCIATION -> "解除关联"
                                 MonitorDisconnectionType.DEAUTHENTICATION -> "解除认证"
                             },
                         )
                         BasicComponent(
                             title = "原因码",
-                            summary = record.reasonCode?.toString() ?: "未知",
+                            summary = visibleRecord.reasonCode?.toString() ?: "未知",
                         )
                         BasicComponent(
                             title = "导出包数量",
-                            summary = record.exportPacketCount.toString(),
+                            summary = visibleRecord.exportPacketCount.toString(),
                         )
                     }
                     Row(
@@ -894,12 +931,13 @@ private fun MonitorDisconnectionExportDialog(
                         TextButton(
                             text = "导出",
                             enabled = consent,
-                            onClick = { onExport(record) },
+                            onClick = { onExport(visibleRecord) },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.textButtonColorsPrimary(),
                         )
                     }
                 }
+            }
             }
         },
     )
@@ -996,14 +1034,18 @@ internal fun MonitorAccessPointCard(
                     fontWeight = FontWeight.Medium,
                     color = colorScheme.onSurface,
                 )
-                if (
-                    accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN &&
-                    !accessPoint.ssid.isNullOrBlank()
-                ) {
-                    MonitorMapBadge(text = "隐藏网络")
+                val badges = buildList {
+                    if (accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN &&
+                        !accessPoint.ssid.isNullOrBlank()
+                    ) {
+                        add("隐藏网络")
+                    }
+                    if (handshakeDeviceCount > 0) {
+                        add("${handshakeDeviceCount}台成功握手")
+                    }
                 }
-                if (handshakeDeviceCount > 0) {
-                    MonitorMapBadge(text = "${handshakeDeviceCount}台成功握手")
+                badges.forEach { badge ->
+                    MonitorMapBadge(text = badge)
                 }
             }
             Text(
@@ -1020,44 +1062,22 @@ internal fun MonitorAccessPointCard(
                             record.captureQuality !=
                             MonitorHandshakeCaptureQuality.DATA_INCOMPLETE
                     }
-                    if (device.name == null) {
-                        BasicComponent(
-                            title = device.mac,
-                            startAction = {
-                                MonitorDeviceIcon()
-                            },
-                            endActions = if (handshakeCount > 0) {
-                                {
-                                    MonitorMapBadge(
-                                        text = "${handshakeCount}次成功握手",
-                                        withStartPadding = false,
-                                    )
-                                }
-                            } else {
-                                null
-                            },
-                            onClick = { onDeviceClick(device) },
-                        )
-                    } else {
-                        BasicComponent(
-                            title = device.name,
-                            summary = device.mac,
-                            startAction = {
-                                MonitorDeviceIcon()
-                            },
-                            endActions = if (handshakeCount > 0) {
-                                {
-                                    MonitorMapBadge(
-                                        text = "${handshakeCount}次成功握手",
-                                        withStartPadding = false,
-                                    )
-                                }
-                            } else {
-                                null
-                            },
-                            onClick = { onDeviceClick(device) },
-                        )
-                    }
+                    BasicComponent(
+                        title = device.name ?: device.mac,
+                        summary = device.name?.let { device.mac },
+                        startAction = { MonitorDeviceIcon() },
+                        endActions = {
+                            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                                visible = handshakeCount > 0,
+                            ) {
+                                MonitorMapBadge(
+                                    text = "${handshakeCount}次成功握手",
+                                    withStartPadding = false,
+                                )
+                            }
+                        },
+                        onClick = { onDeviceClick(device) },
+                    )
                 }
             }
         }

@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.Process
 import android.util.Log
+import java.io.File
 import io.github.bszapp.wifitoolbox.BuildConfig
 import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.startup.StartupInfo
@@ -196,6 +197,7 @@ class ShizukuProcessLauncher(private val context: Context) : AutoCloseable {
             uid = Process.myUid(),
             versionName = BuildConfig.VERSION_NAME,
             versionCode = BuildConfig.VERSION_CODE.toLong(),
+            serviceCrashReportPath = File(context.cacheDir, "service-crash-report").absolutePath,
         )
         val startupInfoArg = shellQuote(StartupInfoParcelCodec.encode(startupInfo))
 

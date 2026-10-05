@@ -99,31 +99,37 @@ internal fun WpsPbcTaskSheet(
                     else -> WpsTaskLogsPage(trackedTask)
                 }
             }
-            if (running && progress != null) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = progress?.takeIf { running },
+                contentKey = { it == null },
+                label = "wps-task-options",
+            ) { visibleProgress ->
+            if (visibleProgress != null) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     WpsOptionRow(
                         title = "持续捕获",
-                        checked = progress.continuousCapture,
+                        checked = visibleProgress.continuousCapture,
                         onCheckedChange = onContinuousCaptureChange,
                     )
                     WpsOptionRow(
                         title = "自动保存",
-                        checked = progress.autoSaveToDevice,
+                        checked = visibleProgress.autoSaveToDevice,
                         onCheckedChange = onAutoSaveToDeviceChange,
                     )
                     WpsOptionRow(
                         title = "不使用完整协议",
-                        checked = progress.useIncompleteProtocol,
+                        checked = visibleProgress.useIncompleteProtocol,
                         onCheckedChange = onUseIncompleteProtocolChange,
                     )
                     WpsOptionRow(
                         title = "忽略重复握手的设备",
-                        checked = progress.ignoreRepeatedDevices,
+                        checked = visibleProgress.ignoreRepeatedDevices,
                         onCheckedChange = onIgnoreRepeatedDevicesChange,
                     )
                 }
             }
-            if (running) {
+            }
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = running) {
                 TextButton(
                     text = "停止",
                     onClick = onStop,
@@ -178,7 +184,12 @@ private fun WpsTaskLogsPage(task: TrackedTaskState?) {
     LaunchedEffect(latestId) {
         if (entries.isNotEmpty()) listState.scrollToItem(entries.lastIndex)
     }
-    if (entries.isEmpty()) {
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = entries,
+        contentKey = { it.isEmpty() },
+        label = "wps-task-log-content",
+    ) { visibleEntries ->
+    if (visibleEntries.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
                 text = "暂无日志",
@@ -194,7 +205,7 @@ private fun WpsTaskLogsPage(task: TrackedTaskState?) {
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(entries, key = { it.taskLineId }) { entry ->
+                items(visibleEntries, key = { it.taskLineId }) { entry ->
                     Text(
                         text = entry.text,
                         color = MiuixTheme.colorScheme.onSurface,
@@ -203,6 +214,7 @@ private fun WpsTaskLogsPage(task: TrackedTaskState?) {
                 }
             }
         }
+    }
     }
 }
 

@@ -186,7 +186,7 @@ fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
         }
     }
 
-    if (state.showExitConfirmDialog) {
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = state.showExitConfirmDialog) {
         AlertDialog(
             onDismissRequest = { state.showExitConfirmDialog = false },
             title = { Text(stringResource(R.string.dictionary_default_alert_title)) },
@@ -203,11 +203,15 @@ fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
             },
         )
     }
-    if (state.errorMessage != null) {
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = state.errorMessage,
+        label = "dictionary-editor-error",
+    ) { errorMessage ->
+        if (errorMessage != null) {
         AlertDialog(
             onDismissRequest = { state.errorMessage = null },
             title = { Text(stringResource(R.string.dictionary_save_failed)) },
-            text = { Text(state.errorMessage.orEmpty()) },
+            text = { Text(errorMessage) },
             confirmButton = {
                 TextButton(onClick = {
                     state.errorMessage = null
@@ -217,5 +221,6 @@ fun DictionaryEditorPage(state: DictionaryEditorState, useDarkTheme: Boolean) {
                 }
             },
         )
+        }
     }
 }

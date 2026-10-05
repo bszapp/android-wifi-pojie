@@ -2,9 +2,15 @@ package io.github.bszapp.wifitoolbox.uidefault.hashcat
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -98,13 +104,25 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
         title = if (sheet.page == HashcatSheetPage.DETAIL) "WPA Hashcat 任务" else "运行 WPA Hashcat",
         onDismissRequest = viewModel::dismiss,
     ) {
+        AnimatedContent(
+            targetState = sheet.page,
+            modifier = Modifier.fillMaxWidth().heightIn(max = sheetHeight),
+            contentAlignment = Alignment.TopStart,
+            transitionSpec = {
+                val movingForward = targetState.ordinal > initialState.ordinal
+                (slideInHorizontally(tween(260)) { width -> if (movingForward) width else -width } togetherWith
+                    slideOutHorizontally(tween(260)) { width -> if (movingForward) -width else width })
+                    .using(SizeTransform(clip = true) { _, _ -> tween(260) })
+            },
+            label = "HashcatSheetPage",
+        ) { page ->
         Column(Modifier.fillMaxWidth().heightIn(max = sheetHeight), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
                 contentPadding = PaddingValues(bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                when (sheet.page) {
+                when (page) {
                     HashcatSheetPage.PREPARATION -> {
                         if (kernels?.state == HashcatKernelState.COMPILING) item { KernelProgress(kernels!!) }
                         else {
@@ -174,10 +192,10 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                 sheet.message?.let { message -> item { Text(message, style = MiuixTheme.textStyles.body2) } }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TextButton(if (sheet.page == HashcatSheetPage.DICTIONARIES) "上一步" else "关闭",
-                    onClick = { if (sheet.page == HashcatSheetPage.DICTIONARIES) viewModel.previous() else viewModel.dismiss() },
+                TextButton(if (page == HashcatSheetPage.DICTIONARIES) "上一步" else "关闭",
+                    onClick = { if (page == HashcatSheetPage.DICTIONARIES) viewModel.previous() else viewModel.dismiss() },
                     modifier = Modifier.weight(1f), enabled = !sheet.busy)
-                when (sheet.page) {
+                when (page) {
                     HashcatSheetPage.PREPARATION -> if (kernels?.state != HashcatKernelState.COMPILING) TextButton(
                         "继续", onClick = viewModel::compileKernels, enabled = connected && sheet.agreed && !sheet.busy,
                         modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
@@ -194,6 +212,7 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                 }
             }
             Spacer(Modifier.height(safeBottom))
+        }
         }
     }
 }
@@ -286,16 +305,21 @@ private fun MemoryPanel(
             }
             val reserved = memory.tasks.filter { it.taskId != taskId }.sumOf { (it.budgetMiB?.toLong() ?: 0) * HASHCAT_MIB }
             Text("其他运行任务预算 ${memorySize(reserved)} · 当前可分配 ${memorySize(memory.assignableBytes(taskId))}", style = MiuixTheme.textStyles.body2)
-            if (onSelect != null) {
-                Text(if (budget > 0) "本任务计算内存预算：$budget MiB（虚线为预览）" else "请使用滑块选择本任务的内存预算", style = MiuixTheme.textStyles.body2)
-                if (maximum > 1) Slider(value = budget.coerceIn(1, maximum).toFloat(),
-                    onValueChange = { onSelect(it.toInt().coerceIn(1, maximum)) },
-                    valueRange = 1f..maximum.toFloat(), enabled = enabled)
-                else if (maximum == 1) TextButton("分配 1 MiB", onClick = { onSelect(1) }, enabled = enabled)
-                if (budget > maximum) Text("所选预算超过当前可分配额度，请调整后再运行。", style = MiuixTheme.textStyles.body2)
-                Text("预算限制计算缓冲区；PSS 不包含驱动未映射的独立 GPU 内存。预算过小可能无法运行，运行中修改需保存恢复点后继续。",
-                    style = MiuixTheme.textStyles.footnote1)
-            } else if (selectedMiB != null) Text("本任务计算内存预算：$selectedMiB MiB", style = MiuixTheme.textStyles.body2)
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = onSelect != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (budget > 0) "本任务计算内存预算：$budget MiB（虚线为预览）" else "请使用滑块选择本任务的内存预算", style = MiuixTheme.textStyles.body2)
+                    if (maximum > 1) Slider(value = budget.coerceIn(1, maximum).toFloat(),
+                        onValueChange = { onSelect?.invoke(it.toInt().coerceIn(1, maximum)) },
+                        valueRange = 1f..maximum.toFloat(), enabled = enabled)
+                    else if (maximum == 1) TextButton("分配 1 MiB", onClick = { onSelect?.invoke(1) }, enabled = enabled)
+                    if (budget > maximum) Text("所选预算超过当前可分配额度，请调整后再运行。", style = MiuixTheme.textStyles.body2)
+                    Text("预算限制计算缓冲区；PSS 不包含驱动未映射的独立 GPU 内存。预算过小可能无法运行，运行中修改需保存恢复点后继续。",
+                        style = MiuixTheme.textStyles.footnote1)
+                }
+            }
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = onSelect == null && selectedMiB != null) {
+                if (selectedMiB != null) Text("本任务计算内存预算：$selectedMiB MiB", style = MiuixTheme.textStyles.body2)
+            }
             Text("GPU 驱动未映射到进程的内存计入系统部分，任务部分采用实测 PSS。", style = MiuixTheme.textStyles.footnote1)
         }
     }
@@ -317,17 +341,45 @@ private fun memorySize(bytes: Long): String {
 @Composable
 private fun Progress(task: HashcatTaskSnapshot) {
     Text(task.step, style = MiuixTheme.textStyles.body2)
-    if (task.stepTotal > 0) {
-        val label = if (task.stepUnit == "PBKDF2") "当前批次 PBKDF2 计算进度" else "步骤进度"
-        Text("$label：${task.stepCompleted}/${task.stepTotal}${if (task.stepUnit == "BYTES") " B" else ""}", style = MiuixTheme.textStyles.body2)
-        LinearProgressIndicator(progress = (task.stepCompleted.toFloat() / task.stepTotal).coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
-    } else if (task.active && task.total == 0L) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-    if (task.total > 0) {
-        val percent = task.completed.toDouble() * 100 / task.total
-        Text("${task.completed}/${task.total}${if (task.progressUnit == "BYTES") " B" else ""} · ${String.format(Locale.ROOT, "%.2f", percent)}%", style = MiuixTheme.textStyles.body2)
-        LinearProgressIndicator(progress = (task.completed.toFloat() / task.total).coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = task.takeIf { it.stepTotal > 0 || (it.active && it.total == 0L) },
+        contentKey = { it?.let { state -> state.stepTotal > 0 } },
+        label = "hashcat-primary-progress",
+    ) { progressTask ->
+        if (progressTask != null) {
+            if (progressTask.stepTotal > 0) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val label = if (progressTask.stepUnit == "PBKDF2") "当前批次 PBKDF2 计算进度" else "步骤进度"
+                    Text("$label：${progressTask.stepCompleted}/${progressTask.stepTotal}${if (progressTask.stepUnit == "BYTES") " B" else ""}", style = MiuixTheme.textStyles.body2)
+                    LinearProgressIndicator(progress = (progressTask.stepCompleted.toFloat() / progressTask.stepTotal).coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
+                }
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+        }
     }
-    if (task.speed > 0) Text("${task.speed} H/s · 剩余 ${task.remainingSeconds?.let { "${it}秒" } ?: "计算中"}", style = MiuixTheme.textStyles.body2)
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = task.takeIf { it.total > 0 },
+        contentKey = { it == null },
+        label = "hashcat-file-progress",
+    ) { fileTask ->
+        if (fileTask != null) {
+            val percent = fileTask.completed.toDouble() * 100 / fileTask.total
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("${fileTask.completed}/${fileTask.total}${if (fileTask.progressUnit == "BYTES") " B" else ""} · ${String.format(Locale.ROOT, "%.2f", percent)}%", style = MiuixTheme.textStyles.body2)
+                LinearProgressIndicator(progress = (fileTask.completed.toFloat() / fileTask.total).coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+        targetState = task.takeIf { it.speed > 0 },
+        contentKey = { it == null },
+        label = "hashcat-speed",
+    ) { speedTask ->
+        if (speedTask != null) {
+            Text("${speedTask.speed} H/s · 剩余 ${speedTask.remainingSeconds?.let { "${it}秒" } ?: "计算中"}", style = MiuixTheme.textStyles.body2)
+        }
+    }
 }
 private fun HashcatTaskState.label() = when (this) {
     HashcatTaskState.RUNNING -> "运行中"

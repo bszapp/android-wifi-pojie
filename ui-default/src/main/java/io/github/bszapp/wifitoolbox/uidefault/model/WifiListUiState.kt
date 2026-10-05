@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -52,6 +53,32 @@ class WifiListUiState(
     private var previousWifiState: WifiState? = null
 
     init {
+        scope.launch {
+            var previousMode = modeState.value?.mode
+            modeState.collect { current ->
+                val currentMode = current?.mode ?: return@collect
+                val enteredMonitorMode =
+                    previousMode == WifiMode.NORMAL && currentMode == WifiMode.MONITOR
+                previousMode = currentMode
+
+                if (enteredMonitorMode) {
+                    val operationId = current.modeSwitch?.operationId
+                    scope.launch {
+                        val readyState = modeState.first { latest ->
+                            latest == null || latest.mode != WifiMode.MONITOR ||
+                                (latest.modeSwitch?.isRunning != true &&
+                                    latest.monitorStatistics != null)
+                        }
+                        if (
+                            readyState?.mode == WifiMode.MONITOR &&
+                            (operationId == null || readyState.modeSwitch?.operationId == operationId)
+                        ) {
+                            startScan()
+                        }
+                    }
+                }
+            }
+        }
         scope.launch {
             state.collect { current ->
                 val previous = previousWifiState

@@ -51,7 +51,12 @@ fun DictionaryPage(state: DictionaryState) {
         },
         contentWindowInsets = WindowInsets(0)
     ) { paddingValues ->
-        if (state.resources.isEmpty()) {
+        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+            targetState = state.resources.toList(),
+            contentKey = { it.isEmpty() },
+            label = "dictionary-empty-state",
+        ) { visibleResources ->
+        if (visibleResources.isEmpty()) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -71,7 +76,7 @@ fun DictionaryPage(state: DictionaryState) {
                 contentPadding = PaddingValues(bottom = 88.dp)
             ) {
                 items(
-                    items = state.resources,
+                    items = visibleResources,
                     key = { it.id }
                 ) { res ->
                     DictionaryResourceItem(
@@ -85,6 +90,7 @@ fun DictionaryPage(state: DictionaryState) {
                     )
                 }
             }
+        }
         }
 
         ResourceDetailSheet(
@@ -115,9 +121,13 @@ fun DictionaryPage(state: DictionaryState) {
         )
 
         val currentDraft = state.draftState
-        if (state.showEditDialog && currentDraft != null) {
+        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+            targetState = currentDraft.takeIf { state.showEditDialog },
+            label = "dictionary-edit-dialog",
+        ) { editDraft ->
+        if (editDraft != null) {
             EditResourceDialog(
-                draft = currentDraft,
+                draft = editDraft,
                 isNew = state.originalIdForEdit == null,
                 onDismiss = { state.showEditDialog = false },
                 onContentEdit = { updatedDraft ->
@@ -152,6 +162,7 @@ fun DictionaryPage(state: DictionaryState) {
                     }
                 }
             )
+        }
         }
 
         AddResourceDialog(

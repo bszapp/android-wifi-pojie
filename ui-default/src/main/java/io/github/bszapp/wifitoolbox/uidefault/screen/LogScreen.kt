@@ -435,7 +435,7 @@ fun LogScreen(
             when (val logPage = pages.getOrNull(page)) {
                 null -> Unit
                 LogPage.Service -> {
-                    if (rawViewEnabled) {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = rawViewEnabled) {
                         RawLogView(
                             entries = entries,
                             text = ServiceLogEntry::rawLine,
@@ -447,7 +447,8 @@ fun LogScreen(
                             endPadding = innerPadding.calculateEndPadding(layoutDirection),
                             bottomPadding = bottomInnerPadding,
                         )
-                    } else {
+                    }
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = !rawViewEnabled) {
                         LogCardList(
                             entries = entries,
                             listState = listState,
@@ -461,7 +462,7 @@ fun LogScreen(
                     }
                 }
                 LogPage.SystemWifi -> {
-                    if (systemWifiRawViewEnabled) {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = systemWifiRawViewEnabled) {
                         RawLogView(
                             entries = systemWifiEntries,
                             text = ServiceLogEntry::rawLine,
@@ -473,7 +474,8 @@ fun LogScreen(
                             endPadding = innerPadding.calculateEndPadding(layoutDirection),
                             bottomPadding = bottomInnerPadding,
                         )
-                    } else {
+                    }
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = !systemWifiRawViewEnabled) {
                         LogCardList(
                             entries = systemWifiEntries,
                             listState = systemWifiListState,
@@ -500,7 +502,7 @@ fun LogScreen(
                     )
                 }
                 LogPage.App -> {
-                    if (appRawViewEnabled) {
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = appRawViewEnabled) {
                         RawLogView(
                             entries = appEntries,
                             text = ServiceLogEntry::rawLine,
@@ -512,7 +514,8 @@ fun LogScreen(
                             endPadding = innerPadding.calculateEndPadding(layoutDirection),
                             bottomPadding = bottomInnerPadding,
                         )
-                    } else {
+                    }
+                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = !appRawViewEnabled) {
                         LogCardList(
                             entries = appEntries,
                             listState = appListState,
@@ -860,14 +863,22 @@ private fun LogCardList(
         overscrollEffect = null,
     ) {
         items(entries, key = ServiceLogEntry::id) { entry ->
-            if (entry.tag == "Unknown") {
-                UnknownLogLine(entry)
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = entry,
+                contentKey = { it.id },
+                label = "service-log-line-${entry.id}",
+            ) { visibleEntry ->
+            if (visibleEntry.tag == "Unknown") {
+                UnknownLogLine(visibleEntry)
             } else {
-                LogEntryCard(
-                    entry = entry,
-                    fallbackPid = fallbackPid,
-                )
-                Spacer(Modifier.height(4.dp))
+                Column {
+                    LogEntryCard(
+                        entry = visibleEntry,
+                        fallbackPid = fallbackPid,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
             }
         }
     }
@@ -1039,14 +1050,22 @@ private fun LogEntryCard(
                     overflow = TextOverflow.Ellipsis,
                     color = colorScheme.onSurface,
                 )
-                if (parsed != null) {
-                    Spacer(Modifier.size(8.dp))
-                    Text(
-                        text = parsed.timestamp,
-                        style = MiuixTheme.textStyles.footnote2,
-                        maxLines = 1,
-                        color = colorScheme.onSurfaceVariantSummary,
-                    )
+                io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                    targetState = parsed?.timestamp,
+                    contentKey = { it == null },
+                    label = "raw-log-timestamp-${entry.id}",
+                ) { timestamp ->
+                if (timestamp != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Spacer(Modifier.size(8.dp))
+                        Text(
+                            text = timestamp,
+                            style = MiuixTheme.textStyles.footnote2,
+                            maxLines = 1,
+                            color = colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
+                }
                 }
             }
             Text(

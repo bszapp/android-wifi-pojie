@@ -562,10 +562,14 @@ private fun ThemePreviewCard(
                 }
             }
 
-            if (enableFloatingBottomBar) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = enableFloatingBottomBar,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                label = "bottom-bar-preview",
+            ) { floatingBottomBar ->
+            if (floatingBottomBar) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
                         .padding(bottom = 8.dp),
                 ) {
                     Row(
@@ -594,7 +598,6 @@ private fun ThemePreviewCard(
             } else {
                 Column(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
                         .fillMaxWidth(),
                 ) {
                     Box(
@@ -622,6 +625,7 @@ private fun ThemePreviewCard(
                         }
                     }
                 }
+            }
             }
         }
     }
