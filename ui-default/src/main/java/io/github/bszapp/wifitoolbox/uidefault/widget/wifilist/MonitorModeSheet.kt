@@ -35,7 +35,7 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 @Composable
 internal fun MonitorModeSheet(show: Boolean, onDismiss: () -> Unit, onExecute: (String) -> Unit) {
     var preset by rememberSaveable {
-        mutableStateOf(if (isQualcommDevice()) MonitorCommandPreset.QUALCOMM else MonitorCommandPreset.GENERAL)
+        mutableStateOf(if (DeviceModelInfo() == DeviceModel.QUALCOMM) MonitorCommandPreset.QUALCOMM else if (DeviceModelInfo() == DeviceModel.MEDIATEK) MonitorCommandPreset.MEDIATEK else MonitorCommandPreset.GENERAL)
     }
     var command by rememberSaveable { mutableStateOf(preset.command) }
     val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
@@ -92,15 +92,32 @@ internal fun MonitorModeSheet(show: Boolean, onDismiss: () -> Unit, onExecute: (
     }
 }
 
-private fun isQualcommDevice(): Boolean =
-    Build.HARDWARE.startsWith("qcom", ignoreCase = true) ||
-        Build.HARDWARE.contains("qualcomm", ignoreCase = true) ||
-        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            Build.SOC_MANUFACTURER.contains("qualcomm", ignoreCase = true))
+enum class DeviceModel {
+    QUALCOMM,
+    MEDIATEK,
+    GENERAL
+}
+
+private fun DeviceModelInfo(): DeviceModel
+{
+    if (Build.HARDWARE.startsWith("qcom", ignoreCase = true) || Build.HARDWARE.contains("qualcomm", ignoreCase = true) || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && Build.SOC_MANUFACTURER.contains("qualcomm", ignoreCase = true))
+    {
+        return DeviceModel.QUALCOMM;
+    }
+    else if (Build.HARDWARE.startsWith("mt", ignoreCase = true))
+    {
+        return DeviceModel.MEDIATEK;
+    }
+    else
+    {
+        return DeviceModel.GENERAL;
+    }
+}
 
 private enum class MonitorCommandPreset(val title: String, val command: String) {
     GENERAL("一般命令", DEFAULT_MONITOR_COMMAND),
     QUALCOMM("高通专用", QUALCOMM_MONITOR_COMMAND),
+    MEDIATEK("天玑专用", MEDIATEK_MONITOR_COMMAND)
 }
 
 private const val DEFAULT_MONITOR_COMMAND = """svc wifi disable
@@ -125,3 +142,13 @@ if ip link show p2p0 >/dev/null 2>&1; then
 fi
 printf '4\n' > /sys/module/wlan/parameters/con_mode
 ip link set wlan0 up"""
+
+private const val MEDIATEK_MONITOR_COMMAND = """svc wifi disable
+setprop vendor.hardware.wlan.runtcpdump stop
+ifconfig wlan0 down
+/vendor/bin/iwpriv wlan0 driver "set_chip KeepFullPwr 1"
+/vendor/bin/iw-vendor dev wlan0 set type monitor
+/vendor/bin/iwpriv wlan0 driver monitor=0-1-1-0-0-0-0-1-0
+/vendor/bin/iwpriv wlan0 driver "set_chip KeepFullPwr 0"
+ifconfig wlan0 up
+"""
