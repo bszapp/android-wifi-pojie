@@ -38,6 +38,7 @@ android {
 
 dependencies {
     implementation(project(":contract"))
+    implementation(libs.kotlinx.coroutines.core)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

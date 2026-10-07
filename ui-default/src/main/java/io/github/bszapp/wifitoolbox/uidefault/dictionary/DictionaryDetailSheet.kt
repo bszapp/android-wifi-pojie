@@ -4,9 +4,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -69,11 +72,11 @@ fun ResourceDetailContent(
     onDelete: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
         Row(
@@ -225,6 +228,7 @@ fun ResourceDetailContent(
             }
         }
         Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(safeBottom))
     }
 }
 

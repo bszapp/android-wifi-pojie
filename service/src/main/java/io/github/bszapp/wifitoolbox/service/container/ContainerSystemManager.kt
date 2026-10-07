@@ -28,6 +28,7 @@ internal class ContainerSystemManager(
     private val mounts: ContainerMountManager,
     private val beforeDelete: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
+    private val afterOperation: () -> Unit = {},
 ) {
     private val lock = Any()
     private val callbacks = RemoteCallbackList<IContainerSystemCallback>()
@@ -182,6 +183,7 @@ internal class ContainerSystemManager(
                 ))
             }
             Thread.interrupted()
+            runCatching(afterOperation).onFailure { onError("恢复容器相关扫描资源", it) }
             failure?.takeUnless { it is InterruptedIOException }?.let { onError(request.operation.title, it) }
         }
     }

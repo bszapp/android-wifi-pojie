@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -157,11 +158,15 @@ private fun mergeAccessPoints(
 
 @Composable
 fun WifiDetailSheet(
+    show: Boolean,
     group: MergedWifiGroup,
     onDismiss: () -> Unit,
+    onDismissFinished: () -> Unit,
     capturedAccessPoints: List<MonitorAccessPoint> = emptyList(),
     deviceDetailContent: @Composable (MonitorAccessPoint, MonitorDevice) -> Unit = { _, _ -> },
 ) {
+    val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
+
     // 动画状态：只记录当前是三个页面中的哪一个
     var stage by remember(group.ssid) { mutableStateOf(WifiDetailStage.LIST) }
 
@@ -174,7 +179,13 @@ fun WifiDetailSheet(
     val deviceListState = rememberLazyListState()
 
     val mergedAccessPoints = remember(group, capturedAccessPoints) {
-        mergeAccessPoints(group, capturedAccessPoints)
+        mergeAccessPoints(group, capturedAccessPoints).sortedWith(
+            compareByDescending<MergedAccessPoint> {
+                it.captured?.let { captured ->
+                    group.ssid.isBlank() && !captured.ssid.isNullOrBlank()
+                } == true
+            }.thenByDescending { successfulHandshakeDeviceCount(it.captured) },
+        )
     }
 
     // 抓包数据刷新后选中项跟随最新数据重新查找，详情页因此保持实时
@@ -220,7 +231,7 @@ fun WifiDetailSheet(
         }
     }
     SingleOverlayBottomSheet(
-        show = true,
+        show = show,
         title = when (stage) {
             WifiDetailStage.LIST -> null
             WifiDetailStage.ACCESS_POINT -> accessPointTitle(selectedAccessPoint)
@@ -234,45 +245,51 @@ fun WifiDetailSheet(
         enableNestedScroll = true,
         renderInRootScaffold = true,
         onDismissRequest = onDismiss,
+        onDismissFinished = onDismissFinished,
     ) {
-        AnimatedContent(
-            targetState = stage,
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.TopStart,
-            transitionSpec = {
-                val movingForward = targetState.ordinal > initialState.ordinal
-                (slideInHorizontally(tween(260)) { width -> if (movingForward) width else -width } togetherWith
-                    slideOutHorizontally(tween(260)) { width -> if (movingForward) -width else width })
-                    .using(SizeTransform(clip = true) { _, _ -> tween(260) })
-            },
-            label = "wifi-detail-stage",
-        ) { target ->
-            when (target) {
-                WifiDetailStage.LIST -> WifiNetworkDetailContent(
-                    group = group,
-                    accessPoints = mergedAccessPoints,
-                    pagerState = networkPagerState,
-                    gridState = accessPointGridState,
-                    onAccessPointClick = { entry ->
-                        selectedAccessPointKey = entry.stableKey
-                        selectedDeviceMac = null
-                        stage = WifiDetailStage.ACCESS_POINT
-                    },
-                )
+        Column(Modifier.fillMaxWidth()) {
+            AnimatedContent(
+                targetState = stage,
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.TopStart,
+                transitionSpec = {
+                    val movingForward = targetState.ordinal > initialState.ordinal
+                    (slideInHorizontally(tween(260)) { width -> if (movingForward) width else -width } togetherWith
+                        slideOutHorizontally(tween(260)) { width -> if (movingForward) -width else width })
+                        .using(SizeTransform(clip = true) { _, _ -> tween(260) })
+                },
+                label = "wifi-detail-stage",
+            ) { target ->
+                when (target) {
+                    WifiDetailStage.LIST -> WifiNetworkDetailContent(
+                        group = group,
+                        accessPoints = mergedAccessPoints,
+                        pagerState = networkPagerState,
+                        gridState = accessPointGridState,
+                        onAccessPointClick = { entry ->
+                            selectedAccessPointKey = entry.stableKey
+                            selectedDeviceMac = null
+                            stage = WifiDetailStage.ACCESS_POINT
+                        },
+                    )
 
-                WifiDetailStage.ACCESS_POINT -> AccessPointCaptureContent(
-                    entry = selectedAccessPoint,
-                    deviceListState = deviceListState,
-                    onDeviceClick = { device ->
-                        selectedDeviceMac = device.mac
-                        stage = WifiDetailStage.DEVICE
-                    },
-                )
+                    WifiDetailStage.ACCESS_POINT -> AccessPointCaptureContent(
+                        entry = selectedAccessPoint,
+                        deviceListState = deviceListState,
+                        onDeviceClick = { device ->
+                            selectedDeviceMac = device.mac
+                            stage = WifiDetailStage.DEVICE
+                        },
+                    )
 
-                WifiDetailStage.DEVICE -> DeviceDetailContent(
-                    target = deviceTarget,
-                    deviceDetailContent = deviceDetailContent,
-                )
+                    WifiDetailStage.DEVICE -> DeviceDetailContent(
+                        target = deviceTarget,
+                        deviceDetailContent = deviceDetailContent,
+                    )
+                }
+            }
+            if (stage != WifiDetailStage.DEVICE) {
+                Spacer(Modifier.height(safeBottom))
             }
         }
     }
@@ -290,7 +307,7 @@ private fun WifiNetworkDetailContent(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 4.dp, bottom = 16.dp)
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 16.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(
@@ -322,7 +339,7 @@ private fun WifiNetworkDetailContent(
                 tabs = listOf("网络详情", "连接信息"),
                 selectedTabIndex = pagerState.currentPage,
                 onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                modifier = Modifier.padding(vertical = 6.dp),
             )
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) { page ->
                 when (page) {
@@ -354,13 +371,13 @@ private fun WifiAccessPointGridPage(
     onAccessPointClick: (MergedAccessPoint) -> Unit,
 ) {
     val savedWifiConfigs = group.savedWifiList
-    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding() + 16.dp
+    val bottomPadding = 16.dp
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
         state = gridState,
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
+        contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -393,6 +410,7 @@ private fun WifiAccessPointGridPage(
 
                 entry.virtual != null -> VirtualApCard(
                     info = entry.virtual,
+                    captured = entry.captured,
                     onClick = { onAccessPointClick(entry) },
                 )
 
@@ -443,13 +461,17 @@ private fun AccessPointCaptureContent(
     onDeviceClick: (MonitorDevice) -> Unit,
 ) {
     val captured = entry?.captured
-    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding() + 16.dp
+    val devices = captured?.devices.orEmpty().sortedWith(
+        compareByDescending<MonitorDevice> { successfulHandshakeCount(it) > 0 }
+            .thenByDescending(::successfulHandshakeCount),
+    )
+    val bottomPadding = 16.dp
 
     Column(modifier = Modifier.fillMaxWidth()) {
         LazyColumn(
             state = deviceListState,
             modifier = Modifier.fillMaxWidth(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = bottomPadding),
+            contentPadding = PaddingValues(top = 4.dp, bottom = bottomPadding),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item(key = "access-point-overview") {
@@ -471,21 +493,21 @@ private fun AccessPointCaptureContent(
                             )
                         },
                         title = "设备",
-                        badge = captured.devices.size.toString(),
+                        badge = devices.size.toString(),
                     )
                 }
-                if (captured.devices.isEmpty()) {
+                if (devices.isEmpty()) {
                     item(key = "access-point-empty-devices") {
                         CaptureHintCard(text = "尚未在此接入点下发现设备")
                     }
                 } else {
                     items(
-                        count = captured.devices.size,
-                        key = { index -> "device-${captured.devices[index].mac}" },
+                        count = devices.size,
+                        key = { index -> "device-${devices[index].mac}" },
                     ) { index ->
                         DeviceCard(
-                            device = captured.devices[index],
-                            onClick = { onDeviceClick(captured.devices[index]) },
+                            device = devices[index],
+                            onClick = { onDeviceClick(devices[index]) },
                         )
                     }
                 }
@@ -573,7 +595,7 @@ private fun DeviceCard(
                         containerColor = MiuixTheme.colorScheme.primary,
                         contentColor = MiuixTheme.colorScheme.onPrimary,
                     ) {
-                        Text("${handshakeCount}次成功握手")
+                        Text("成功握手${handshakeCount}次", softWrap = true)
                     }
                 }
             },
@@ -646,8 +668,7 @@ private fun WifiConnectionInfoPage(info: WifiInfo) {
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 16.dp)
-            .padding(bottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()),
+            .padding(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Card(
@@ -768,6 +789,7 @@ private fun ApCard(
     captured: MonitorAccessPoint?,
     onClick: () -> Unit,
 ) {
+    val handshakeDeviceCount = successfulHandshakeDeviceCount(captured)
     val isUnknownSignal = ap.level == 0
     val signalLevel = if (isUnknownSignal) 0 else WifiManager.calculateSignalLevel(ap.level, 5)
     val (signalLabel, signalColor) = if (isUnknownSignal) {
@@ -907,9 +929,20 @@ private fun ApCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            captured?.ssid?.takeIf { it.isNotBlank() }?.let { ssid ->
+                Text(
+                    text = "SSID：$ssid",
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = contentColor.copy(alpha = 0.75f),
+                    softWrap = true,
+                )
+            }
 
             // 频率
             ApChip(text = "${ap.frequency} MHz")
+            if (handshakeDeviceCount > 0) {
+                ApChip(text = "成功握手${handshakeDeviceCount}台")
+            }
 
             // 安全能力（简化显示）
             io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
@@ -940,9 +973,11 @@ private fun ApCard(
 @Composable
 private fun VirtualApCard(
     info: WifiInfo,
+    captured: MonitorAccessPoint?,
     onClick: () -> Unit,
 ) {
     val contentColor = MiuixTheme.colorScheme.onTertiaryContainer
+    val handshakeDeviceCount = successfulHandshakeDeviceCount(captured)
     Card(
         modifier = Modifier.fillMaxWidth(),
         cornerRadius = 16.dp,
@@ -997,6 +1032,17 @@ private fun VirtualApCard(
                     color = contentColor,
                     softWrap = true,
                 )
+            }
+            captured?.ssid?.takeIf { it.isNotBlank() }?.let { ssid ->
+                Text(
+                    text = "SSID：$ssid",
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = contentColor.copy(alpha = 0.75f),
+                    softWrap = true,
+                )
+            }
+            if (handshakeDeviceCount > 0) {
+                ApChip(text = "成功握手${handshakeDeviceCount}台")
             }
             io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
                 targetState = info.frequency.takeIf { it > 0 },
@@ -1091,10 +1137,9 @@ private fun CapturedApCard(
                 color = MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.6f),
             )
             Text(
-                text = captured.ssid?.takeIf { it.isNotBlank() } ?: "<未知网络>",
+                text = captured.ssid?.takeIf { it.isNotBlank() }?.let { "SSID：$it" } ?: "<未知网络>",
                 style = MiuixTheme.textStyles.body2,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                softWrap = true,
             )
             Text(
                 text = captured.bssid,
@@ -1104,10 +1149,13 @@ private fun CapturedApCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 ApChip(text = "${captured.devices.size} 台设备")
                 if (handshakeDeviceCount > 0) {
-                    ApChip(text = "${handshakeDeviceCount} 台已握手")
+                    ApChip(text = "成功握手${handshakeDeviceCount}台")
                 }
             }
         }
@@ -1126,7 +1174,8 @@ private fun ApChip(text: String) {
             text = text,
             style = MiuixTheme.textStyles.footnote2,
             fontFamily = FontFamily.Monospace,
-            color = MiuixTheme.colorScheme.onSecondaryContainer
+            color = MiuixTheme.colorScheme.onSecondaryContainer,
+            softWrap = true,
         )
     }
 }
@@ -1408,8 +1457,16 @@ private fun SavedInfoRow(label: String, value: String) {
 
 private fun successfulHandshakeCount(device: MonitorDevice): Int = device.handshakes.count { record ->
     record.status == MonitorHandshakeStatus.SUCCESS &&
-        record.captureQuality != MonitorHandshakeCaptureQuality.DATA_INCOMPLETE
+        record.captureQuality == MonitorHandshakeCaptureQuality.COMPLETE
 }
+
+private fun successfulHandshakeDeviceCount(accessPoint: MonitorAccessPoint?): Int =
+    accessPoint?.devices
+        ?.asSequence()
+        ?.filter { successfulHandshakeCount(it) > 0 }
+        ?.distinctBy { it.mac.lowercase() }
+        ?.count()
+        ?: 0
 
 private fun accessPointTitle(entry: MergedAccessPoint?): String =
     entry?.scanned?.SSID?.takeIf { it.isNotBlank() }

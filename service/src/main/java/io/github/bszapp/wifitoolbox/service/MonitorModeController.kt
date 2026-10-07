@@ -1,8 +1,10 @@
 package io.github.bszapp.wifitoolbox.service
 
+import android.net.wifi.WifiConfiguration
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
+import android.system.ErrnoException
 import android.util.Base64
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChange
@@ -12,6 +14,10 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCaptureClearStage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChangesPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDeviceProtocol
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDecryptionStatus
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationPage
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationDetailPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDeviceRealtime
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionRecord
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionType
@@ -41,6 +47,7 @@ import org.json.JSONObject
 internal class MonitorModeController(
     private val terminalManager: TerminalManager,
     private val captureChannel: () -> MonitorChannel?,
+    private val savedNetworks: () -> List<WifiConfiguration>,
     private val onStatisticsChanged: (MonitorModeStatistics) -> Unit,
     private val onRecordedBytesChanged: (Long, Long) -> Unit,
     private val onExportCompleted: (requestId: String, path: String, fileName: String) -> Unit,
@@ -75,6 +82,7 @@ internal class MonitorModeController(
     private var mirrorGeneration = 0L
     private var activeMirror = CaptureMirror()
     private var preparedMirror = CaptureMirror()
+    private var communicationStore: MonitorCommunicationStore? = null
     private val changes get() = activeMirror.changes
     private val activeHandshakes get() = activeMirror.activeHandshakes
     private val handshakeArtifacts get() = activeMirror.handshakeArtifacts
@@ -133,6 +141,8 @@ internal class MonitorModeController(
             mirrorGeneration++
             activeMirror = CaptureMirror()
             preparedMirror = CaptureMirror()
+            communicationStore?.close()
+            communicationStore = MonitorCommunicationStore(File(pipes.directory, "communications")).also { it.reset() }
             captureFile = capture
             captureParts = if (resumeCapture) previousParts else listOf(capture)
             nonHandshakeBytes = 0L
@@ -225,6 +235,8 @@ internal class MonitorModeController(
                 clearing = false
                 activeMirror = CaptureMirror()
                 preparedMirror = CaptureMirror()
+                communicationStore?.close()
+                communicationStore = null
                 captureParts = emptyList()
                 nonHandshakeBytes = 0L
                 clearProgress = null
@@ -330,6 +342,101 @@ internal class MonitorModeController(
                 "elapsedMs=${SystemClock.elapsedRealtime() - started} errorType=${error.javaClass.name}")
             throw error
         }
+    }
+
+    /** 凭据只走 FIFO。短暂满管道允许重试，旧会话不得向新会话写入。 */
+    private fun sendCredential(command: JSONObject, session: Long) {
+        val bytes = (command.toString() + "\n").toByteArray(Charsets.UTF_8)
+        require(bytes.size <= 4096)
+        while (isCurrentSession(session)) {
+            val writer = synchronized(lock) {
+                if (generation != session || stopping) return
+                commandWriter
+            } ?: return
+            try {
+                synchronized(writer) { check(Os.write(writer.fd, bytes, 0, bytes.size) == bytes.size) }
+                return
+            } catch (error: ErrnoException) {
+                if (error.errno != OsConstants.EAGAIN && error.errno != OsConstants.EINTR) throw error
+            }
+            Thread.sleep(10)
+        }
+    }
+
+    fun savedNetworksChanged() {
+        val session = synchronized(lock) { generation.takeIf { statisticsTerminalId != null && !stopping } } ?: return
+        executor.execute {
+            runCatching { sendCredential(JSONObject().put("type", "credential").put("invalidate", true), session) }
+                .onFailure { if (isCurrentSession(session)) reportError("更新抓包解密凭据", it) }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun provideCredential(event: JSONObject, session: Long) {
+        executor.execute {
+            if (!isCurrentSession(session)) return@execute
+            val encoded = event.getString("ssidBase64")
+            val response = JSONObject().put("type", "credential").put("ssidBase64", encoded)
+                .put("credentialEpoch", event.optLong("credentialEpoch", 0))
+            try {
+                val ssid = Base64.decode(encoded, Base64.NO_WRAP)
+                require(ssid.size in 1..32)
+                val configuration = savedNetworks().firstOrNull { saved ->
+                    val value = saved.SSID.orEmpty()
+                    val savedBytes = if (value.startsWith('"') && value.endsWith('"')) {
+                        value.removeSurrounding("\"").toByteArray(Charsets.UTF_8)
+                    } else {
+                        runCatching {
+                            require(value.length % 2 == 0)
+                            value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        }.getOrElse { value.toByteArray(Charsets.UTF_8) }
+                    }
+                    savedBytes.contentEquals(ssid) &&
+                        (saved.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_PSK) ||
+                            saved.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA2_PSK)) &&
+                        !saved.preSharedKey.isNullOrBlank() && saved.preSharedKey != "*" && saved.preSharedKey != "\"*\""
+                }
+                val stored = configuration?.preSharedKey
+                val password = stored?.removeSurrounding("\"")
+                response.put("password", password ?: JSONObject.NULL)
+                    .put("rawPsk", stored != null && !stored.startsWith('"') && stored.length == 64)
+            } catch (error: Throwable) {
+                response.put("error", true)
+                if (isCurrentSession(session)) reportError("读取抓包解密所需的已保存网络", error)
+            }
+            runCatching { sendCredential(response, session) }
+                .onFailure { if (isCurrentSession(session)) reportError("发送抓包解密凭据", it) }
+        }
+    }
+
+    fun communicationPage(session: Long, bssid: String, mac: String, from: Long): MonitorCommunicationPage = synchronized(lock) {
+        check(session == mirrorGeneration && !stopping) { "抓包数据已重置" }
+        requireNotNull(communicationStore).page(session, bssid, mac, from)
+    }
+
+    fun communicationDetail(session: Long, bssid: String, mac: String, id: String, cursor: Long): MonitorCommunicationDetailPage = synchronized(lock) {
+        check(session == mirrorGeneration && !stopping) { "抓包数据已重置" }
+        requireNotNull(communicationStore).detail(session, bssid, mac, id, cursor)
+    }
+
+    private fun handleCommunication(event: JSONObject, session: Long, mirror: CaptureMirror) {
+        synchronized(lock) {
+            if (generation != session || stopping || mirror !== activeMirror) return
+            val store = requireNotNull(communicationStore)
+            if (event.getString("type") == "communication") store.record(event)
+            else store.append(event, Base64.decode(event.getString("data"), Base64.NO_WRAP))
+            val bssid = event.getString("bssid")
+            val mac = event.getString("deviceMac")
+            val point = mirror.accessPoints[bssid]
+            val device = point?.devices?.get(mac)
+            if (point != null && device != null) {
+                val (count, revision) = store.summary(bssid, mac)
+                val updated = device.copy(communicationCount = count, communicationRevision = revision)
+                point.devices[mac] = updated
+                mirror.changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, updated))
+            }
+        }
+        scheduleStatisticsPublish(session)
     }
 
     fun exportPcap(
@@ -584,6 +691,8 @@ internal class MonitorModeController(
             if (event.optString("source") == "retained") preparedMirror else activeMirror
         }
         when (event.optString("type")) {
+            "credentialRequest" -> provideCredential(event, sessionGeneration)
+            "communication", "communicationPart" -> handleCommunication(event, sessionGeneration, mirror)
             "health" -> {
                 diagnosticSession?.takeIf { it.generation == sessionGeneration }?.lastHealthAt = SystemClock.elapsedRealtime()
                 val mainStalled = event.getLong("mainAgeMillis") > HEALTH_TIMEOUT_MILLIS
@@ -631,6 +740,7 @@ internal class MonitorModeController(
             "captureReset" -> {
                 synchronized(lock) {
                     if (generation != sessionGeneration || stopping) return
+                    communicationStore?.reset()
                     if (event.getBoolean("retainPrepared")) {
                         activeMirror = preparedMirror.fork()
                         if (!event.isNull("addedSegment")) {
@@ -752,6 +862,9 @@ internal class MonitorModeController(
                     for (deviceIndex in 0 until devices.length()) {
                         val deviceJson = devices.getJSONObject(deviceIndex)
                         val mac = deviceJson.getString("mac")
+                        val (communicationCount, communicationRevision) =
+                            if (mirror === activeMirror) communicationStore?.summary(bssid, mac) ?: (0L to 0L)
+                            else 0L to 0L
                         accessPoint.devices[mac] = MonitorDevice(
                             mac = mac,
                             name = if (deviceJson.isNull("name")) {
@@ -773,6 +886,27 @@ internal class MonitorModeController(
                                 signal = parseSignal(deviceJson.optJSONObject("signal")),
                             ),
                             probeOnly = deviceJson.optBoolean("probeOnly", false),
+                            protocol = when (deviceJson.optString("protocol")) {
+                                "wpaPsk" -> MonitorDeviceProtocol.WPA_PSK
+                                "wpa2Psk" -> MonitorDeviceProtocol.WPA2_PSK
+                                "wpa2PskSha256" -> MonitorDeviceProtocol.WPA2_PSK_SHA256
+                                "sae" -> MonitorDeviceProtocol.SAE
+                                "owe" -> MonitorDeviceProtocol.OWE
+                                "other" -> MonitorDeviceProtocol.OTHER
+                                else -> MonitorDeviceProtocol.UNKNOWN
+                            },
+                            decryptionStatus = when (deviceJson.optString("decryptionStatus")) {
+                                "noPassword" -> MonitorDecryptionStatus.NO_PASSWORD
+                                "passwordMismatch" -> MonitorDecryptionStatus.PASSWORD_MISMATCH
+                                "incompleteHandshake" -> MonitorDecryptionStatus.INCOMPLETE_HANDSHAKE
+                                "ready" -> MonitorDecryptionStatus.READY
+                                "secure" -> MonitorDecryptionStatus.SECURE
+                                "unsupported" -> MonitorDecryptionStatus.UNSUPPORTED
+                                "loading" -> MonitorDecryptionStatus.LOADING
+                                else -> MonitorDecryptionStatus.PROTOCOL_UNKNOWN
+                            },
+                            communicationCount = communicationCount,
+                            communicationRevision = communicationRevision,
                         )
                         changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, accessPoint.devices.getValue(mac)))
                     }

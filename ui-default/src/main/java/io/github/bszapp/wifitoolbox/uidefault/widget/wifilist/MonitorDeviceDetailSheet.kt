@@ -31,6 +31,8 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -49,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDecryptionStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorFrameGroupStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorFrameSubtypeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
@@ -60,6 +63,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcom
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
+import io.github.bszapp.wifitoolbox.uidefault.model.MonitorCommunicationUiState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -84,6 +88,7 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 private enum class DeviceSheetPage {
     DETAILS,
     EXPORT,
+    COMMUNICATION,
 }
 
 private enum class Hc22000Action {
@@ -109,6 +114,7 @@ internal fun MonitorDeviceDetailSheet(
     onTestHandshake: (handshakeId: String, password: String) -> Unit,
     onExportHandshake: (handshakeId: String) -> String,
     onSaveHc22000: (content: String, fileName: String) -> Unit,
+    communications: MonitorCommunicationUiState? = null,
     showDeviceDetails: Boolean = true,
     renderSheet: Boolean = true,
     initialHandshakeId: String? = null,
@@ -118,11 +124,23 @@ internal fun MonitorDeviceDetailSheet(
     val context = LocalContext.current
     val navigator = LocalNavigator.current
     val clipboardManager = LocalClipboardManager.current
-    val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
+    val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
+    val bottomPadding = 12.dp + safeBottom
     val expandedGroups = remember(accessPoint.bssid, device.mac) {
         mutableStateMapOf<String, Boolean>()
     }
     var page by remember(accessPoint.bssid, device.mac) { mutableStateOf(DeviceSheetPage.DETAILS) }
+    val communicationDisplay = communications?.state?.collectAsState()?.value
+    DisposableEffect(page, accessPoint.bssid, device.mac, communications) {
+        val readingCommunications = page == DeviceSheetPage.COMMUNICATION
+        if (readingCommunications) communications?.open(accessPoint.bssid, device.mac)
+        onDispose { if (readingCommunications) communications?.close() }
+    }
+    LaunchedEffect(device.decryptionStatus) {
+        if (device.decryptionStatus == MonitorDecryptionStatus.SECURE && page == DeviceSheetPage.COMMUNICATION) {
+            page = DeviceSheetPage.DETAILS
+        }
+    }
     var selectedSubtypeIds by remember(accessPoint.bssid, device.mac) {
         mutableStateOf(emptySet<String>())
     }
@@ -184,7 +202,7 @@ internal fun MonitorDeviceDetailSheet(
                 .fillMaxWidth()
                 .scrollEndHaptic()
                 .overScrollVertical(),
-            contentPadding = PaddingValues(bottom = bottomPadding + 12.dp),
+            contentPadding = PaddingValues(bottom = bottomPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             when (page) {
@@ -221,6 +239,25 @@ internal fun MonitorDeviceDetailSheet(
                                     FrameStatisticsValues(totalByteCount, totalPacketCount)
                                 },
                             )
+                        }
+                    }
+                    item {
+                        SmallTitle(text = "通信数据")
+                        Card {
+                            BasicComponent(
+                                title = if (device.decryptionStatus == MonitorDecryptionStatus.READY && device.communicationCount == 0L) {
+                                    "暂未捕获到通信数据"
+                                } else decryptionStatusText(device.decryptionStatus),
+                                summary = deviceProtocolText(device.protocol) +
+                                    if (device.decryptionStatus == MonitorDecryptionStatus.SECURE) {
+                                        "\n此提示表示当前功能无法凭已保存密码被动解密该协议，不代表应用层与网络具有绝对安全性。"
+                                    } else "",
+                            )
+                            if (communications != null && device.decryptionStatus != MonitorDecryptionStatus.SECURE &&
+                                (device.decryptionStatus == MonitorDecryptionStatus.READY || device.communicationCount > 0)) {
+                                BasicComponent(title = "通信数据", summary = "${device.communicationCount} 条记录 · 按需读取详情",
+                                    onClick = { page = DeviceSheetPage.COMMUNICATION })
+                            }
                         }
                     }
                     item {
@@ -275,6 +312,13 @@ internal fun MonitorDeviceDetailSheet(
                     }
                 }
 
+                DeviceSheetPage.COMMUNICATION -> {
+                    item { SmallTitle(text = "通信数据") }
+                    item { TextButton(text = "返回设备详情", onClick = { page = DeviceSheetPage.DETAILS }) }
+                    if (communications != null && communicationDisplay != null) {
+                        monitorCommunicationItems(communications, communicationDisplay)
+                    }
+                }
                 DeviceSheetPage.EXPORT -> {
                     item {
                         Text(
@@ -325,7 +369,11 @@ internal fun MonitorDeviceDetailSheet(
     if (renderSheet) {
         SingleOverlayBottomSheet(
             show = showDeviceDetails,
-            title = if (page == DeviceSheetPage.DETAILS) "设备详情" else "导出 PCAP",
+            title = when (page) {
+                DeviceSheetPage.DETAILS -> "设备详情"
+                DeviceSheetPage.EXPORT -> "导出 PCAP"
+                DeviceSheetPage.COMMUNICATION -> "通信数据"
+            },
             allowDismiss = true,
             enableNestedScroll = true,
             renderInRootScaffold = true,

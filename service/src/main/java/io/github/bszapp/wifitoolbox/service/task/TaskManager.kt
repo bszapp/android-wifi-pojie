@@ -28,8 +28,7 @@ internal class TaskManager(
     private val androidApiProvider: () -> AndroidApi?,
     private val wifiLogAnalyzer: WifiLogAnalyzer,
     private val terminalManager: TerminalManager,
-    private val hybridTaskReadyProvider: () -> Boolean,
-    private val networkCardTaskReadyProvider: () -> Boolean,
+    private val normalModeTaskReadyProvider: () -> Boolean,
     private val onSavedWifiNetworksChanged: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) : AutoCloseable {
@@ -367,7 +366,7 @@ internal class TaskManager(
                             require((mac.substringBefore(':').toInt(16) and 1) == 0 &&
                                 mac != "00:00:00:00:00:00") { "MAC 必须为有效单播地址" }
                         }
-                        check(networkCardTaskReadyProvider()) {
+                        check(normalModeTaskReadyProvider()) {
                             "网卡测试只能在普通模式且容器环境已配置时运行"
                         }
                         require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
@@ -393,8 +392,8 @@ internal class TaskManager(
                 payload.input.targetMac?.let { mac ->
                     require(MAC_ADDRESS.matches(mac)) { "目标设备 MAC 格式非法：$mac" }
                 }
-                check(hybridTaskReadyProvider()) {
-                    "WPS-PBC 任务只能在已就绪的混合扫描模式运行"
+                check(normalModeTaskReadyProvider()) {
+                    "WPS-PBC 任务只能在普通模式且容器环境已配置时运行"
                 }
             }
         }

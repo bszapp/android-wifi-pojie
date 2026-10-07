@@ -62,7 +62,8 @@ import kotlinx.parcelize.Parcelize
  *
  * ## WpsPbcTask
  *
- * WPS-PBC 任务只允许在混合扫描模式已经完成初始化时启动。任务通过 Service 管理的
+ * WPS-PBC 任务只允许在普通网卡模式且容器环境已配置时启动，与系统扫描或底层扫描来源无关。
+ * 终端创建统一检查 Root 权限及容器安装情况。任务通过 Service 管理的
  * chroot 终端运行 `/wlantool` 工作目录中的 `python wps.py -i wlan0 --pbc`；指定目标时追加
  * `-mac <BSSID>`。Service 必须把脚本 stdout 与 stderr 的每一条非空输出原样写入任务日志，
  * 并从脚本输出的 Selected AP、WPA PSK 和 AP SSID 行组合出捕获结果。App 可以在任务运行
@@ -74,7 +75,7 @@ import kotlinx.parcelize.Parcelize
  * 进入下一轮。自动保存只改变 Service 收到新凭据后的保存行为。
  * 保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，不触发连接。捕获
  * 结果按每次获取顺序保留，不按 BSSID、SSID 或密码去重；其中 mac 表示目标接入点 BSSID。
- * 混合扫描模式只约束任务的启动时机。任务获得 ID 后独立运行，切换信息源不得停止任务；
+ * 普通网卡模式只约束任务的启动时机。任务获得 ID 后独立运行，切换扫描来源不得停止任务；
  * 只有显式停止任务、任务自行结束或 Service 进程结束时才结束当前任务终端。
  */
 

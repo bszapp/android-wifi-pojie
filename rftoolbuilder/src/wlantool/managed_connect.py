@@ -5,6 +5,7 @@ JSON Lines stdin: one configuration, followed by optional {"type":"stop"}.
 Uses nl80211/EAPOL/DHCP directly; never changes Android saved configurations.
 No automatic reassociation or password cycling. Detailed English text logs stdout.
 """
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -23,7 +24,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, '/wlantool')
 import scan
-from managed_supplicant_guard import SupplicantPauseGuard
+from managed_supplicant_guard import SupplicantPauseGuard, process_state, system_supplicants
 from managed_diagnostic_log import format_event
 from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
 
@@ -97,6 +98,118 @@ class Netlink(scan.Nl80211Scanner):
                     report('subscribed', group=name, id=index)
         sock.setblocking(False)
         return sock
+
+    def disconnect_existing(self):
+        attrs = scan.pack_attr(54, struct.pack('=H', 3))
+        try:
+            self.command(48, attrs, 'disconnect existing connection')
+            return
+        except OSError as error:
+            if error.errno != errno.EPERM:
+                raise
+        # A SOCKET_OWNER connection can only be disconnected through its original
+        # Netlink socket. SIGSTOP preserves that socket and its port ID.
+        if not hasattr(os, 'pidfd_open'):
+            raise RuntimeError('pidfd_getfd support is required to disconnect the system-owned connection')
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        for pid, identity, state, _ in system_supplicants():
+            ensure_running()
+            if state not in ('T', 't'):
+                continue
+            pidfd = os.pidfd_open(pid)
+            try:
+                current_state, current_identity = process_state(pid)
+                if current_identity != identity or current_state not in ('T', 't'):
+                    raise RuntimeError('System supplicant changed while borrowing its sockets: pid=%s' % pid)
+                base = '/proc/%s' % pid
+                with open(base + '/net/netlink', encoding='utf-8') as source:
+                    sockets = {}
+                    for line in source.read().splitlines()[1:]:
+                        values = line.split()
+                        if len(values) >= 10 and values[1] == '16' and int(values[3], 16) == 0:
+                            sockets[int(values[9])] = int(values[2])
+                for entry in sorted(os.listdir(base + '/fd'), key=int):
+                    ensure_running()
+                    try:
+                        link = os.readlink(base + '/fd/' + entry)
+                    except FileNotFoundError:
+                        continue
+                    if not link.startswith('socket:['):
+                        continue
+                    inode = int(link[8:-1])
+                    if inode not in sockets:
+                        continue
+                    original_fd = int(entry)
+                    ctypes.set_errno(0)
+                    # Linux ARM/ARM64/x86 syscall number for pidfd_getfd.
+                    copied_fd = libc.syscall(ctypes.c_long(438), ctypes.c_int(pidfd),
+                                             ctypes.c_int(original_fd), ctypes.c_uint(0))
+                    if copied_fd < 0:
+                        code = ctypes.get_errno()
+                        report('supplicantSocketBorrowFailed', pid=pid, fd=original_fd,
+                               errno=code, error=os.strerror(code))
+                        if code == errno.ENOSYS:
+                            raise OSError(code, 'Kernel does not support pidfd_getfd')
+                        continue
+                    try:
+                        borrowed = socket.socket(fileno=int(copied_fd))
+                    except BaseException:
+                        os.close(copied_fd)
+                        raise
+                    with borrowed:
+                        if (select.select([pidfd], [], [], 0)[0] or
+                                os.fstat(borrowed.fileno()).st_ino != inode or
+                                borrowed.family != socket.AF_NETLINK or borrowed.proto != 16 or
+                                borrowed.getsockname() != (sockets[inode], 0)):
+                            raise RuntimeError('System supplicant socket changed during duplication')
+                        report('supplicantSocketBorrowed', pid=pid, fd=original_fd,
+                               inode=inode, portId=sockets[inode])
+                        # Do not change shared file flags, socket options, or consume
+                        # replies that belong to the paused supplicant.
+                        if select.select([borrowed], [], [], 0)[0]:
+                            report('supplicantSocketSkipped', pid=pid, fd=original_fd,
+                                   reason='Pending system supplicant messages; left queued')
+                            continue
+                        name = 'disconnect existing connection via supplicant pid=%s fd=%s portId=%s' % (
+                            pid, original_fd, sockets[inode])
+                        report('disconnectingThroughSupplicantSocket', pid=pid, fd=original_fd,
+                               portId=sockets[inode], interface=self.interface)
+                        ensure_running()
+                        seq = self._send(borrowed, self.family_id, 48, 5,
+                                         scan.pack_u32_attr(3, self.ifindex) + attrs)
+                        deadline = time.monotonic() + 2
+                        rejected = False
+                        while time.monotonic() < deadline:
+                            ensure_running()
+                            if not select.select([borrowed], [], [], .1)[0]:
+                                continue
+                            data = borrowed.recv(1024 * 1024, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+                            messages = list(scan.iter_netlink_messages(data))
+                            if not messages or any(sequence != seq for _, _, sequence, _ in messages):
+                                raise RuntimeError('Unrelated response on borrowed supplicant socket; left queued')
+                            borrowed.recv(1024 * 1024, socket.MSG_DONTWAIT)
+                            for kind, _, _, payload in messages:
+                                if kind != 2:
+                                    continue
+                                try:
+                                    self._raise_netlink_error(payload)
+                                except OSError as error:
+                                    report('netlinkError', command=48, name=name,
+                                           errno=error.errno, error=str(error))
+                                    if error.errno != errno.EPERM:
+                                        raise
+                                    rejected = True
+                                    break
+                                report('netlinkAccepted', command=48, name=name)
+                                return
+                            if rejected:
+                                break
+                        if not rejected:
+                            raise TimeoutError('Timed out waiting for borrowed supplicant socket disconnect acknowledgement')
+            finally:
+                os.close(pidfd)
+        raise PermissionError(errno.EPERM, 'Could not disconnect through a paused system supplicant socket; see socket logs')
 
 
 log_file = None
@@ -589,7 +702,7 @@ def run(args):
                          for bss in nl.read_results())
         if associated:
             report('disconnectingExistingConnection', message='Disconnect the current interface connection without changing saved configurations')
-            nl.command(48, scan.pack_attr(54, struct.pack('=H', 3)), 'disconnect existing connection')
+            nl.disconnect_existing()
             while any(scan.first_attr(scan.parse_attrs(bss), 9) == struct.pack('=I', 1)
                       for bss in nl.read_results()):
                 ensure_running()

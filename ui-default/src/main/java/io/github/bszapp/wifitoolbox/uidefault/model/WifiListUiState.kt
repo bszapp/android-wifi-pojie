@@ -4,9 +4,11 @@ import android.net.Uri
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiListDataSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.contract.wifilist.SystemScanData
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +36,7 @@ class WifiListUiState(
     val modeState = controller.wifiList.modeState
 
     val monitorPcapExports = controller.wifiList.monitorPcapExports
+    val communications = MonitorCommunicationUiState(controller.wifiList, scope)
 
     private val _monitorHandshakeTest = MutableStateFlow(MonitorHandshakeTestUiState())
     val monitorHandshakeTest: StateFlow<MonitorHandshakeTestUiState> =
@@ -84,15 +87,16 @@ class WifiListUiState(
                 val previous = previousWifiState
                 previousWifiState = current
 
-                // App 初次订阅时 null -> Enabled 不扫描。
-                // Disabled/Error -> Enabled 时，App 只发送扫描指令；数据刷新由扫描任务完成。
+                // 仅系统来源的 Disabled -> Enabled 触发原有的自动扫描。
+                // 首次数据、底层来源和来源切换不触发。
                 val mode = modeState.value
                 val shouldAutoScan =
-                    mode?.mode == WifiMode.NORMAL && !mode.hybridScanEnabled &&
+                    mode?.mode == WifiMode.NORMAL && mode.listDataSource == WifiListDataSource.SYSTEM &&
                     mode.modeSwitch?.isRunning != true &&
-                    (previous is WifiState.Data.Disabled || previous is WifiState.Error) &&
-                        current is WifiState.Data.Enabled &&
-                        !current.isScanning
+                    (previous as? WifiState.System)?.data is SystemScanData.Disabled &&
+                        (current as? WifiState.System)?.data.let {
+                            it is SystemScanData.Enabled && !it.isScanning
+                        }
 
                 if (shouldAutoScan) startScan()
             }
@@ -113,7 +117,8 @@ class WifiListUiState(
     fun setMode(mode: WifiMode) =
         controller.wifiList.setMode(mode)
 
-    fun setHybridScanEnabled(enabled: Boolean) = controller.wifiList.setHybridScanEnabled(enabled)
+    fun setWifiListDataSource(source: WifiListDataSource) =
+        controller.wifiList.setWifiListDataSource(source)
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false) =
         controller.wifiList.setMonitorCapture(enabled, frequencyMhz, hopping)
     fun clearMonitorCapture(handshakesOnly: Boolean) = controller.wifiList.clearMonitorCapture(handshakesOnly)

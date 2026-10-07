@@ -7,6 +7,7 @@ import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import io.github.bszapp.wifitoolbox.contract.wifilist.createScanResultCompat
 
 data class MergedWifiGroup(
@@ -55,9 +56,13 @@ data class MergedWifiGroup(
                 val captured = capturedByBssid[result.BSSID.lowercase()]
                 val capturedSsid = captured?.ssid
                 val capturedSignal = captured?.signal?.latestDbm
-                if ((result.SSID.isNullOrEmpty() && !capturedSsid.isNullOrEmpty()) || capturedSignal != null) {
+                val shouldKeepHidden = captured?.ssidVisibility == MonitorSsidVisibility.HIDDEN ||
+                    (captured?.ssidVisibility != MonitorSsidVisibility.VISIBLE && result.SSID.isNullOrEmpty())
+                if ((!shouldKeepHidden && result.SSID.isNullOrEmpty() && !capturedSsid.isNullOrEmpty()) || capturedSignal != null) {
                     ScanResult(result).apply {
-                        if (SSID.isNullOrEmpty() && !capturedSsid.isNullOrEmpty()) SSID = capturedSsid
+                        if (!shouldKeepHidden && SSID.isNullOrEmpty() && !capturedSsid.isNullOrEmpty()) {
+                            SSID = capturedSsid
+                        }
                         if (capturedSignal != null) level = capturedSignal
                     }
                 } else result
@@ -67,7 +72,7 @@ data class MergedWifiGroup(
             val capturedOnly = capturedAccessPoints.filter { it.bssid.lowercase() !in scannedBssids }
                 .map { point ->
                     createScanResultCompat().apply {
-                        SSID = point.ssid ?: ""
+                        SSID = if (point.ssidVisibility == MonitorSsidVisibility.HIDDEN) "" else point.ssid ?: ""
                         BSSID = point.bssid
                         level = point.signal?.latestDbm ?: 0
                         frequency = 0

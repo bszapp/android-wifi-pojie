@@ -10,6 +10,8 @@ import android.os.SystemClock
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChangesPage
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationPage
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationDetailPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChange
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -20,6 +22,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiListDataSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiModeState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
@@ -551,8 +554,10 @@ class WifiListController(
         }
     }
 
-    override fun setHybridScanEnabled(enabled: Boolean) {
-        callService("修改混合扫描方式") { it.setHybridScanEnabled(enabled) }
+    override fun setWifiListDataSource(source: WifiListDataSource) {
+        callService("切换 Wi-Fi 列表数据源为 ${source.displayName}") {
+            it.setWifiListDataSource(source.wireValue)
+        }
     }
     //TODO:这啥玩意有用吗
     override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) {
@@ -576,6 +581,27 @@ class WifiListController(
         callService("进入监听模式") { service ->
             service.enterMonitorMode(command)
         }
+    }
+
+    override suspend fun readMonitorCommunications(sessionGeneration: Long, bssid: String, deviceMac: String, fromIndex: Long): MonitorCommunicationPage =
+        readCommunicationPage("读取设备通信记录") { service ->
+            PagedDataTransport.decode(service.getMonitorCommunications(sessionGeneration, bssid, deviceMac, fromIndex), MonitorCommunicationPage::class.java)
+        }
+
+    override suspend fun readMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long): MonitorCommunicationDetailPage =
+        readCommunicationPage("读取设备通信详情") { service ->
+            PagedDataTransport.decode(service.getMonitorCommunicationDetail(sessionGeneration, bssid, deviceMac, recordId, cursor), MonitorCommunicationDetailPage::class.java)
+        }
+
+    private suspend fun <T> readCommunicationPage(operation: String, read: (IMainService) -> T): T = withContext(Dispatchers.IO) {
+        val lease = currentLease() ?: throw IllegalStateException("service 未连接")
+        try {
+            check(isCurrentLease(lease)) { "service 连接已经失效" }
+            val result = read(lease.service)
+            check(isCurrentLease(lease)) { "service 连接已经失效" }
+            result
+        } catch (error: CancellationException) { throw error }
+        catch (error: Throwable) { report(operation, error); throw error }
     }
 
     override fun exportAllMonitorPcap(): String {

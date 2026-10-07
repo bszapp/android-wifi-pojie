@@ -24,7 +24,7 @@ interface IWifiListController {
 
     /** 请求 Service 切换网卡模式；实际模式由 Service 读取并发布。 */
     fun setMode(mode: WifiMode)
-    fun setHybridScanEnabled(enabled: Boolean)
+    fun setWifiListDataSource(source: WifiListDataSource)
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false)
     fun clearMonitorCapture(handshakesOnly: Boolean)
     fun interruptModeSwitch(operationId: Long)
@@ -32,6 +32,9 @@ interface IWifiListController {
 
     /** 请求 Service 执行进入脚本；持续抓取时单独选择信道。 */
     fun enterMonitorMode(command: String)
+
+    suspend fun readMonitorCommunications(sessionGeneration: Long, bssid: String, deviceMac: String, fromIndex: Long): MonitorCommunicationPage
+    suspend fun readMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long): MonitorCommunicationDetailPage
 
     fun exportAllMonitorPcap(): String
 

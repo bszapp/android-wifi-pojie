@@ -14,28 +14,68 @@ import kotlinx.parcelize.Parcelize
  */
 sealed interface WifiState : Parcelable {
 
-    /** Wi-Fi 状态读取成功。 */
-    sealed interface Data : WifiState {
-
-        /** Wi-Fi 已关闭。 */
-        @Parcelize
-        data object Disabled : Data
-
-        /** Wi-Fi 已开启。 */
-        @Parcelize
-        data class Enabled(
-            val scanResults: List<ScanResult>,
-            val isScanning: Boolean,
-            val connection: WifiInfo?,
-        ) : Data
-    }
-
-    /** Wi-Fi 状态读取或更新失败。 */
+    /** 系统扫描作用域的数据；null 表示尚未取得该来源的数据。 */
     @Parcelize
-    data class Error(
-        val exception: Exception,
+    data class System(val data: SystemScanData?) : WifiState
+
+    /** 底层扫描作用域的数据，不包含 Android 的 Wi-Fi 开关状态。 */
+    @Parcelize
+    data class Underlying(val data: UnderlyingScanData?) : WifiState
+
+    /** 监听模式的扫描快照，与普通模式的两个来源互斥。 */
+    @Parcelize
+    data class Monitor(
+        val scanResults: List<ScanResult>,
+        val isScanning: Boolean,
     ) : WifiState
 }
 
+sealed interface SystemScanData : Parcelable {
+    @Parcelize
+    data object Disabled : SystemScanData
+
+    @Parcelize
+    data class Enabled(
+        val scanResults: List<ScanResult>,
+        val isScanning: Boolean,
+        val connection: WifiInfo?,
+    ) : SystemScanData
+}
+
+@Parcelize
+data class UnderlyingScanData(
+    val scanResults: List<ScanResult>,
+    val isScanning: Boolean,
+    val connection: WifiInfo?,
+) : Parcelable
+
+val WifiState?.scanResults: List<ScanResult>
+    get() = when (this) {
+        is WifiState.System -> (data as? SystemScanData.Enabled)?.scanResults.orEmpty()
+        is WifiState.Underlying -> data?.scanResults.orEmpty()
+        is WifiState.Monitor -> scanResults
+        null -> emptyList()
+    }
+
+val WifiState?.connection: WifiInfo?
+    get() = when (this) {
+        is WifiState.System -> (data as? SystemScanData.Enabled)?.connection
+        is WifiState.Underlying -> data?.connection
+        is WifiState.Monitor, null -> null
+    }
+
 val WifiState?.isScanning: Boolean
-    get() = (this as? WifiState.Data.Enabled)?.isScanning == true
+    get() = when (this) {
+        is WifiState.System -> (data as? SystemScanData.Enabled)?.isScanning == true
+        is WifiState.Underlying -> data?.isScanning == true
+        is WifiState.Monitor -> isScanning
+        null -> false
+    }
+
+val WifiState?.hasData: Boolean
+    get() = when (this) {
+        is WifiState.System -> data != null
+        is WifiState.Underlying -> data != null
+        is WifiState.Monitor -> true
+        null -> false
+    }

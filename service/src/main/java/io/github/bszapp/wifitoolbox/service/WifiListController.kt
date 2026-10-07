@@ -3,9 +3,6 @@
 package io.github.bszapp.wifitoolbox.service
 
 import android.net.wifi.ScanResult
-import android.net.wifi.SupplicantState
-import android.net.wifi.WifiInfo
-import android.net.wifi.WifiManager
 import android.os.SystemClock
 import android.system.OsConstants
 import android.util.Log
@@ -13,6 +10,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChannel
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.contract.wifilist.WifiListDataSource
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiModeState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiModeSwitch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
@@ -57,11 +55,6 @@ internal class WifiListController(
         Thread(runnable, "toolbox-service-wifi-interrupt").apply { isDaemon = true }
     }
 
-    /** 扫描请求、确认回调和扫描会话由本控制器直接拥有，不经过 AndroidApi。 */
-    private val wifiScannerClient by lazy {
-        WifiScannerClient(requireAndroidApi().callerPackage)
-    }
-
     @Volatile
     private var wifiState: WifiState? = null
 
@@ -84,8 +77,6 @@ internal class WifiListController(
         }
     }
     private var monitorScanActive = false
-    /** 当前监听模式内曾扫描到的接入点；每次扫描单独决定哪些仍有信号。 */
-    private val monitorScanHistory = linkedMapOf<String, ScanResult>()
     private val diagnosticSubmitted = AtomicLong()
     private val diagnosticCompleted = AtomicLong()
     private val diagnosticQueueLoggedAt = AtomicLong()
@@ -103,20 +94,13 @@ internal class WifiListController(
     /** 仅供服务内部保护执行中的操作，不作为公开模式或 UI 状态。 */
     @Volatile
     private var modeOperationInProgress = false
-    private var pendingScanRequest: PendingScanRequest? = null
-    private var scanSession: ScanSession? = null
-    private var primaryNetworkStatus: Int? = null
     @Volatile private var informationSourceTransitionTerminalId: Long? = null
-    private var systemWifiEnabledPollingFuture: ScheduledFuture<*>? = null
     private var interfaceModePollingFuture: ScheduledFuture<*>? = null
-    private var lastSystemWifiEnabled: Boolean? = null
-
-    @Volatile
-    private var hybridTaskReady = false
 
     private val monitorModeController = MonitorModeController(
         terminalManager = terminalManager,
         captureChannel = ::monitorCaptureChannel,
+        savedNetworks = { savedWifiList?.networks ?: requireAndroidApi().getSavedWifiList() },
         onStatisticsChanged = { statistics ->
             execute("monitorStatistics") { publishMonitorStatistics(statistics) }
         },
@@ -141,19 +125,49 @@ internal class WifiListController(
 
     )
 
+    private val normalScanner: NormalWifiScanner = NormalWifiScanner(
+        androidApi = ::requireAndroidApi,
+        hybridScanner = hybridWifiScanner,
+        parseUnderlyingResults = { parseHybridScanResults(it.getJSONArray("wifilist")) },
+        onState = { state, runIfCurrent ->
+            execute("normalScanState") {
+                runIfCurrent {
+                    if (modeState.mode == WifiMode.NORMAL) {
+                        val source = when (state) {
+                            is WifiState.System -> WifiListDataSource.SYSTEM
+                            is WifiState.Underlying -> WifiListDataSource.UNDERLYING
+                            is WifiState.Monitor -> error("普通扫描器不能发布监听扫描数据")
+                        }
+                        if (modeState.listDataSource != source) {
+                            publishModeState(modeState.copy(listDataSource = source))
+                        }
+                        publishWifiState(state)
+                    }
+                }
+            }
+        },
+        onSavedNetworksChanged = ::refreshSavedNetworks,
+        onError = ::reportError,
+    )
+
+    /** 模式只控制扫描作用域是否启用；来源请求由扫描器自身保存。 */
+    private fun syncNormalScanSelection() {
+        normalScanner.setEnabled(
+            initialized && !stopped && !modeOperationInProgress && modeState.mode == WifiMode.NORMAL &&
+                modeState.modeSwitch?.isRunning != true
+        )
+    }
+
+    fun beforeContainerDelete() = normalScanner.beforeContainerDelete()
+    fun afterContainerOperation() = normalScanner.afterContainerOperation()
+
     fun getWifiState(): WifiState? = wifiState
 
     fun getSavedWifiList(): SavedWifiList? = savedWifiList
 
     fun getModeState(): WifiModeState = modeState
 
-    fun isHybridTaskReady(): Boolean {
-        val mode = modeState
-        return hybridTaskReady && mode.mode == WifiMode.NORMAL &&
-            mode.hybridScanEnabled && !modeOperationInProgress
-    }
-
-    fun isNetworkCardTaskReady(): Boolean = environmentConfigured &&
+    fun isNormalModeTaskReady(): Boolean = environmentConfigured &&
         modeState.mode == WifiMode.NORMAL && !modeOperationInProgress
 
     fun initialize() {
@@ -165,17 +179,17 @@ internal class WifiListController(
                 publishDetectedMode(readInterfaceMode(WifiMode.NORMAL))
                 if (modeState.mode == WifiMode.MONITOR) {
                     setInterfaceUp(false)
-                    publishWifiState(WifiState.Data.Enabled(emptyList(), false, null))
+                    publishWifiState(WifiState.Monitor(emptyList(), false))
                     refreshSavedNetworksInternal()
                     if (environmentConfigured) initializeMonitorSession()
                 } else {
-                    refreshWifiDataInternal()
-                    startSystemWifiEnabledPolling()
+                    refreshSavedNetworksInternal()
                 }
             } catch (error: Throwable) {
                 reportError("准备 Wi-Fi 数据", error)
             } finally {
                 modeOperationInProgress = false
+                syncNormalScanSelection()
                 startInterfaceModePolling()
             }
         }
@@ -215,20 +229,13 @@ internal class WifiListController(
         }
     }
 
-    fun setHybridScanEnabled(enabled: Boolean) {
+    fun setWifiListDataSource(source: WifiListDataSource) {
         execute {
             runCatching {
                 check(!modeOperationInProgress) { "网卡操作尚未完成" }
-                check(modeState.mode == WifiMode.NORMAL) { "混合扫描仅用于普通模式" }
-                if (modeState.hybridScanEnabled == enabled) return@runCatching
-                check(environmentConfigured) { "容器环境尚未配置" }
-                val generation = ++modeGeneration
-                modeOperationInProgress = true
-                cancelScanInternal(true)
-                stopSystemWifiEnabledPolling()
-                if (enabled) switchToHybridSource(generation)
-                else switchToSystemSource(generation)
-            }.onFailure { reportError("修改混合扫描方式", it) }
+                check(modeState.mode == WifiMode.NORMAL) { "列表数据源仅用于普通模式" }
+                normalScanner.select(source)
+            }.onFailure { reportError("选择 Wi-Fi 扫描来源", it) }
         }
     }
 
@@ -485,32 +492,26 @@ internal class WifiListController(
             runCatching { stopModeTransition() }
             runCatching { monitorModeController.abortProcess(error) }
             runCatching { monitorScanner.stop() }
-            runCatching { hybridWifiScanner.stop() }
+            runCatching { normalScanner.awaitInactive() }
             execute("interruptModeSwitch") cleanup@{
                 if (modeState.modeSwitch?.operationId != operationId) return@cleanup
                 ++modeGeneration
-                cancelScanInternal(true)
+                normalScanner.awaitInactive()
                 // 收回请求中断与工作线程真正退出之间可能创建的资源。
                 stopModeTransition()
                 monitorModeController.abortProcess(error)
                 monitorScanner.stop()
-                hybridWifiScanner.stop()
                 monitorRestoreCompletion = null
                 monitorCapturePlan = MonitorCapturePlan.Stopped
                 monitorCaptureChangeActive = false
                 monitorCaptureOperationId++
                 monitorScanActive = false
-                hybridTaskReady = false
                 publishDetectedMode(readInterfaceMode())
                 modeOperationInProgress = false
                 if (modeState.mode == WifiMode.MONITOR) {
                     runCatching { setInterfaceUp(false) }.onFailure { reportError("中断模式切换后停止接收", it) }
                     publishModeState(modeState.copy(capturing = false, hoppingCapture = false, clearingCapture = false,
                         captureClearProgress = monitorModeController.captureClearProgress()))
-                } else {
-                    publishModeState(modeState.copy(hybridScanEnabled = false))
-                    refreshWifiDataInternal()
-                    startSystemWifiEnabledPolling()
                 }
                 finishModeSwitch()
             }
@@ -568,8 +569,8 @@ internal class WifiListController(
                 ownsScan = true
                 Log.d(TAG, "[MonitorDiagnostic] scanBegin modeGeneration=$generation capturing=${modeState.capturing}")
                 setInterfaceUp(true)
-                val current = wifiState as? WifiState.Data.Enabled
-                publishWifiState(WifiState.Data.Enabled(current?.scanResults.orEmpty(), true, null))
+                val current = wifiState as? WifiState.Monitor
+                publishWifiState(WifiState.Monitor(current?.scanResults.orEmpty(), true))
                 monitorScanner.start(onMessage = { message ->
                     execute {
                         if (isCurrentMode(generation, WifiMode.MONITOR) && scanGeneration == scanId) {
@@ -586,7 +587,7 @@ internal class WifiListController(
                 }, restore = {
                     restoreMonitorReception(generation) {
                         monitorScanActive = false
-                        (wifiState as? WifiState.Data.Enabled)?.let { publishWifiState(it.copy(isScanning = false)) }
+                        (wifiState as? WifiState.Monitor)?.let { publishWifiState(it.copy(isScanning = false)) }
                     }
                 }, onFinished = { code, restoreError ->
                     execute {
@@ -594,7 +595,7 @@ internal class WifiListController(
                             if (restoreError != null) {
                                 failMonitorReception("恢复 monitor 接收", unwrapCompletionFailure(restoreError))
                                 monitorScanActive = false
-                                (wifiState as? WifiState.Data.Enabled)?.let { publishWifiState(it.copy(isScanning = false)) }
+                                (wifiState as? WifiState.Monitor)?.let { publishWifiState(it.copy(isScanning = false)) }
                             }
                             Log.d(TAG, "[MonitorDiagnostic] scanEnd modeGeneration=$generation exitCode=$code capturing=${modeState.capturing}")
                             if (code != 0) reportError("monitor 扫描", IllegalStateException("扫描脚本退出码 $code"))
@@ -634,110 +635,16 @@ internal class WifiListController(
     }
 
     private fun publishMonitorScanResults(incoming: List<ScanResult>, scanning: Boolean) {
-        incoming.forEach { result ->
-            val key = result.BSSID.lowercase()
-            val previous = monitorScanHistory[key]
-            if (result.SSID.isNullOrEmpty() && !previous?.SSID.isNullOrEmpty()) result.SSID = previous?.SSID
-            monitorScanHistory[key] = result
-        }
-        val visible = incoming.mapTo(hashSetOf()) { it.BSSID.lowercase() }
-        val absent = monitorScanHistory.filterKeys { it !in visible }.values.map { result ->
-            ScanResult(result).apply { level = 0 }
-        }
-        publishWifiState(WifiState.Data.Enabled(incoming + absent, scanning, null))
+        publishWifiState(WifiState.Monitor(incoming, scanning))
     }
 
-    /**
-     * 同步提交扫描请求。
-     *
-     * 当前调用线程会等待 WifiScanner.ScanListener.onSuccess/onFailure。只有 onSuccess 已经
-     * 建立正式扫描会话、发布 isScanning=true 并启动 250ms 更新任务后，本方法才正常返回。
-     * 后续结果等待和数据更新仍由 Service 的 executor 异步执行。
-     */
+    /** 请求只转交给当前活动作用域，monitor 保留独立的扫描调度。 */
     @Throws(Exception::class)
     fun startScan() {
-        if (stopped) throw IllegalStateException("Wi-Fi 服务已停止")
-
-        val sourceState = modeState
+        check(!stopped) { "Wi-Fi 服务已停止" }
         check(!modeOperationInProgress) { "网卡操作尚未完成" }
-        if (sourceState.mode == WifiMode.MONITOR) {
-            startMonitorScanSynchronously()
-            return
-        }
-        if (sourceState.hybridScanEnabled) {
-            startHybridScanSynchronously()
-            return
-        }
-
-        val confirmation = CompletableFuture<Unit>()
-        try {
-            executor.execute {
-                if (stopped) {
-                    confirmation.completeExceptionally(
-                        IllegalStateException("Wi-Fi 服务已停止"),
-                    )
-                } else if (modeOperationInProgress || modeState.mode != WifiMode.NORMAL || modeState.hybridScanEnabled) {
-                    confirmation.completeExceptionally(IllegalStateException("扫描方式已改变或网卡操作尚未完成"))
-                } else {
-                    submitScanRequest(confirmation)
-                }
-            }
-        } catch (error: RejectedExecutionException) {
-            throw IllegalStateException("Wi-Fi 扫描执行器不可用", error)
-        }
-
-        try {
-            confirmation.get(SCAN_START_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        } catch (error: TimeoutException) {
-            val failure = IllegalStateException(
-                "等待 WifiScanner 确认扫描请求超时",
-                error,
-            )
-            confirmation.completeExceptionally(failure)
-            execute { cancelTimedOutPendingRequest(confirmation) }
-            throw failure
-        } catch (error: InterruptedException) {
-            Thread.currentThread().interrupt()
-            val failure = IllegalStateException("等待扫描请求确认时线程被中断", error)
-            confirmation.completeExceptionally(failure)
-            execute { cancelTimedOutPendingRequest(confirmation) }
-            throw failure
-        } catch (error: ExecutionException) {
-            val cause = error.cause ?: error
-            throw when (cause) {
-                is Exception -> cause
-                else -> RuntimeException(cause)
-            }
-        }
-    }
-
-    /** Service 检测到 Wi-Fi 开关可能变化时自行刷新数据，不接受 App 的状态刷新命令。 */
-    fun onWifiStateMayHaveChanged() {
-        execute {
-            if (modeOperationInProgress) { refreshSavedNetworksInternal(); return@execute }
-            if (modeState.mode != WifiMode.NORMAL || modeState.hybridScanEnabled) {
-                Log.d(TAG, "非系统模式收到 Wi-Fi 状态事件，仅刷新已保存网络")
-                refreshSavedNetworksInternal()
-            } else {
-                Log.d(TAG, "检测到 Wi-Fi 状态可能变化，刷新 Service 数据")
-                refreshWifiDataInternal()
-            }
-        }
-    }
-
-    fun onWifiNetworkStateChanged(clientRole: Int, status: Int) {
-        execute {
-            if (modeOperationInProgress || clientRole != WIFI_ROLE_CLIENT_PRIMARY) return@execute
-            if (modeState.mode == WifiMode.MONITOR) return@execute
-            primaryNetworkStatus = status
-            val current = wifiState as? WifiState.Data.Enabled ?: return@execute
-            val connection = readCurrentConnection(
-                api = requireAndroidApi(),
-                previous = current.connection,
-                operation = "响应 Wi-Fi 网络状态变化",
-            )
-            publishWifiState(current.copy(connection = connection))
-        }
+        if (modeState.mode == WifiMode.MONITOR) startMonitorScanSynchronously()
+        else normalScanner.startScan()
     }
 
     fun setMode(
@@ -752,9 +659,7 @@ internal class WifiListController(
             val generation = ++modeGeneration
             publishModeState(modeState.copy(modeSwitch = WifiModeSwitch(mode, true, generation)))
             try {
-                hybridTaskReady = false
-                stopSystemWifiEnabledPolling()
-                cancelScanInternal(true)
+                normalScanner.awaitInactive()
                 stopModeTransition()
                 val detected = readInterfaceMode(current.mode)
                 publishDetectedMode(detected)
@@ -785,16 +690,13 @@ internal class WifiListController(
             val generation = ++modeGeneration
             publishModeState(modeState.copy(modeSwitch = WifiModeSwitch(WifiMode.MONITOR, true, generation)))
             try {
-                hybridTaskReady = false
-                stopSystemWifiEnabledPolling()
-                cancelScanInternal(true)
+                normalScanner.awaitInactive()
                 stopModeTransition()
                 monitorScanner.stop()
                 monitorScanActive = false
                 monitorCapturePlan = MonitorCapturePlan.Stopped
                 monitorCaptureChangeActive = false
                 monitorModeController.stop()
-                hybridWifiScanner.stop()
                 runChrootTerminalScript(command) { exitCode ->
                     if (generation != modeGeneration || interruptedModeOperation.get() == generation) return@runChrootTerminalScript
                     try {
@@ -944,13 +846,7 @@ internal class WifiListController(
         check(mode == WifiMode.NORMAL) { "监听模式使用专用入口" }
         requireAndroidApi().setWifiEnabled(true)
 
-        fun completeSwitch() {
-            if (modeState.hybridScanEnabled) {
-                switchToHybridSource(generation)
-            } else {
-                switchToSystemSource(generation)
-            }
-        }
+        fun completeSwitch() = switchToSystemSource(generation)
 
         if (!waitForNormalMode) {
             completeSwitch()
@@ -1012,6 +908,12 @@ internal class WifiListController(
     fun getMonitorChanges(sessionGeneration: Long, afterRevision: Long) =
         monitorModeController.changesPage(sessionGeneration, afterRevision)
 
+    fun getMonitorCommunications(session: Long, bssid: String, mac: String, from: Long) =
+        monitorModeController.communicationPage(session, bssid, mac, from)
+
+    fun getMonitorCommunicationDetail(session: Long, bssid: String, mac: String, id: String, cursor: Long) =
+        monitorModeController.communicationDetail(session, bssid, mac, id, cursor)
+
     private fun publishMonitorStatistics(statistics: MonitorModeStatistics) {
         val current = modeState
         if (current.mode != WifiMode.MONITOR || modeOperationInProgress ||
@@ -1070,114 +972,17 @@ internal class WifiListController(
     }
 
     private fun switchToSystemSource(generation: Long) {
-        try {
-            hybridWifiScanner.stop()
-            if (!isCurrentMode(generation, WifiMode.NORMAL)) return
-            modeOperationInProgress = false
-            publishModeState(
-                WifiModeState(
-                    mode = WifiMode.NORMAL,
-                    modeSwitch = modeState.modeSwitch,
-                    hybridScanEnabled = false,
-                ),
-            )
-            refreshWifiDataInternal()
-            startSystemWifiEnabledPolling()
-            finishModeSwitch()
-            Log.i(TAG, "Wi-Fi 信息源已切换为系统模式")
-        } catch (error: Throwable) {
-            finishModeFailure(
-                generation = generation,
-                operation = "切换到系统模式",
-                error = error,
-            )
-        }
-    }
-
-    private fun switchToHybridSource(
-        generation: Long,
-    ) {
-        val startup = try {
-            hybridWifiScanner.start()
-        } catch (error: Throwable) {
-            finishModeFailure(
-                generation = generation,
-                operation = "初始化混合模式终端",
-                error = error,
-            )
-            return
-        }
-        startup.whenComplete { _, failure ->
-            execute {
-                if (!isCurrentMode(generation, WifiMode.NORMAL)) {
-                    return@execute
-                }
-                if (failure != null) {
-                    finishModeFailure(
-                        generation = generation,
-                        operation = "初始化混合模式终端",
-                        error = unwrapCompletionFailure(failure),
-                    )
-                    return@execute
-                }
-
-                hybridTaskReady = true
-
-                modeOperationInProgress = false
-                publishModeState(
-                    WifiModeState(
-                        mode = WifiMode.NORMAL,
-                        modeSwitch = modeState.modeSwitch,
-                        hybridScanEnabled = true,
-                    ),
-                )
-                startSystemWifiEnabledPolling()
-                finishModeSwitch()
-                Log.i(TAG, "Wi-Fi 信息源已切换为混合模式，读取已有扫描结果")
-                //TODO:这里需要给scan.py添加仅读取功能，我不希望首次扫描。
-                val confirmation = try {
-                    hybridWifiScanner.readPreviousResults { payload ->
-                        execute {
-                            if (isCurrentMode(generation, WifiMode.NORMAL)) {
-                                handleHybridScanMessage(payload)
-                            }
-                        }
-                    }
-                } catch (error: Throwable) {
-                    reportError("读取混合模式已有扫描结果", error)
-                    return@execute
-                }
-                confirmation.whenComplete { _, scanFailure ->
-                    if (scanFailure != null) {
-                        execute {
-                            if (isCurrentMode(
-                                    generation,
-                                    WifiMode.NORMAL,
-                                )
-                            ) {
-                                reportError(
-                                    "读取混合模式已有扫描结果",
-                                    unwrapCompletionFailure(scanFailure),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        if (!isCurrentMode(generation, WifiMode.NORMAL)) return
+        modeOperationInProgress = false
+        normalScanner.select(WifiListDataSource.SYSTEM)
+        refreshSavedNetworksInternal()
+        finishModeSwitch()
     }
 
     private fun finishModeFailure(generation: Long, operation: String, error: Throwable) {
         if (generation != modeGeneration || interruptedModeOperation.get() == generation) return
         publishDetectedMode(readInterfaceMode())
         modeOperationInProgress = false
-        hybridTaskReady = false
-        if (modeState.mode == WifiMode.NORMAL) {
-            hybridWifiScanner.stop()
-            publishModeState(modeState.copy(hybridScanEnabled = false))
-            refreshWifiDataInternal()
-            startSystemWifiEnabledPolling()
-        }
         refreshSavedNetworksInternal()
         finishModeSwitch()
         reportError(operation, error)
@@ -1195,12 +1000,10 @@ internal class WifiListController(
     private fun publishInitializedMonitorMode() {
         val previous = modeState
         if (previous.mode == WifiMode.MONITOR) return
-        monitorScanHistory.clear()
         monitorCapturePlan = MonitorCapturePlan.Stopped
         monitorCaptureChangeActive = false
-        stopSystemWifiEnabledPolling()
-        publishModeState(previous.copy(mode = WifiMode.MONITOR, hybridScanEnabled = false))
-        publishWifiState(WifiState.Data.Enabled(emptyList(), false, null))
+        publishModeState(previous.copy(mode = WifiMode.MONITOR))
+        publishWifiState(WifiState.Monitor(emptyList(), false))
     }
 
     private fun readInterfaceMode(fallback: WifiMode = modeState.mode): WifiMode =
@@ -1211,20 +1014,17 @@ internal class WifiListController(
     private fun publishDetectedMode(detected: WifiMode) {
         val previous = modeState
         if (previous.mode == detected) return
-        monitorScanHistory.clear()
         monitorCapturePlan = MonitorCapturePlan.Stopped
         monitorCaptureChangeActive = false
         if (detected == WifiMode.NORMAL) {
             monitorScanner.stop()
             monitorScanActive = false
             monitorModeController.stop()
-        } else {
-            stopSystemWifiEnabledPolling()
         }
         publishModeState(WifiModeState(mode = detected,
             modeSwitch = previous.modeSwitch,
-            hybridScanEnabled = previous.hybridScanEnabled && detected == WifiMode.NORMAL))
-        if (detected == WifiMode.MONITOR) publishWifiState(WifiState.Data.Enabled(emptyList(), false, null))
+            listDataSource = previous.listDataSource))
+        if (detected == WifiMode.MONITOR) publishWifiState(WifiState.Monitor(emptyList(), false))
     }
 
     private fun isCurrentMode(
@@ -1238,6 +1038,7 @@ internal class WifiListController(
     private fun publishModeState(next: WifiModeState) {
         val previous = modeState
         modeState = next
+        syncNormalScanSelection()
         val now = SystemClock.elapsedRealtime()
         if (previous.mode != next.mode || previous.capturing != next.capturing ||
             previous.clearingCapture != next.clearingCapture || previous.hoppingCapture != next.hoppingCapture ||
@@ -1261,53 +1062,29 @@ internal class WifiListController(
         }
 
     fun stop() {
+        if (stopped) return
+        val completion = CompletableFuture<Unit>()
         executor.execute {
-            if (stopped) return@execute
-            stopped = true
-            hybridTaskReady = false
-            Log.d(TAG, "停止 Wi-Fi 控制器")
-            cancelScanInternal(publishChange = false)
-            stopModeTransition()
-            monitorCapturePlan = MonitorCapturePlan.Stopped
-            monitorCaptureChangeActive = false
-            monitorScanner.stop()
-            monitorModeController.close()
-            stopSystemWifiEnabledPolling()
-            interfaceModePollingFuture?.cancel(true)
-            interfaceModePollingFuture = null
-            interfaceModePollingExecutor.shutdownNow()
-            interruptionExecutor.shutdownNow()
-            executor.shutdown()
+            try {
+                if (!stopped) {
+                    normalScanner.close()
+                    stopModeTransition()
+                    monitorCapturePlan = MonitorCapturePlan.Stopped
+                    monitorCaptureChangeActive = false
+                    monitorScanner.stop()
+                    monitorModeController.close()
+                    interfaceModePollingFuture?.cancel(true)
+                    interfaceModePollingFuture = null
+                    interfaceModePollingExecutor.shutdownNow()
+                    interruptionExecutor.shutdownNow()
+                    stopped = true
+                    executor.shutdown()
+                }
+                completion.complete(Unit)
+            } catch (error: Throwable) { completion.completeExceptionally(error) }
         }
-    }
-
-    /**
-     * 刷新完整 Wi-Fi 数据。
-     *
-     * 读取扫描结果时必须在同一任务中读取并发布 [SavedWifiList]。需要仅读取已保存网络时，
-     * 调用 [refreshSavedNetworksInternal]。
-     */
-    private fun refreshWifiDataInternal() {
-        try {
-            val api = requireAndroidApi()
-            if (!api.isWifiEnabled()) {
-                cancelScanInternal(publishChange = false)
-                publishWifiState(WifiState.Data.Disabled)
-                Log.d(TAG, "已更新 WifiState：Disabled")
-            } else {
-                publishEnabledWifiDataAndSavedList(
-                    api = api,
-                    isScanning = scanSession != null,
-                )
-                return
-            }
-        } catch (error: Throwable) {
-            reportError("刷新 Wi-Fi 数据", error)
-            publishWifiStateError(error)
-        }
-
-        // Disabled/Error 路径仍属于完整刷新，同步维护独立的 SavedWifiList。
-        refreshSavedNetworksInternal()
+        try { completion.get() }
+        catch (error: ExecutionException) { throw (error.cause as? Exception ?: RuntimeException(error.cause)) }
     }
 
     /** 独立读取线程，避免扫描或容器脚本等待阻塞每秒的网卡类型检测。 */
@@ -1341,11 +1118,10 @@ internal class WifiListController(
     private fun handleExternalInterfaceModeChange(detected: WifiMode) {
         val previous = modeState.mode
         val generation = ++modeGeneration
+        modeOperationInProgress = true
         try {
-            cancelScanInternal(publishChange = true)
-            hybridTaskReady = false
-            hybridWifiScanner.stop()
             publishDetectedMode(detected)
+            if (detected == WifiMode.MONITOR) normalScanner.awaitInactive()
             if (previous == WifiMode.MONITOR) {
                 // publishDetectedMode 已停止录制、跳频和统计进程，并清理离开模式后的数据。
                 reportError("监听模式意外改变", IllegalStateException(
@@ -1361,87 +1137,10 @@ internal class WifiListController(
             }
         } catch (error: Throwable) {
             reportError("同步网卡模式变化", error)
+        } finally {
+            modeOperationInProgress = false
+            syncNormalScanSelection()
         }
-    }
-
-    private fun startSystemWifiEnabledPolling() {
-        stopSystemWifiEnabledPolling()
-        if (modeState.mode != WifiMode.NORMAL || stopped) return
-        lastSystemWifiEnabled = when (wifiState) {
-            is WifiState.Data.Enabled -> true
-            is WifiState.Data.Disabled -> false
-            else -> null
-        }
-        systemWifiEnabledPollingFuture = executor.scheduleAtFixedRate(
-            ::refreshSystemWifiEnabledState,
-            SYSTEM_WIFI_ENABLED_REFRESH_INTERVAL_MS,
-            SYSTEM_WIFI_ENABLED_REFRESH_INTERVAL_MS,
-            TimeUnit.MILLISECONDS,
-        )
-    }
-
-    private fun stopSystemWifiEnabledPolling() {
-        systemWifiEnabledPollingFuture?.cancel(false)
-        systemWifiEnabledPollingFuture = null
-        lastSystemWifiEnabled = null
-    }
-
-    private fun refreshSystemWifiEnabledState() {
-        if (
-            stopped ||
-            modeState.mode != WifiMode.NORMAL ||
-            modeOperationInProgress
-        ) return
-        try {
-            val enabled = requireAndroidApi().isWifiEnabled()
-            val previousEnabled = lastSystemWifiEnabled
-            lastSystemWifiEnabled = enabled
-            if (previousEnabled == null || previousEnabled == enabled) return
-            if (enabled) {
-                publishWifiState(
-                    WifiState.Data.Enabled(
-                        scanResults = emptyList(),
-                        isScanning = false,
-                        connection = null,
-                    ),
-                )
-            } else {
-                cancelScanInternal(publishChange = false)
-                publishWifiState(WifiState.Data.Disabled)
-            }
-        } catch (error: Throwable) {
-            reportError("刷新系统模式 Wi-Fi 开关状态", error)
-        }
-    }
-
-    /**
-     * 唯一允许读取扫描结果的入口。
-     * 每次读取并发布扫描结果后，必须在同一串行任务中读取并发布 SavedWifiList。
-     */
-    private fun publishEnabledWifiDataAndSavedList(
-        api: AndroidApi,
-        isScanning: Boolean,
-    ) {
-        val scanResults = readScanResults(api)
-        val previousConnection = (wifiState as? WifiState.Data.Enabled)?.connection
-        val connection = readCurrentConnection(
-            api = api,
-            previous = previousConnection,
-            operation = "刷新当前 Wi-Fi 连接信息",
-        )
-        publishWifiState(
-            WifiState.Data.Enabled(
-                scanResults = scanResults,
-                isScanning = isScanning,
-                connection = connection,
-            ),
-        )
-        Log.d(
-            TAG,
-            "已更新 WifiState：Enabled scan=${scanResults.size} scanning=$isScanning " +
-                "connected=${connection != null}",
-        )
-        refreshSavedNetworksInternal()
     }
 
     private fun refreshSavedNetworksInternal() {
@@ -1455,111 +1154,6 @@ internal class WifiListController(
             // SavedWifiList 与 WifiState 无关；读取失败时保留最后一份列表，不篡改 WifiState。
             reportError("刷新已保存 Wi-Fi 列表", error)
         }
-    }
-
-    private fun startHybridScanSynchronously() {
-        val confirmation = CompletableFuture<Unit>()
-        try {
-            executor.execute {
-                try {
-                    check(
-                        modeState.mode == WifiMode.NORMAL && modeState.hybridScanEnabled &&
-                            !modeOperationInProgress,
-                    ) { "混合模式扫描终端尚未就绪" }
-                    beginHybridScan().whenComplete { _, failure ->
-                        if (failure == null) {
-                            confirmation.complete(Unit)
-                        } else {
-                            confirmation.completeExceptionally(
-                                unwrapCompletionFailure(failure),
-                            )
-                        }
-                    }
-                } catch (error: Throwable) {
-                    confirmation.completeExceptionally(error)
-                }
-            }
-        } catch (error: RejectedExecutionException) {
-            throw IllegalStateException("Wi-Fi 扫描执行器不可用", error)
-        }
-
-        try {
-            confirmation.get(SCAN_START_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        } catch (error: TimeoutException) {
-            throw IllegalStateException("等待混合模式扫描请求确认超时", error)
-        } catch (error: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw IllegalStateException("等待混合模式扫描请求确认时线程被中断", error)
-        } catch (error: ExecutionException) {
-            val cause = error.cause ?: error
-            throw when (cause) {
-                is Exception -> cause
-                else -> RuntimeException(cause)
-            }
-        }
-    }
-
-    private fun beginHybridScan(): CompletableFuture<Unit> {
-        val generation = modeGeneration
-        return hybridWifiScanner.runWifiScan(
-            onMessage = { payload ->
-                execute {
-                    if (isCurrentMode(generation, WifiMode.NORMAL)) {
-                        handleHybridScanMessage(payload)
-                    }
-                }
-            },
-            onFinished = { exitCode ->
-                execute { finishHybridScan(generation, exitCode) }
-            },
-        )
-    }
-
-    private fun handleHybridScanMessage(payload: JSONObject) {
-        if (payload.optString("action") != "update_wifi_state") return
-        try {
-            val state = payload.getJSONObject("state")
-            when (state.getString("type")) {
-                "enabled" -> {
-                    val api = requireAndroidApi()
-                    val previousConnection =
-                        (wifiState as? WifiState.Data.Enabled)?.connection
-                    publishWifiState(
-                        WifiState.Data.Enabled(
-                            scanResults = parseHybridScanResults(state.getJSONArray("wifilist")),
-                            isScanning = state.optBoolean("scanning", false),
-                            connection = readCurrentConnection(
-                                api = api,
-                                previous = previousConnection,
-                                operation = "刷新混合模式当前 Wi-Fi 连接信息",
-                            ),
-                        ),
-                    )
-                }
-                "error" -> publishWifiStateError(
-                    IllegalStateException(
-                        state.optString("message", "混合模式扫描发生未知错误"),
-                    ),
-                )
-                else -> throw IllegalArgumentException(
-                    "未知混合模式 Wi-Fi 状态: ${state.optString("type")}",
-                )
-            }
-            refreshSavedNetworksInternal()
-        } catch (error: Throwable) {
-            publishWifiStateError(error)
-            refreshSavedNetworksInternal()
-            reportError("解析混合模式 Wi-Fi 状态", error)
-        }
-    }
-
-    private fun finishHybridScan(generation: Long, exitCode: Int) {
-        if (!isCurrentMode(generation, WifiMode.NORMAL)) return
-        val current = wifiState as? WifiState.Data.Enabled
-        if (current?.isScanning == true) {
-            publishWifiState(current.copy(isScanning = false))
-        }
-        Log.d(TAG, "混合模式扫描进程结束：exitCode=$exitCode")
     }
 
     private fun parseHybridScanResults(values: JSONArray): List<ScanResult> =
@@ -1584,307 +1178,6 @@ internal class WifiListController(
             }
         }
 
-    private fun submitScanRequest(confirmation: CompletableFuture<Unit>) {
-        if (pendingScanRequest != null || scanSession != null) {
-            confirmation.completeExceptionally(
-                IllegalStateException("已有 Wi-Fi 扫描请求或扫描任务正在运行"),
-            )
-            return
-        }
-
-        if (wifiState !is WifiState.Data.Enabled) {
-            confirmation.completeExceptionally(
-                IllegalStateException("Wi-Fi 当前未处于 Enabled 状态"),
-            )
-            return
-        }
-
-        try {
-            requireAndroidApi()
-        } catch (error: Throwable) {
-            confirmation.completeExceptionally(error)
-            return
-        }
-
-        val generation = ++scanGeneration
-        val pending = PendingScanRequest(
-            generation = generation,
-            confirmation = confirmation,
-        )
-        pendingScanRequest = pending
-
-        val listener = object : WifiScannerClient.ScanListener {
-            override fun onSuccess() {
-                execute { handleScanRequestAccepted(generation) }
-            }
-
-            override fun onFailure(reason: Int, description: String) {
-                execute {
-                    handleScanRequestRejected(
-                        generation = generation,
-                        reason = reason,
-                        description = description,
-                    )
-                }
-            }
-
-            override fun onResults() {
-                execute { handleScanResults(generation) }
-            }
-        }
-
-        try {
-            Log.d(TAG, "向 WifiScanner 提交扫描请求：generation=$generation")
-            pending.request = wifiScannerClient.startScan(
-                callbackExecutor = executor,
-                callback = listener,
-            )
-        } catch (error: Throwable) {
-            if (pendingScanRequest === pending) pendingScanRequest = null
-            confirmation.completeExceptionally(error)
-            Log.e(TAG, "提交 WifiScanner 扫描请求失败：${error.message}", error)
-        }
-    }
-
-    private fun handleScanRequestAccepted(generation: Long) {
-        val pending = pendingScanRequest ?: return
-        if (pending.generation != generation) return
-
-        val request = pending.request ?: run {
-            val error = IllegalStateException("WifiScanner 已确认请求，但请求句柄尚未建立")
-            pendingScanRequest = null
-            pending.confirmation.completeExceptionally(error)
-            return
-        }
-
-        // Binder 调用已经超时或被中断时，不再建立后台扫描任务。
-        if (pending.confirmation.isDone) {
-            pendingScanRequest = null
-            stopScannerRequestQuietly(request)
-            return
-        }
-
-        val enabledState = wifiState as? WifiState.Data.Enabled
-        if (enabledState == null) {
-            pendingScanRequest = null
-            stopScannerRequestQuietly(request)
-            pending.confirmation.completeExceptionally(
-                IllegalStateException("WifiScanner 接受请求时 Wi-Fi 已不再是 Enabled"),
-            )
-            return
-        }
-
-        val session = ScanSession(
-            generation = generation,
-            startedAt = SystemClock.elapsedRealtime(),
-            request = request,
-            resultsReceived = pending.resultsReceived,
-        )
-        pendingScanRequest = null
-        scanSession = session
-
-        publishWifiState(enabledState.copy(isScanning = true))
-        session.pollingFuture = executor.scheduleAtFixedRate(
-            { runScanTick(generation) },
-            0L,
-            SCAN_REFRESH_INTERVAL_MS,
-            TimeUnit.MILLISECONDS,
-        )
-
-        Log.d(TAG, "WifiScanner 已接受扫描请求：generation=$generation")
-        pending.confirmation.complete(Unit)
-        finishScanIfReady(session)
-    }
-
-    private fun handleScanRequestRejected(
-        generation: Long,
-        reason: Int,
-        description: String,
-    ) {
-        val message = buildString {
-            append("WifiScanner 拒绝扫描请求")
-            append("（reason=")
-            append(reason)
-            append('）')
-            if (description.isNotBlank()) {
-                append(": ")
-                append(description)
-            }
-        }
-
-        val pending = pendingScanRequest
-        if (pending != null && pending.generation == generation) {
-            pendingScanRequest = null
-            pending.request?.let(::stopScannerRequestQuietly)
-            pending.confirmation.completeExceptionally(IllegalStateException(message))
-            Log.w(TAG, message)
-            return
-        }
-
-        val session = scanSession
-        if (session != null && session.generation == generation) {
-            Log.w(TAG, "$message；终止已开始的扫描任务")
-            cancelScanInternal(publishChange = true)
-            reportScanFailure(IllegalStateException(message))
-        }
-    }
-
-    private fun handleScanResults(generation: Long) {
-        val pending = pendingScanRequest
-        if (pending != null && pending.generation == generation) {
-            pending.resultsReceived = true
-            return
-        }
-
-        val session = scanSession ?: return
-        if (session.generation != generation) return
-
-        if (!session.resultsReceived) {
-            session.resultsReceived = true
-            Log.d(
-                TAG,
-                "WifiScanner 返回扫描结果：generation=$generation " +
-                    "elapsed=${SystemClock.elapsedRealtime() - session.startedAt}ms",
-            )
-        }
-        finishScanIfReady(session)
-    }
-
-    private fun cancelTimedOutPendingRequest(confirmation: CompletableFuture<Unit>) {
-        val pending = pendingScanRequest ?: return
-        if (pending.confirmation !== confirmation) return
-
-        pendingScanRequest = null
-        pending.request?.let(::stopScannerRequestQuietly)
-        Log.w(TAG, "取消未在规定时间内确认的 WifiScanner 请求：generation=${pending.generation}")
-    }
-
-    private fun runScanTick(generation: Long) {
-        val session = scanSession ?: return
-        if (session.generation != generation) return
-
-        try {
-            if (!updateDataDuringScan()) return
-            session.lastRefreshFailed = false
-        } catch (error: Throwable) {
-            Log.e(TAG, "扫描期间更新数据失败：${error.message}", error)
-            if (!session.lastRefreshFailed) reportScanFailure(error)
-            session.lastRefreshFailed = true
-        }
-
-        finishScanIfReady(session)
-    }
-
-    /** 扫描期间每 250ms 更新 WifiState 的扫描列表，并刷新 SavedWifiList。 */
-    private fun updateDataDuringScan(): Boolean {
-        val api = requireAndroidApi()
-        if (!api.isWifiEnabled()) {
-            refreshWifiDataInternal()
-            return false
-        }
-
-        publishEnabledWifiDataAndSavedList(
-            api = api,
-            isScanning = true,
-        )
-        return true
-    }
-
-    private fun finishScanIfReady(session: ScanSession) {
-        if (scanSession !== session) return
-        val elapsed = SystemClock.elapsedRealtime() - session.startedAt
-        if (!session.resultsReceived || elapsed < MIN_SCAN_DURATION_MS) return
-
-        // 先发布最终扫描列表，再把 isScanning 改为 false。
-        try {
-            if (!updateDataDuringScan()) return
-        } catch (error: Throwable) {
-            Log.e(TAG, "扫描结束瞬间更新数据失败：${error.message}", error)
-            reportScanFailure(error)
-        }
-
-        session.pollingFuture?.cancel(false)
-        scanSession = null
-        val current = wifiState as? WifiState.Data.Enabled
-        if (current != null) publishWifiState(current.copy(isScanning = false))
-        Log.d(TAG, "Wi-Fi 扫描任务完成：generation=${session.generation} elapsed=${elapsed}ms")
-    }
-
-    private fun cancelScanInternal(publishChange: Boolean) {
-        scanGeneration++
-
-        val pending = pendingScanRequest
-        pendingScanRequest = null
-        pending?.request?.let(::stopScannerRequestQuietly)
-        pending?.confirmation?.completeExceptionally(
-            IllegalStateException("Wi-Fi 扫描请求已取消"),
-        )
-
-        val session = scanSession
-        scanSession = null
-        session?.pollingFuture?.cancel(false)
-        session?.request?.let(::stopScannerRequestQuietly)
-
-        if (publishChange) {
-            val current = wifiState as? WifiState.Data.Enabled
-            if (current?.isScanning == true) {
-                publishWifiState(current.copy(isScanning = false))
-            }
-        }
-
-        if (pending != null || session != null) {
-            Log.d(TAG, "已终止 Wi-Fi 扫描请求和扫描任务")
-        }
-    }
-
-    private fun stopScannerRequestQuietly(request: WifiScannerClient.ScanRequest) {
-        runCatching { wifiScannerClient.stopScan(request) }
-            .onFailure { Log.w(TAG, "停止 WifiScanner 请求失败：${it.message}") }
-    }
-
-    private fun readScanResults(api: AndroidApi): List<ScanResult> =
-        api.getScanResults().filterIndexed { index, result ->
-            val keep = !result.BSSID.isNullOrBlank()
-            if (!keep) Log.w(TAG, "丢弃第 $index 项扫描结果：BSSID 为空")
-            keep
-        }
-
-    private fun readCurrentConnection(
-        api: AndroidApi,
-        previous: WifiInfo?,
-        operation: String,
-    ): WifiInfo? {
-        val status = primaryNetworkStatus
-        if (status != null && status != WIFI_NETWORK_STATUS_CONNECTED) return null
-
-        return try {
-            api.getConnectionInfo().takeIf(::isUsableConnectedWifiInfo)
-        } catch (error: Throwable) {
-            reportError(operation, error)
-            previous
-        }
-    }
-
-    private fun isUsableConnectedWifiInfo(info: WifiInfo): Boolean {
-        val ssid = info.ssid
-        val bssid = info.bssid
-        return info.networkId >= 0 &&
-            info.supplicantState == SupplicantState.COMPLETED &&
-            !ssid.isNullOrBlank() &&
-            ssid != WifiManager.UNKNOWN_SSID &&
-            !bssid.isNullOrBlank() &&
-            !bssid.equals(DEFAULT_MAC_ADDRESS, ignoreCase = true)
-    }
-
-    private fun publishWifiStateError(error: Throwable) {
-        val exception = error as? Exception ?: RuntimeException(error)
-        publishWifiState(WifiState.Error(exception))
-    }
-
-    private fun reportScanFailure(error: Throwable) {
-        reportError("执行 Wi-Fi 扫描任务", error)
-    }
-
     private fun reportError(operation: String, error: Throwable) {
         Log.e(TAG, "$operation 失败：${error.message}", error)
         if (!stopped) onError(operation, error)
@@ -1892,18 +1185,12 @@ internal class WifiListController(
 
     private fun publishWifiState(next: WifiState) {
         wifiState = next
-        if (modeState.mode == WifiMode.NORMAL) {
-            when (next) {
-                is WifiState.Data.Enabled -> lastSystemWifiEnabled = true
-                is WifiState.Data.Disabled -> lastSystemWifiEnabled = false
-                is WifiState.Error -> Unit
-            }
-        }
         if (!stopped) onWifiStateChanged(next)
     }
 
     private fun publishSavedWifiList(next: SavedWifiList) {
         savedWifiList = next
+        monitorModeController.savedNetworksChanged()
         if (!stopped) onSavedWifiListChanged(next)
     }
 
@@ -1944,34 +1231,12 @@ internal class WifiListController(
         }
     }
 
-    private class PendingScanRequest(
-        val generation: Long,
-        val confirmation: CompletableFuture<Unit>,
-        var request: WifiScannerClient.ScanRequest? = null,
-        var resultsReceived: Boolean = false,
-    )
-
-    private class ScanSession(
-        val generation: Long,
-        val startedAt: Long,
-        val request: WifiScannerClient.ScanRequest,
-        var resultsReceived: Boolean = false,
-        var lastRefreshFailed: Boolean = false,
-        var pollingFuture: ScheduledFuture<*>? = null,
-    )
-
     private companion object {
         const val TAG = "ServiceWifiListController"
         // 仅通过修改源码启用 monitor 空闲时的 wlan0 DOWN 省电功能。
         const val MONITOR_POWER_SAVING_ENABLED = false
-        const val MIN_SCAN_DURATION_MS = 3_000L
-        const val SCAN_REFRESH_INTERVAL_MS = 250L
-        const val SYSTEM_WIFI_ENABLED_REFRESH_INTERVAL_MS = 1_000L
         const val INTERFACE_MODE_REFRESH_INTERVAL_MS = 1_000L
         const val SCAN_START_CONFIRM_TIMEOUT_MS = 10_000L
-        const val WIFI_ROLE_CLIENT_PRIMARY = 1
-        const val WIFI_NETWORK_STATUS_CONNECTED = 6
-        const val DEFAULT_MAC_ADDRESS = "02:00:00:00:00:00"
         const val MONITOR_MODE_VERIFICATION_ERROR =
             "脚本执行完毕但系统没能进入监听模式。"
         const val MONITOR_EXIT_COMMAND = """if [ -w /sys/module/wlan/parameters/con_mode ] && { [ "$(cat /sys/module/wlan/parameters/con_mode)" = "4" ] || [ ! -e /sys/class/net/wlan0 ]; }; then

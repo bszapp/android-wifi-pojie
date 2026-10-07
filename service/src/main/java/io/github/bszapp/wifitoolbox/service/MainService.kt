@@ -91,11 +91,12 @@ open class MainService(
         terminalManager = terminalManager,
     )
 
-    private val containerSystemManager = ContainerSystemManager(
+    private val containerSystemManager: ContainerSystemManager = ContainerSystemManager(
         trustedUid = { initializer.requireStartupInfo().trustedUid },
         terminalBinaryProvider = terminalManager::resolveTerminalBinaryForContainerManager,
         mounts = containerMounts,
-        beforeDelete = hybridWifiScanner::stop,
+        beforeDelete = { wifiListController.beforeContainerDelete() },
+        afterOperation = { wifiListController.afterContainerOperation() },
         onError = { operation, error ->
             communication.broadcastServiceError(
                 source = "Service.ContainerSystemManager",
@@ -130,8 +131,7 @@ open class MainService(
         androidApiProvider = { initializer.androidApi },
         wifiLogAnalyzer = wifiLogAnalyzer,
         terminalManager = terminalManager,
-        hybridTaskReadyProvider = wifiListController::isHybridTaskReady,
-        networkCardTaskReadyProvider = wifiListController::isNetworkCardTaskReady,
+        normalModeTaskReadyProvider = wifiListController::isNormalModeTaskReady,
         onSavedWifiNetworksChanged = wifiListController::refreshSavedNetworks,
         onError = { operation, error ->
             communication.broadcastServiceError(
@@ -256,18 +256,6 @@ open class MainService(
         }
     }
 
-    private val wifiEventMonitor = ServiceWifiBroadcastLogger(
-        onWifiStateChanged = wifiListController::onWifiStateMayHaveChanged,
-        onWifiNetworkStateChanged = wifiListController::onWifiNetworkStateChanged,
-        onError = { operation, error ->
-            communication.broadcastServiceError(
-                source = "Service.WifiEventMonitor",
-                operation = operation,
-                error = error,
-            )
-        },
-    )
-
     override fun initializeStartupInfo(startupInfo: StartupInfo) {
         communication.enforceStartupInitializer(startupInfo)
         installCrashReporter(startupInfo.serviceCrashReportPath)
@@ -282,7 +270,6 @@ open class MainService(
         containerSystemManager.initialize(containerEnvironment)
         wifiListController.configureEnvironment()
         serviceNotifications.start()
-        wifiEventMonitor.start()
         wifiListController.initialize()
         communication.startBinderPublisher()
         return completed
@@ -420,8 +407,10 @@ open class MainService(
         wifiListController.setMode(mode = resolvedSource)
     }
 
-    override fun setHybridScanEnabled(enabled: Boolean) = communication.callFromApp {
-        wifiListController.setHybridScanEnabled(enabled)
+    override fun setWifiListDataSource(source: Int) = communication.callFromApp {
+        wifiListController.setWifiListDataSource(
+            io.github.bszapp.wifitoolbox.contract.wifilist.WifiListDataSource.fromWireValue(source),
+        )
     }
 
     override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) = communication.callFromApp {
@@ -448,6 +437,20 @@ open class MainService(
         communication.callFromApp {
             io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
                 wifiListController.getMonitorChanges(sessionGeneration, afterRevision),
+            )
+        }
+
+    override fun getMonitorCommunications(sessionGeneration: Long, bssid: String, deviceMac: String, fromIndex: Long): ParcelFileDescriptor =
+        communication.callFromApp {
+            io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
+                wifiListController.getMonitorCommunications(sessionGeneration, bssid, deviceMac, fromIndex),
+            )
+        }
+
+    override fun getMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long): ParcelFileDescriptor =
+        communication.callFromApp {
+            io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
+                wifiListController.getMonitorCommunicationDetail(sessionGeneration, bssid, deviceMac, recordId, cursor),
             )
         }
 
@@ -497,10 +500,6 @@ open class MainService(
             deviceMac = deviceMac,
             disconnectionId = disconnectionId,
         )
-    }
-
-    override fun stopHybridScanner() = communication.callFromApp {
-        hybridWifiScanner.stop()
     }
 
     override fun getAliveTerminalIds(): LongArray = communication.callFromApp {
@@ -730,9 +729,7 @@ open class MainService(
     override fun shutdown() = communication.callFromApp {
         check(hashcatManager.prepareShutdown()) { "Hashcat 任务备份尚未完成，服务保持运行" }
         Log.d(TAG, "收到 shutdown，服务退出")
-        wifiEventMonitor.stop()
         wifiListController.stop()
-        hybridWifiScanner.close()
         taskManager.unregisterCallback(notificationTaskCallback)
         serviceNotifications.close()
         taskManager.close()

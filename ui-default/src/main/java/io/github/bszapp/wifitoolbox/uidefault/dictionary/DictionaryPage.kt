@@ -25,12 +25,14 @@ import top.yukonga.miuix.kmp.basic.FloatingActionButton
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
 fun DictionaryPage(state: DictionaryState, outerPadding: PaddingValues) {
     val context = LocalContext.current
     val navigator = LocalNavigator.current
     val layoutDirection = LocalLayoutDirection.current
+    val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -40,65 +42,69 @@ fun DictionaryPage(state: DictionaryState, outerPadding: PaddingValues) {
         state.loadResources()
     }
 
-    Scaffold(
-        floatingActionButton = {
-            FloatingActionButton(onClick = {
-                state.selectedFabOption = null
-                state.showAddDialog = true
-            }) {
-                Icon(Icons.Filled.Add, null)
-            }
-        },
-        contentWindowInsets = WindowInsets(0)
-    ) { paddingValues ->
-        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
-            targetState = state.resources.toList(),
-            contentKey = { it.isEmpty() },
-            label = "dictionary-empty-state",
-        ) { visibleResources ->
-        if (visibleResources.isEmpty()) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .padding(outerPadding)
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = stringResource(R.string.dictionary_resources_nothing),
-                    textAlign = TextAlign.Center,
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize(),
-                contentPadding = PaddingValues(
-                    start = outerPadding.calculateStartPadding(layoutDirection) +
-                        paddingValues.calculateStartPadding(layoutDirection),
-                    top = outerPadding.calculateTopPadding() + paddingValues.calculateTopPadding(),
-                    end = outerPadding.calculateEndPadding(layoutDirection) +
-                        paddingValues.calculateEndPadding(layoutDirection),
-                    bottom = outerPadding.calculateBottomPadding() +
-                        paddingValues.calculateBottomPadding() + 88.dp,
-                ),
-            ) {
-                items(
-                    items = visibleResources,
-                    key = { it.id }
-                ) { res ->
-                    DictionaryResourceItem(
+    Scaffold(contentWindowInsets = WindowInsets(0)) { paddingValues ->
+        Box(Modifier.fillMaxSize()) {
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                targetState = state.resources.toList(),
+                contentKey = { it.isEmpty() },
+                label = "dictionary-empty-state",
+            ) { visibleResources ->
+                if (visibleResources.isEmpty()) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .padding(outerPadding)
+                            .padding(paddingValues),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = stringResource(R.string.dictionary_resources_nothing),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                } else {
+                    LazyColumn(
                         modifier = Modifier
-                            .animateItem()
-                            .clickable {
-                                state.selectedResource = res
-                                state.showDetailSheet = true
-                            },
-                        res = res
-                    )
+                            .fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = outerPadding.calculateStartPadding(layoutDirection) +
+                                paddingValues.calculateStartPadding(layoutDirection),
+                            top = outerPadding.calculateTopPadding() + paddingValues.calculateTopPadding(),
+                            end = outerPadding.calculateEndPadding(layoutDirection) +
+                                paddingValues.calculateEndPadding(layoutDirection),
+                            bottom = outerPadding.calculateBottomPadding() +
+                                paddingValues.calculateBottomPadding() + 88.dp,
+                        ),
+                    ) {
+                        items(
+                            items = visibleResources,
+                            key = { it.id }
+                        ) { res ->
+                            DictionaryResourceItem(
+                                modifier = Modifier
+                                    .animateItem()
+                                    .clickable {
+                                        state.selectedResource = res
+                                        state.showDetailSheet = true
+                                    },
+                                res = res
+                            )
+                        }
+                    }
                 }
             }
-        }
+
+            FloatingActionButton(
+                onClick = {
+                    state.selectedFabOption = null
+                    state.showAddDialog = true
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = safeBottom + 16.dp),
+            ) {
+                Icon(Icons.Filled.Add, null, tint = MiuixTheme.colorScheme.onPrimary)
+            }
         }
 
         ResourceDetailSheet(

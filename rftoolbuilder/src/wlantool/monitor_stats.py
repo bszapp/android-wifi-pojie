@@ -25,6 +25,9 @@ from scapy.layers.dot11 import Dot11, Dot11Elt, RadioTap
 from scapy.layers.eap import EAPOL
 from scapy.layers.inet import UDP
 from monitor_diagnostics import interface_snapshot, process_snapshot
+from monitor_decrypt import CommunicationDecoder, CredentialStore
+
+CREDENTIALS = CredentialStore()
 
 
 PUBLISH_INTERVAL_SECONDS = 0.05
@@ -593,6 +596,8 @@ def empty_device(mac):
         "frameCounters": {},
         "handshakes": [],
         "activeHandshake": None,
+        "protocol": "unknown",
+        "decryptionStatus": "protocolUnknown",
         "ssidContextPacket": None,
         "uploadSamples": deque(),
         "downloadSamples": deque(),
@@ -671,6 +676,8 @@ def device_snapshot(device, now):
         "downloadBytesPerSecond": byte_rate(device["downloadSamples"], now),
         "signal": signal_snapshot(device["signal"], now),
         "probeOnly": captured_subtype_ids == {"management.5"},
+        "protocol": device["protocol"],
+        "decryptionStatus": device["decryptionStatus"],
     }
 
 
@@ -1720,8 +1727,12 @@ class CaptureSession:
 
 class CaptureAnalysis:
     """同一解析实现分别处理完整流与实际保留流，不从旧镜像拼装清理结果。"""
-    def __init__(self):
+    def __init__(self, decode_communications=True):
         self.access_points = {}
+        self.decoder = CommunicationDecoder()
+        self.decode_communications = decode_communications
+        self.credential_revision = -1
+        self.decryption_dirty = set()
         self.ssid_access_points = {}
         self.device_identities = {}
         self.dirty_access_points = set()
@@ -1739,6 +1750,20 @@ class CaptureAnalysis:
     def fork(self):
         # 包体 bytes 为不可变对象，deepcopy 共享它们；只分离可变解析状态。
         return copy.deepcopy(self)
+
+    def consume_communication(self, bssid, mac, decoded, direction, timestamp, event_writer):
+        name = self.decoder.consume_network(decoded, bssid, mac, direction, timestamp, event_writer)
+        if name:
+            update_device_identity(self.access_points[bssid]["devices"][mac], name, 35)
+            previous = self.device_identities.get(mac)
+            if previous is None or previous[1] < 35:
+                self.device_identities[mac] = (name, 35)
+            self.dirty_devices.add((bssid, mac))
+
+    def drain_communications(self, event_writer):
+        if self.decode_communications:
+            for bssid, mac, decoded, direction, timestamp in self.decoder.ready_packets(self.access_points):
+                self.consume_communication(bssid, mac, decoded, direction, timestamp, event_writer)
 
     def consume(self, record, packet, pcap_header, event_writer):
         payload, recorded_bytes, link_type, _, packet_header, packet_timestamp = record
@@ -1780,6 +1805,7 @@ class CaptureAnalysis:
                 access_point["ssidBytes"] = ssid_bytes
                 access_point["ssidContextPacket"] = packet_record
                 if previous_ssid_bytes != ssid_bytes:
+                    self.decryption_dirty.update((bssid, mac) for mac in access_point["devices"])
                     if previous_ssid_bytes:
                         previous_bssids = self.ssid_access_points.get(previous_ssid_bytes)
                         if previous_bssids is not None:
@@ -1848,6 +1874,13 @@ class CaptureAnalysis:
             known_bssids=self.access_points.keys(),
         )
         if relation is None:
+            if self.decode_communications:
+                group_point = self.access_points.get(transmitter)
+                if group_point:
+                    if not self.decoder.group_clients.get(transmitter):
+                        self.decoder.queue_packet(packet, transmitter, None, "download", packet_timestamp)
+                    for mac, decoded in self.decoder.group_packets(packet, group_point):
+                        self.consume_communication(transmitter, mac, decoded, "download", packet_timestamp, event_writer)
             return False
         bssid, device_mac, direction = relation
         access_point = self.access_points.setdefault(bssid, empty_access_point(bssid))
@@ -1897,6 +1930,16 @@ class CaptureAnalysis:
                 self.ssid_access_points.setdefault(current_ssid_bytes, set()).add(bssid)
         if device["handshakes"]:
             self.handshake_device_keys.add(device_key)
+        previous_decryption = device["decryptionStatus"]
+        session = self.decoder.inspect(packet, access_point, device, parse_eapol_key(packet), CREDENTIALS, event_writer)
+        if self.decode_communications:
+            if previous_decryption != "ready" and session["status"] == "ready":
+                self.drain_communications(event_writer)
+            if session["status"] == "loading":
+                self.decoder.queue_packet(packet, bssid, device_mac, direction, packet_timestamp)
+            decoded_packets = self.decoder.cleartext(packet, bssid, device_mac, direction) or ()
+            for decoded in decoded_packets:
+                self.consume_communication(bssid, device_mac, decoded, direction, packet_timestamp, event_writer)
         if direction == "upload" and subtype_id != "data.eapol":
             device["uploadSamples"].append((packet_timestamp, frame_bytes))
             self.realtime_devices.add(device_key)
@@ -1926,6 +1969,14 @@ class CaptureAnalysis:
         return any(packet_start in value["packetOffsets"] for value in device["handshakes"])
 
     def publish(self, pcap_header, event_writer, now):
+        self.decoder.flush_details(event_writer)
+        if self.credential_revision != CREDENTIALS.revision:
+            self.credential_revision = CREDENTIALS.revision
+            self.dirty_devices.update(self.decoder.refresh(self.access_points, CREDENTIALS, event_writer))
+        elif self.decryption_dirty:
+            self.dirty_devices.update(self.decoder.refresh(self.access_points, CREDENTIALS, event_writer, self.decryption_dirty))
+        self.decryption_dirty.clear()
+        self.drain_communications(event_writer)
         finish_timed_out_handshakes(
             self.access_points,
             self.handshake_device_keys,
@@ -2245,6 +2296,8 @@ def command_loop(
                     with reader_lock:
                         sources = files.snapshot(reader.offset)
                     executor.submit(run_export, command, sources, allowed_directory, event_writer)
+                elif command_type == "credential":
+                    CREDENTIALS.update(command)
                 elif command_type in ("capture", "clear"):
                     commands.put(command)
                     diagnostic("commandQueued", type=command_type, queued=commands.qsize())
@@ -2271,7 +2324,7 @@ def main():
     reader_lock = threading.Lock()
     commands = queue.Queue()
     full = CaptureAnalysis()
-    retained = CaptureAnalysis()
+    retained = CaptureAnalysis(decode_communications=False)
     next_publish = time.monotonic()
     pending_clear = None
     capture = None
@@ -2448,10 +2501,11 @@ def main():
                                       "requestId": command.get("requestId")})
                         if command["handshakesOnly"]:
                             next_full = retained.fork()
+                            next_full.decode_communications = True
                             next_retained = retained
                         else:
                             next_full = CaptureAnalysis()
-                            next_retained = CaptureAnalysis()
+                            next_retained = CaptureAnalysis(decode_communications=False)
                         DIAGNOSTICS.phase("main", "clearFiles")
                         with reader_lock:
                             added_segment = files.clear(command["handshakesOnly"])

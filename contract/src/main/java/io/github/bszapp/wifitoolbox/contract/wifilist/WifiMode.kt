@@ -17,10 +17,21 @@ enum class WifiMode(
     }
 }
 
+enum class WifiListDataSource(val wireValue: Int, val displayName: String) {
+    SYSTEM(0, "系统"),
+    UNDERLYING(1, "底层");
+
+    companion object {
+        fun fromWireValue(value: Int): WifiListDataSource =
+            entries.firstOrNull { it.wireValue == value }
+                ?: throw IllegalArgumentException("未知 Wi-Fi 列表数据源: $value")
+    }
+}
+
 @Parcelize
 data class WifiModeState(
     val mode: WifiMode,
-    val hybridScanEnabled: Boolean = false,
+    val listDataSource: WifiListDataSource = WifiListDataSource.SYSTEM,
     val capturing: Boolean = false,
     val hoppingCapture: Boolean = false,
     val clearingCapture: Boolean = false,
@@ -101,6 +112,10 @@ data class MonitorDevice(
     val handshakes: List<MonitorHandshakeRecord> = emptyList(),
     val realtime: MonitorDeviceRealtime = MonitorDeviceRealtime(),
     val probeOnly: Boolean = false,
+    val protocol: MonitorDeviceProtocol = MonitorDeviceProtocol.UNKNOWN,
+    val decryptionStatus: MonitorDecryptionStatus = MonitorDecryptionStatus.PROTOCOL_UNKNOWN,
+    val communicationCount: Long = 0L,
+    val communicationRevision: Long = 0L,
 ) : Parcelable
 
 @Parcelize

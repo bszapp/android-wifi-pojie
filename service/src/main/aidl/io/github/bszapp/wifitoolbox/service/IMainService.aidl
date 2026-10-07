@@ -43,19 +43,20 @@ interface IMainService {
     int saveWifiNetwork(String ssid, String password);
     boolean startWifiScan();
     void setWifiMode(int source);//TODO:为什么传这么多信息，服务不知道吗？下同
-    void setHybridScanEnabled(boolean enabled);
+    void setWifiListDataSource(int source);
     void setMonitorCapture(boolean enabled, int frequencyMhz, boolean hopping);
     void clearMonitorCapture(boolean handshakesOnly);
     void interruptWifiModeSwitch(long operationId);
     void interruptMonitorClear(long operationId);
     void enterMonitorMode(String command);
     ParcelFileDescriptor getMonitorChanges(long sessionGeneration, long afterRevision);
+    ParcelFileDescriptor getMonitorCommunications(long sessionGeneration, String bssid, String deviceMac, long fromIndex);
+    ParcelFileDescriptor getMonitorCommunicationDetail(long sessionGeneration, String bssid, String deviceMac, String recordId, long cursor);
     void exportMonitorPcap(String requestId, String mode, String bssid, String deviceMac, in String[] subtypeIds);
     void exportMonitorHandshakePcap(String requestId, String bssid, String deviceMac, String handshakeId);
     void exportMonitorDisconnectionPcap(String requestId, String bssid, String deviceMac, String disconnectionId);
     oneway void releaseMonitorPcapExport(String path);
 
-    void stopHybridScanner();
     //TODO:不指定id就stop？
     //TODO:这啥，有用吗
 

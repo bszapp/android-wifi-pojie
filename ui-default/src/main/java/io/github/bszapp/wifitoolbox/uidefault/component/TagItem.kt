@@ -5,14 +5,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -38,13 +37,12 @@ fun TagItem(
         TagStyle.Tertiary -> colorScheme.onTertiaryContainer
     }
 
-    Surface(
-        color = containerColor,
-        shape = RoundedCornerShape(4.dp),
+    Badge(
         modifier = modifier.padding(horizontal = 2.dp),
+        containerColor = containerColor,
+        contentColor = contentColor,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
@@ -60,6 +58,7 @@ fun TagItem(
                 text = text,
                 style = MiuixTheme.textStyles.footnote2,
                 color = contentColor,
+                softWrap = true,
             )
         }
     }

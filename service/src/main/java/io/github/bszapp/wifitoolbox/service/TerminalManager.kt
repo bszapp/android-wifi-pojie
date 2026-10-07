@@ -331,6 +331,19 @@ internal class TerminalManager(
         runCatching { terminal.input.close() }
     }
 
+    /** 生命周期拥有者使用的退出屏障；重复停止也必须等待真实退出及输出线程结束。 */
+    fun stopTerminalAndAwait(terminalId: Long, reason: String) {
+        val terminal = synchronized(lock) { terminals[terminalId] } ?: return
+        stopTerminal(terminalId, reason)
+        check(terminal.process.waitForCompat(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            "终端 $terminalId 尚未退出，不能释放所属扫描作用域"
+        }
+        if (terminal.ownerThread !== Thread.currentThread()) {
+            terminal.ownerThread.join(OWNER_THREAD_JOIN_MILLIS)
+            check(!terminal.ownerThread.isAlive) { "终端 $terminalId 输出线程尚未结束" }
+        }
+    }
+
     fun aliveSnapshot(): AliveTerminalSnapshot = synchronized(lock) {
         aliveSnapshotLocked()
     }

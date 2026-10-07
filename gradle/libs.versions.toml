@@ -23,8 +23,10 @@ materialKolor = "4.1.1"
 runtime = "1.11.4"
 material3-experimental = "1.5.0-alpha23"
 xz = "1.12"
+coroutines = "1.11.0"
 
 [libraries]
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "composeMultiplatform" }
 androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
 androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }

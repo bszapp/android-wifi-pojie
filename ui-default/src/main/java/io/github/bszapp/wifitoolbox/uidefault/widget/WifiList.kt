@@ -52,7 +52,15 @@ import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.contract.wifilist.SystemScanData
+import io.github.bszapp.wifitoolbox.contract.wifilist.scanResults
+import io.github.bszapp.wifitoolbox.contract.wifilist.connection
+import io.github.bszapp.wifitoolbox.contract.wifilist.hasData
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorDeviceDetailSheet
 import io.github.bszapp.wifitoolbox.uidefault.component.TagItem
 import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
@@ -93,6 +101,7 @@ fun WifiList(
     val connectWifiSheetCloseRequest by
         vm.connectWifiSheetCloseRequest.collectAsStateWithLifecycle()
     var selectedSsid by rememberSaveable { mutableStateOf<String?>(null) }
+    var showWifiDetailSheet by rememberSaveable { mutableStateOf(false) }
     var connectSheetContent by remember { mutableStateOf<ConnectWifiSheetContent?>(null) }
     var inlineConnectTaskId by remember { mutableStateOf<Long?>(null) }
     var dismissConnectSheet by remember { mutableStateOf(false) }
@@ -114,13 +123,10 @@ fun WifiList(
 
     // WifiState 与 SavedWifiList 是两种同级数据：
     // 扫描结果只来自 Enabled，已保存配置只来自独立的 SavedWifiList。
-    val scanResults: List<ScanResult> = when (val state = wifiState) {
-        is WifiState.Data.Enabled -> state.scanResults
-        else -> emptyList()
-    }
+    val scanResults: List<ScanResult> = wifiState.scanResults
     val savedNetworks: List<WifiConfiguration> =
         savedWifiList?.networks ?: emptyList()
-    val connection = (wifiState as? WifiState.Data.Enabled)?.connection
+    val connection = wifiState.connection
 
     // 设备计数和网速更新不改变列表分组，只以接入点元数据参与列表合并。
     val capturedMetadata = remember(capturedAccessPoints) {
@@ -134,27 +140,58 @@ fun WifiList(
             capturedAccessPoints = if (modeState?.mode == WifiMode.MONITOR) capturedMetadata else emptyList(),
         )
     }
+    val successfulHandshakeAccessPointsBySsid = remember(capturedAccessPoints, modeState?.mode) {
+        if (modeState?.mode != WifiMode.MONITOR) {
+            emptyMap()
+        } else {
+            capturedAccessPoints.asSequence()
+                .filter { accessPoint ->
+                    !accessPoint.ssid.isNullOrBlank() &&
+                        accessPoint.devices.any { it.hasCompleteSuccessfulHandshake() }
+                }
+                .groupBy { it.ssid!! }
+                .mapValues { (_, accessPoints) ->
+                    accessPoints.distinctBy { it.bssid.lowercase() }.size
+                }
+        }
+    }
+    val discoveredHiddenNameCount = remember(capturedAccessPoints, scanResults, modeState?.mode) {
+        if (modeState?.mode != WifiMode.MONITOR) {
+            0
+        } else {
+            val hiddenScanBssids = scanResults.asSequence()
+                .filter { it.SSID.isNullOrEmpty() }
+                .mapNotNull { it.BSSID?.lowercase() }
+                .toSet()
+            capturedAccessPoints.asSequence()
+                .filter {
+                    !it.ssid.isNullOrBlank() &&
+                        (it.ssidVisibility == MonitorSsidVisibility.HIDDEN ||
+                            (it.ssidVisibility != MonitorSsidVisibility.VISIBLE &&
+                                it.bssid.lowercase() in hiddenScanBssids))
+                }
+                .distinctBy { it.bssid.lowercase() }
+                .count()
+        }
+    }
     val selectedGroup = selectedSsid?.let { ssid ->
         groups.firstOrNull { it.ssid == ssid }
     }
 
     LaunchedEffect(selectedSsid, selectedGroup) {
-        if (selectedSsid != null && selectedGroup == null) selectedSsid = null
+        if (showWifiDetailSheet && selectedSsid != null && selectedGroup == null) {
+            showWifiDetailSheet = false
+            selectedSsid = null
+        }
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        when (val state = wifiState) {
-            null -> Box(modifier = Modifier.fillMaxSize())
-
-            is WifiState.Data.Disabled -> WifiDisabledContent(
+        when {
+            (wifiState as? WifiState.System)?.data is SystemScanData.Disabled -> WifiDisabledContent(
                 onEnableWifi = { vm.wifiList.setWifiEnabled(true) },
             )
 
-            is WifiState.Error -> WifiErrorContent(
-                message = state.exception.message ?: "未知错误",
-            )
-
-            is WifiState.Data.Enabled -> LazyColumn(
+            wifiState.hasData -> LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = contentPadding,
@@ -189,8 +226,15 @@ fun WifiList(
                         WifiGroupCard(
                                 vm = vm,
                                 group = group,
+                                successfulHandshakeAccessPointCount =
+                                    successfulHandshakeAccessPointsBySsid[group.ssid] ?: 0,
+                                discoveredHiddenNameCount =
+                                    discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
                                 modifier = Modifier.animateItem(),
-                                onClick = { selectedSsid = group.ssid },
+                                onClick = {
+                                    selectedSsid = group.ssid
+                                    showWifiDetailSheet = true
+                                },
                                 onConnect = {
                                     dismissConnectSheet = false
                                     connectSheetContent = ConnectWifiSheetContent.Network(
@@ -210,13 +254,19 @@ fun WifiList(
                     }
                 }
             }
+            else -> Box(modifier = Modifier.fillMaxSize())
         }
     }
 
-    selectedGroup?.let { group ->
+    selectedGroup?.takeIf { selectedSsid != null }?.let { group ->
         WifiDetailSheet(
+            show = showWifiDetailSheet,
             group = group,
-            onDismiss = { selectedSsid = null },
+            onDismiss = { showWifiDetailSheet = false },
+            onDismissFinished = {
+                showWifiDetailSheet = false
+                selectedSsid = null
+            },
             capturedAccessPoints = capturedAccessPoints.filter { ap ->
                 group.networks.any { it.BSSID.equals(ap.bssid, ignoreCase = true) } ||
                     group.virtualAccessPoint?.bssid.equals(ap.bssid, ignoreCase = true) ||
@@ -232,11 +282,12 @@ fun WifiList(
                     savedNetworks = savedNetworks,
                     handshakeTest = handshakeTest,
                     onClearHandshakeTestResult = vm.wifiList::clearMonitorHandshakeTestResult,
-                    onDismiss = { selectedSsid = null },
+                    onDismiss = { showWifiDetailSheet = false },
                     onExport = { vm.wifiList.exportMonitorDevicePcap(bssid, mac, it) },
                     onTestHandshake = { id, password -> vm.wifiList.testMonitorHandshake(bssid, mac, id, password) },
                     onExportHandshake = { id -> vm.wifiList.exportMonitorHandshakePcap(bssid, mac, id) },
                     onSaveHc22000 = onSaveHc22000,
+                    communications = vm.wifiList.communications,
                     renderSheet = false,
                 )
             },
@@ -512,6 +563,8 @@ private fun WifiErrorContent(message: String) {
 private fun WifiGroupCard(
     vm: DefaultViewModel,
     group: MergedWifiGroup,
+    successfulHandshakeAccessPointCount: Int,
+    discoveredHiddenNameCount: Int,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onConnect: () -> Unit,
@@ -599,11 +652,24 @@ private fun WifiGroupCard(
                         if (group.savedWifiList.isNotEmpty()) {
                             add(Triple("已保存", TagStyle.Primary, null))
                         }
-                    }
-                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
-                        visible = tags.isNotEmpty(),
-                    ) {
-                        Spacer(Modifier.width(4.dp))
+                        if (successfulHandshakeAccessPointCount > 0) {
+                            add(
+                                Triple(
+                                    "成功握手${successfulHandshakeAccessPointCount}个",
+                                    TagStyle.Primary,
+                                    null,
+                                ),
+                            )
+                        }
+                        if (discoveredHiddenNameCount > 0) {
+                            add(
+                                Triple(
+                                    "探测有名称${discoveredHiddenNameCount}个",
+                                    TagStyle.Primary,
+                                    null,
+                                ),
+                            )
+                        }
                     }
                     tags.forEach { (text, style, icon) ->
                         TagItem(text = text, style = style, icon = icon)
@@ -639,4 +705,9 @@ private fun WifiGroupCard(
 
         }
     }
+}
+
+private fun MonitorDevice.hasCompleteSuccessfulHandshake(): Boolean = handshakes.any { record ->
+    record.status == MonitorHandshakeStatus.SUCCESS &&
+        record.captureQuality == MonitorHandshakeCaptureQuality.COMPLETE
 }

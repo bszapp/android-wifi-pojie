@@ -3,140 +3,52 @@ package io.github.bszapp.wifitoolbox.uidefault.screen
 import android.net.wifi.WifiConfiguration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.add
-import androidx.compose.foundation.layout.calculateEndPadding
-import androidx.compose.foundation.layout.calculateStartPadding
-import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.only
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.*
+import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AirplanemodeActive
-import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material.icons.rounded.DeleteSweep
-import androidx.compose.material.icons.rounded.BarChart
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.FilterList
-import androidx.compose.material.icons.rounded.Router
-import androidx.compose.material.icons.rounded.Smartphone
-import androidx.compose.material.icons.rounded.WifiProtectedSetup
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
-import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
-import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
-import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
-import io.github.bszapp.wifitoolbox.contract.wifilist.isScanning
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionRecord
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionType
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorPcapExportResult
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
-import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.contract.task.*
+import io.github.bszapp.wifitoolbox.contract.wifilist.*
+import io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent
+import io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
+import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
 import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
 import io.github.bszapp.wifitoolbox.uidefault.widget.WifiList
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorDeviceDetailSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorModeSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WifiModeSwitchSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorCaptureSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorCaptureClearSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.MonitorHandshakeAction
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.WpsPbcTaskSheet
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatHandshakeDuration
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatHandshakeStartTime
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.handshakeStatusText
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.handshakeStepText
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.formatMonitorByteCount
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.frequencyBand
-import kotlinx.coroutines.flow.collect
+import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.*
 import kotlinx.coroutines.launch
-import top.yukonga.miuix.kmp.basic.Badge
-import top.yukonga.miuix.kmp.basic.DropdownImpl
-import top.yukonga.miuix.kmp.basic.BasicComponent
-import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
-import top.yukonga.miuix.kmp.basic.Checkbox
-import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
-import top.yukonga.miuix.kmp.basic.FloatingActionButton
-import top.yukonga.miuix.kmp.basic.ListPopupColumn
-import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
-import top.yukonga.miuix.kmp.basic.PopupPositionProvider
-import top.yukonga.miuix.kmp.basic.PullToRefresh
-import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.TopAppBar
-import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TabRow
-import top.yukonga.miuix.kmp.basic.TabRowDefaults
-import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
+import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.icon.extended.Refresh
-import top.yukonga.miuix.kmp.overlay.OverlayListPopup
-import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -217,7 +129,6 @@ fun ListScreen(
                                 onDismissRequest = { showTopPopup.value = false },
                                 content = {
                                     ListPopupColumn {
-                                        SmallTitle(text = "网卡模式")
                                         DropdownImpl(
                                             text = "普通模式",
                                             isSelected = selectedSource == WifiMode.NORMAL,
@@ -256,14 +167,14 @@ fun ListScreen(
                         }
                     },
                     actions = {
-                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
-                            visible = selectedSource == WifiMode.NORMAL && modeState?.hybridScanEnabled == true,
+                        ImmediateVisibility(
+                            visible = selectedSource == WifiMode.NORMAL,
                         ) {
                             IconButton(onClick = { taskActionScope.launch { runCatching { viewModel.startWpsPbcTask() } } }) {
                                 Icon(Icons.Rounded.WifiProtectedSetup, "启动 WPS-PBC", tint = colorScheme.onSurface)
                             }
                         }
-                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = selectedSource == WifiMode.MONITOR) {
+                        ImmediateVisibility(visible = selectedSource == WifiMode.MONITOR) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(onClick = { viewModel.wifiList.exportAllMonitorPcap() }) {
                                     Icon(Icons.Rounded.Download, "导出全部 PCAP", tint = colorScheme.onSurface)
@@ -300,11 +211,7 @@ fun ListScreen(
                                 }
                             }
                         }
-                        IconButton(onClick = { viewModel.wifiList.startScan() },
-                            enabled = !controlsBusy && modeState?.clearingCapture != true) {
-                            Icon(MiuixIcons.Refresh, "刷新", tint = colorScheme.onSurface)
-                        }
-                        io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = selectedSource == WifiMode.NORMAL) {
+                        ImmediateVisibility(visible = selectedSource == WifiMode.NORMAL) {
                             Box {
                                 val showMore = remember { mutableStateOf(false) }
                                 OverlayListPopup(
@@ -314,17 +221,26 @@ fun ListScreen(
                                     onDismissRequest = { showMore.value = false },
                                 ) {
                                     ListPopupColumn {
-                                        DropdownImpl(text = "混合扫描", isSelected = modeState?.hybridScanEnabled == true,
-                                            optionSize = 1, index = 0, onSelectedIndexChange = {
-                                                viewModel.wifiList.setHybridScanEnabled(modeState?.hybridScanEnabled != true)
+                                        DropdownImpl(text = "系统扫描", isSelected = modeState?.listDataSource == WifiListDataSource.SYSTEM,
+                                            optionSize = 2, index = 0, onSelectedIndexChange = {
+                                                viewModel.wifiList.setWifiListDataSource(WifiListDataSource.SYSTEM)
+                                                showMore.value = false
+                                            })
+                                        DropdownImpl(text = "底层扫描", isSelected = modeState?.listDataSource == WifiListDataSource.UNDERLYING,
+                                            optionSize = 2, index = 1, onSelectedIndexChange = {
+                                                viewModel.wifiList.setWifiListDataSource(WifiListDataSource.UNDERLYING)
                                                 showMore.value = false
                                             })
                                     }
                                 }
-                                IconButton(onClick = { showMore.value = true }, enabled = !controlsBusy) {
-                                    Icon(MiuixIcons.MoreCircle, "扫描方式", tint = colorScheme.onSurface)
+                                IconButton(onClick = { showMore.value = true }) {
+                                    Icon(Icons.Rounded.Route, "Wi-Fi 列表数据源", tint = colorScheme.onSurface)
                                 }
                             }
+                        }
+                        IconButton(onClick = { viewModel.wifiList.startScan() },
+                            enabled = !controlsBusy && modeState?.clearingCapture != true) {
+                            Icon(MiuixIcons.Refresh, "刷新", tint = colorScheme.onSurface)
                         }
                     },
                     scrollBehavior = scrollBehavior,
@@ -375,7 +291,7 @@ fun ListScreen(
                         bottom = bottomInnerPadding + if (selectedSource == WifiMode.MONITOR) 84.dp else 8.dp,
                     ),
                 )
-                io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                ImmediateVisibility(
                     visible = selectedSource == WifiMode.MONITOR,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = bottomInnerPadding + 16.dp),
                 ) {
@@ -409,7 +325,7 @@ fun ListScreen(
     MonitorCaptureSheet(
         show = showCaptureChannels && selectedSource == WifiMode.MONITOR,
         channels = modeState?.availableChannels.orEmpty(),
-        scanResults = (wifiState as? WifiState.Data.Enabled)?.scanResults.orEmpty(),
+        scanResults = wifiState.scanResults,
         onDismiss = { showCaptureChannels = false },
         onStart = { frequency, hopping ->
             showCaptureChannels = false
@@ -492,7 +408,6 @@ private fun DisplayedTaskSheet(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MonitorStatisticsContent(
     statistics: MonitorModeStatistics?,
@@ -553,10 +468,10 @@ private fun MonitorStatisticsContent(
                     .scrollEndHaptic()
                     .overScrollVertical(),
                 contentPadding = listContentPadding,
-                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item(key = "monitor-overview") {
-                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+                    ImmediateContent(
                         targetState = statistics.takeIf { page == 0 },
                         contentKey = { it == null },
                         label = "monitor-overview-visibility",
@@ -580,7 +495,7 @@ private fun MonitorStatisticsContent(
                     )
                 }
                 item(key = "connection-log-empty") {
-                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
+                    ImmediateVisibility(
                         visible = page == 1 && connectionLogItems.isEmpty(),
                     ) {
                         Card { BasicComponent(title = "暂无连接日志") }
@@ -591,7 +506,7 @@ private fun MonitorStatisticsContent(
                     key = { index -> connectionLogItems[index].stableKey },
                 ) { index ->
                     val logItem = connectionLogItems[index]
-                    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = page == 1) {
+                    ImmediateVisibility(visible = page == 1) {
                             MonitorConnectionLogCard(
                                 item = logItem,
                                 onTestHandshake = { accessPoint, device, record ->
@@ -628,7 +543,7 @@ private fun MonitorStatisticsContent(
             }
         }
     }
-    io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+    ImmediateContent(
         targetState = handshakeDetailTarget,
         contentKey = { it?.first },
         label = "monitor-handshake-detail",
@@ -788,10 +703,10 @@ private fun MonitorConnectionLogCard(
                     bottomAction = {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+                            horizontalArrangement = Arrangement.End,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = item.record.canValidate) {
+                            ImmediateVisibility(visible = item.record.canValidate) {
                                 TextButton(
                                     text = "校验",
                                     onClick = {
@@ -837,7 +752,7 @@ private fun MonitorConnectionLogCard(
                     bottomAction = {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+                            horizontalArrangement = Arrangement.End,
                         ) {
                             TextButton(
                                 text = "导出",
@@ -867,14 +782,14 @@ private fun MonitorDisconnectionExportDialog(
         summary = "将导出这一次解除认证或解除关联事件的原始 802.11 数据包。",
         onDismissRequest = onDismiss,
         content = {
-            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent(
+            ImmediateContent(
                 targetState = record?.let { it to accessPoint },
                 contentKey = { it == null },
                 label = "disconnection-export-detail",
             ) { exportDetail ->
             if (exportDetail != null) {
                 val (visibleRecord, visibleAccessPoint) = exportDetail
-                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Card {
                         BasicComponent(
                             title = "网络名称",
@@ -978,6 +893,7 @@ private fun MonitorModeOverviewCard(statistics: MonitorModeStatistics, hopping: 
     }
 }
 
+//TODO: 这个tag样式以及内容可用
 @Composable
 internal fun MonitorAccessPointCard(
     accessPoint: MonitorAccessPoint,
@@ -987,12 +903,7 @@ internal fun MonitorAccessPointCard(
 ) {
     val handshakeDeviceCount = accessPoint.devices
         .asSequence()
-        .filter { device ->
-            device.handshakes.any { record ->
-                record.status == MonitorHandshakeStatus.SUCCESS &&
-                    record.captureQuality != MonitorHandshakeCaptureQuality.DATA_INCOMPLETE
-            }
-        }
+        .filter { it.completeSuccessfulHandshakeCount() > 0 }
         .distinctBy { it.mac.lowercase() }
         .count()
     val arrowRotation by animateFloatAsState(
@@ -1027,12 +938,17 @@ internal fun MonitorAccessPointCard(
             },
             onClick = { onExpandedChange(!expanded) },
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Text(
                     text = accessPoint.ssid ?: monitorUnknownName(accessPoint),
                     fontSize = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.headline1.fontSize,
                     fontWeight = FontWeight.Medium,
                     color = colorScheme.onSurface,
+                    softWrap = true,
                 )
                 val badges = buildList {
                     if (accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN &&
@@ -1041,7 +957,7 @@ internal fun MonitorAccessPointCard(
                         add("隐藏网络")
                     }
                     if (handshakeDeviceCount > 0) {
-                        add("${handshakeDeviceCount}台成功握手")
+                        add("成功握手${handshakeDeviceCount}台")
                     }
                 }
                 badges.forEach { badge ->
@@ -1056,29 +972,30 @@ internal fun MonitorAccessPointCard(
         }
         AnimatedVisibility(visible = expanded) {
             Column {
-                accessPoint.devices.forEach { device ->
-                    val handshakeCount = device.handshakes.count { record ->
-                        record.status == MonitorHandshakeStatus.SUCCESS &&
-                            record.captureQuality !=
-                            MonitorHandshakeCaptureQuality.DATA_INCOMPLETE
-                    }
-                    BasicComponent(
-                        title = device.name ?: device.mac,
-                        summary = device.name?.let { device.mac },
-                        startAction = { MonitorDeviceIcon() },
-                        endActions = {
-                            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(
-                                visible = handshakeCount > 0,
-                            ) {
-                                MonitorMapBadge(
-                                    text = "${handshakeCount}次成功握手",
-                                    withStartPadding = false,
-                                )
-                            }
-                        },
-                        onClick = { onDeviceClick(device) },
+                accessPoint.devices
+                    .sortedWith(
+                        compareByDescending<MonitorDevice> { it.completeSuccessfulHandshakeCount() > 0 }
+                            .thenByDescending { it.completeSuccessfulHandshakeCount() },
                     )
-                }
+                    .forEach { device ->
+                        val handshakeCount = device.completeSuccessfulHandshakeCount()
+                        BasicComponent(
+                            title = device.name ?: device.mac,
+                            summary = device.name?.let { device.mac },
+                            startAction = { MonitorDeviceIcon() },
+                            endActions = {
+                                ImmediateVisibility(
+                                    visible = handshakeCount > 0,
+                                ) {
+                                    MonitorMapBadge(
+                                        text = "成功握手${handshakeCount}次",
+                                        withStartPadding = false,
+                                    )
+                                }
+                            },
+                            onClick = { onDeviceClick(device) },
+                        )
+                    }
             }
         }
     }
@@ -1094,7 +1011,7 @@ private fun MonitorMapBadge(
         containerColor = colorScheme.primary,
         contentColor = colorScheme.onPrimary,
     ) {
-        Text(text = text)
+        Text(text = text, softWrap = true)
     }
 }
 
@@ -1114,3 +1031,8 @@ private fun monitorUnknownName(accessPoint: MonitorAccessPoint): String =
     } else {
         "<未知网络>"
     }
+
+private fun MonitorDevice.completeSuccessfulHandshakeCount(): Int = handshakes.count { record ->
+    record.status == MonitorHandshakeStatus.SUCCESS &&
+        record.captureQuality == MonitorHandshakeCaptureQuality.COMPLETE
+}
