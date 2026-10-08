@@ -16,8 +16,10 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorAccessPoint
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDeviceProtocol
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDecryptionStatus
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationDetailPage
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationRange
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationPage
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationSearchPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDeviceRealtime
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionRecord
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDisconnectionType
@@ -27,6 +29,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeFailureReason
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStep
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakePacketType
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorModeStatistics
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
@@ -50,6 +53,7 @@ internal class MonitorModeController(
     private val savedNetworks: () -> List<WifiConfiguration>,
     private val onStatisticsChanged: (MonitorModeStatistics) -> Unit,
     private val onRecordedBytesChanged: (Long, Long) -> Unit,
+    private val onCommunicationChanged: (MonitorCommunicationRange, LongArray) -> Unit,
     private val onExportCompleted: (requestId: String, path: String, fileName: String) -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
@@ -214,6 +218,7 @@ internal class MonitorModeController(
         val resources = synchronized(lock) {
             stopping = true
             generation += 1
+            mirrorGeneration++
             Resources(
                 captureTerminalId = captureTerminalId,
                 statisticsTerminalId = statisticsTerminalId,
@@ -243,6 +248,7 @@ internal class MonitorModeController(
             }
         }
 
+        publishCommunicationChanges()
         resources.pending.forEach { it.completeExceptionally(IOException("监听模式已停止")) }
         runCatching { resources.eventInput?.close() }
         runCatching { resources.commandWriter?.close() }
@@ -409,14 +415,33 @@ internal class MonitorModeController(
         }
     }
 
-    fun communicationPage(session: Long, bssid: String, mac: String, from: Long): MonitorCommunicationPage = synchronized(lock) {
-        check(session == mirrorGeneration && !stopping) { "抓包数据已重置" }
-        requireNotNull(communicationStore).page(session, bssid, mac, from)
+    fun communicationRange(): MonitorCommunicationRange = synchronized(lock) {
+        communicationStore?.range(mirrorGeneration) ?: MonitorCommunicationRange(mirrorGeneration, 1, 0)
     }
 
-    fun communicationDetail(session: Long, bssid: String, mac: String, id: String, cursor: Long): MonitorCommunicationDetailPage = synchronized(lock) {
+    fun communicationRecords(session: Long, ranges: LongArray, keyword: String): MonitorCommunicationPage = synchronized(lock) {
+        if (session != mirrorGeneration || stopping || communicationStore == null)
+            MonitorCommunicationPage(communicationRange(), longArrayOf(), emptyList(), keyword)
+        else requireNotNull(communicationStore).records(session, ranges, keyword)
+    }
+
+    fun searchCommunications(session: Long, keyword: String, after: Long, through: Long): MonitorCommunicationSearchPage = synchronized(lock) {
+        if (session != mirrorGeneration || stopping || communicationStore == null)
+            MonitorCommunicationSearchPage(mirrorGeneration, keyword, through, through, emptyList())
+        else requireNotNull(communicationStore).search(session, keyword, after, through)
+    }
+
+    private fun publishCommunicationChanges() {
+        val notification = synchronized(lock) {
+            communicationRange() to (communicationStore?.takeUpdatedIds() ?: longArrayOf())
+        }
+        onCommunicationChanged(notification.first, notification.second)
+    }
+
+    fun communicationDetail(session: Long, bssid: String, mac: String, id: String, cursor: Long, channel: String): MonitorCommunicationDetailPage = synchronized(lock) {
         check(session == mirrorGeneration && !stopping) { "抓包数据已重置" }
-        requireNotNull(communicationStore).detail(session, bssid, mac, id, cursor)
+        requireNotNull(communicationStore).detail(session, bssid, mac, id, cursor,
+            io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationChannel.valueOf(channel))
     }
 
     private fun handleCommunication(event: JSONObject, session: Long, mirror: CaptureMirror) {
@@ -430,6 +455,7 @@ internal class MonitorModeController(
             val point = mirror.accessPoints[bssid]
             val device = point?.devices?.get(mac)
             if (point != null && device != null) {
+                store.identity(bssid, mac, point.ssid, device.name)
                 val (count, revision) = store.summary(bssid, mac)
                 val updated = device.copy(communicationCount = count, communicationRevision = revision)
                 point.devices[mac] = updated
@@ -740,7 +766,7 @@ internal class MonitorModeController(
             "captureReset" -> {
                 synchronized(lock) {
                     if (generation != sessionGeneration || stopping) return
-                    communicationStore?.reset()
+                    communicationStore?.reset(retainDhcpNames = event.getBoolean("retainPrepared"))
                     if (event.getBoolean("retainPrepared")) {
                         activeMirror = preparedMirror.fork()
                         if (!event.isNull("addedSegment")) {
@@ -750,6 +776,14 @@ internal class MonitorModeController(
                         activeMirror = CaptureMirror()
                         preparedMirror = CaptureMirror()
                         captureParts = listOf(requireNotNull(captureFile))
+                    }
+                    activeMirror.accessPoints.forEach { (bssid, point) ->
+                        point.devices.toMap().forEach { (mac, device) ->
+                            val (count, revision) = communicationStore?.summary(bssid, mac) ?: (0L to 0L)
+                            val updated = device.copy(communicationCount = count, communicationRevision = revision)
+                            point.devices[mac] = updated
+                            activeMirror.changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, updated))
+                        }
                     }
                     // 切换预备镜像；App 按新世代通过原有分页接口同步。
                     mirrorGeneration++
@@ -908,6 +942,7 @@ internal class MonitorModeController(
                             communicationCount = communicationCount,
                             communicationRevision = communicationRevision,
                         )
+                        if (mirror === activeMirror) communicationStore?.identity(bssid, mac, accessPoint.ssid, accessPoint.devices.getValue(mac).name)
                         changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, accessPoint.devices.getValue(mac)))
                     }
                 }
@@ -1002,7 +1037,7 @@ internal class MonitorModeController(
                 requireValidPcapHeader(header)
                 MutableStoredHandshake(
                     key = key,
-                    startedAtMillis = activeMirror.handshakeArtifacts[key]?.startedAtMillis ?: System.currentTimeMillis(),
+                    startedAtMillis = handshake.getLong("startUnixMillis"),
                 ).also { it.pcap.write(header); activeHandshakes.add(key) }
             }
             require(sequence == stored.nextSequence) {
@@ -1067,9 +1102,7 @@ internal class MonitorModeController(
                 "unknown" -> MonitorHandshakeStatus.UNKNOWN
                 else -> throw IOException("握手结束事件包含无效状态: $handshake")
             }
-            stored.finishedAtMillis = if (mirror === preparedMirror) {
-                activeMirror.handshakeArtifacts[key]?.finishedAtMillis ?: System.currentTimeMillis()
-            } else System.currentTimeMillis()
+            stored.finishedAtMillis = handshake.getLong("lastUnixMillis")
             activeHandshakes.remove(key)
             synchronizeHandshakeRecordsLocked(key, mirror)
         }
@@ -1153,6 +1186,9 @@ internal class MonitorModeController(
                 add(parseHandshakeStep(steps.getString(index)))
             }
         }
+        stored.capturedPacketTypes = handshake.optJSONArray("capturedPacketTypes")?.let { types ->
+            List(types.length()) { MonitorHandshakePacketType.valueOf(types.getString(it)) }
+        }.orEmpty()
         stored.failedAtStep = if (handshake.isNull("failedAtStep")) {
             null
         } else {
@@ -1169,8 +1205,14 @@ internal class MonitorModeController(
 
     private fun synchronizeHandshakeRecordsLocked(key: HandshakeKey, mirror: CaptureMirror = activeMirror) {
         val stored = mirror.handshakeArtifacts[key] ?: return
+        val record = stored.toRecord()
+        // PCAP 分块先于校验文本抵达；能够校验之后才允许出现在任何列表中。
+        if (!record.canValidate) return
         mirror.changes.put("handshake:${key.bssid}:${key.deviceMac}:${key.handshakeId}",
-            MonitorChange.Handshake(key.bssid, key.deviceMac, stored.toRecord(System.currentTimeMillis())))
+            MonitorChange.Handshake(key.bssid, key.deviceMac, record))
+        if (mirror === activeMirror) {
+            communicationStore?.handshake(key.bssid, key.deviceMac, record)
+        }
     }
 
     private fun MutableAccessPoint.toMetadata() = MonitorAccessPoint(
@@ -1297,8 +1339,6 @@ internal class MonitorModeController(
                 }
             }
             update?.let { (epoch, bytes) -> onRecordedBytesChanged(epoch, bytes) }
-            val hasActive = synchronized(lock) { activeHandshakes.isNotEmpty() }
-            if (hasActive) scheduleStatisticsPublish(sessionGeneration)
             val now = SystemClock.elapsedRealtime()
             if (now - diagnosticAt >= 1000L) {
                 synchronized(lock) { diagnosticStateLocked() }
@@ -1333,11 +1373,11 @@ internal class MonitorModeController(
             val snapshot = synchronized(lock) {
                 if (generation != sessionGeneration || stopping) return@synchronized null
                 statisticsPublishScheduled = false
-                activeHandshakes.forEach { synchronizeHandshakeRecordsLocked(it) }
                 diagnosticStateLocked()
                 statisticsSnapshotLocked()
             }
             snapshot?.let {
+                publishCommunicationChanges()
                 diagnosticSession?.apply { publishedHeaders.incrementAndGet(); lastPublishedAt = SystemClock.elapsedRealtime() }
                 onStatisticsChanged(it)
             }
@@ -1360,6 +1400,7 @@ internal class MonitorModeController(
             statisticsSnapshotLocked()
         }
         diagnosticSession?.apply { publishedHeaders.incrementAndGet(); lastPublishedAt = SystemClock.elapsedRealtime() }
+        publishCommunicationChanges()
         onStatisticsChanged(statistics)
     }
 
@@ -1523,6 +1564,7 @@ internal class MonitorModeController(
         var captureQuality: MonitorHandshakeCaptureQuality =
             MonitorHandshakeCaptureQuality.COMPLETE,
         var capturedSteps: List<MonitorHandshakeStep> = emptyList(),
+        var capturedPacketTypes: List<MonitorHandshakePacketType> = emptyList(),
         var failedAtStep: MonitorHandshakeStep? = null,
         var failureReason: MonitorHandshakeFailureReason? = null,
         var m2AttemptCount: Int = 0,
@@ -1533,10 +1575,10 @@ internal class MonitorModeController(
         val pcap: SharedPcapBuffer = SharedPcapBuffer(),
         val pendingPacket: ByteArrayOutputStream = ByteArrayOutputStream(),
     ) {
-        fun toRecord(nowMillis: Long): MonitorHandshakeRecord = MonitorHandshakeRecord(
+        fun toRecord(): MonitorHandshakeRecord = MonitorHandshakeRecord(
             id = key.handshakeId,
             startUnixMillis = startedAtMillis,
-            durationMillis = (finishedAtMillis ?: nowMillis).minus(startedAtMillis).coerceAtLeast(0L),
+            durationMillis = if (status == MonitorHandshakeStatus.UNKNOWN) null else finishedAtMillis?.minus(startedAtMillis)?.coerceAtLeast(0L),
             status = status,
             canValidate = hc22000 != null,
             captureQuality = captureQuality,
@@ -1546,6 +1588,7 @@ internal class MonitorModeController(
             m2AttemptCount = m2AttemptCount,
             exportPacketCount = exportPacketCount,
             hc22000 = hc22000,
+            capturedPacketTypes = capturedPacketTypes,
         )
     }
 

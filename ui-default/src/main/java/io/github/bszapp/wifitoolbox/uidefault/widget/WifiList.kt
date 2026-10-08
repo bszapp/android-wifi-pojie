@@ -140,18 +140,16 @@ fun WifiList(
             capturedAccessPoints = if (modeState?.mode == WifiMode.MONITOR) capturedMetadata else emptyList(),
         )
     }
-    val successfulHandshakeAccessPointsBySsid = remember(capturedAccessPoints, modeState?.mode) {
+    val handshakeDevicesBySsid = remember(capturedAccessPoints, modeState?.mode) {
         if (modeState?.mode != WifiMode.MONITOR) {
             emptyMap()
         } else {
             capturedAccessPoints.asSequence()
-                .filter { accessPoint ->
-                    !accessPoint.ssid.isNullOrBlank() &&
-                        accessPoint.devices.any { it.hasCompleteSuccessfulHandshake() }
-                }
-                .groupBy { it.ssid!! }
+                .groupBy { it.ssid.orEmpty() }
                 .mapValues { (_, accessPoints) ->
-                    accessPoints.distinctBy { it.bssid.lowercase() }.size
+                    accessPoints.asSequence().flatMap { it.devices.asSequence() }
+                        .filter { it.handshakes.isNotEmpty() }
+                        .distinctBy { it.mac.lowercase() }.count()
                 }
         }
     }
@@ -205,6 +203,7 @@ fun WifiList(
                                 is TaskProgress.ConnectWifi -> progress.stage.name.toTaskStageText()
                                 is TaskProgress.WpsPbc ->
                                     "WPS-PBC · 已获取 ${progress.networkCount} 个网络"
+                                is TaskProgress.UsbMonitor -> "电脑控制"
                                 null -> "加载中"
                             },
                             onClick = {
@@ -226,8 +225,7 @@ fun WifiList(
                         WifiGroupCard(
                                 vm = vm,
                                 group = group,
-                                successfulHandshakeAccessPointCount =
-                                    successfulHandshakeAccessPointsBySsid[group.ssid] ?: 0,
+                                handshakeDeviceCount = handshakeDevicesBySsid[group.ssid] ?: 0,
                                 discoveredHiddenNameCount =
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
                                 modifier = Modifier.animateItem(),
@@ -287,7 +285,6 @@ fun WifiList(
                     onTestHandshake = { id, password -> vm.wifiList.testMonitorHandshake(bssid, mac, id, password) },
                     onExportHandshake = { id -> vm.wifiList.exportMonitorHandshakePcap(bssid, mac, id) },
                     onSaveHc22000 = onSaveHc22000,
-                    communications = vm.wifiList.communications,
                     renderSheet = false,
                 )
             },
@@ -563,7 +560,7 @@ private fun WifiErrorContent(message: String) {
 private fun WifiGroupCard(
     vm: DefaultViewModel,
     group: MergedWifiGroup,
-    successfulHandshakeAccessPointCount: Int,
+    handshakeDeviceCount: Int,
     discoveredHiddenNameCount: Int,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
@@ -652,10 +649,10 @@ private fun WifiGroupCard(
                         if (group.savedWifiList.isNotEmpty()) {
                             add(Triple("已保存", TagStyle.Primary, null))
                         }
-                        if (successfulHandshakeAccessPointCount > 0) {
+                        if (handshakeDeviceCount > 0) {
                             add(
                                 Triple(
-                                    "成功握手${successfulHandshakeAccessPointCount}个",
+                                    "成功握手${handshakeDeviceCount}台",
                                     TagStyle.Primary,
                                     null,
                                 ),

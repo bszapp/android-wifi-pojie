@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 仅镜像服务状态并转发操作；压缩包由 App 提供，容器文件操作全部由服务执行。 */
 class ContainerController(
@@ -73,6 +74,14 @@ class ContainerController(
     override fun update() = request(ContainerOperation.UPDATE)
     override fun reset() = request(ContainerOperation.RESET)
     override fun uninstall() = request(ContainerOperation.UNINSTALL)
+
+    internal suspend fun readVersionCode(): Long = withContext(Dispatchers.IO) {
+        val binding = synchronized(lock) { activeBinding }
+        check(binding != null && isCurrent(binding)) { "service 未连接" }
+        val version = binding.service.getContainerVersionCode()
+        check(isCurrent(binding)) { "读取容器版本期间服务连接已改变" }
+        version
+    }
 
     override fun interrupt(operationId: Long) {
         val binding = synchronized(lock) { activeBinding } ?: return

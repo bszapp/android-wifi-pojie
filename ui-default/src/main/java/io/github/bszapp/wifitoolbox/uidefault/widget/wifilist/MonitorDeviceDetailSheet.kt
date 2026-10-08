@@ -30,6 +30,8 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -42,6 +44,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -58,12 +62,12 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeRecord
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeFailureReason
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQuality
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStep
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakePacketType
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSecurityProtocol
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorSsidVisibility
 import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
-import io.github.bszapp.wifitoolbox.uidefault.model.MonitorCommunicationUiState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -88,7 +92,6 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 private enum class DeviceSheetPage {
     DETAILS,
     EXPORT,
-    COMMUNICATION,
 }
 
 private enum class Hc22000Action {
@@ -114,7 +117,6 @@ internal fun MonitorDeviceDetailSheet(
     onTestHandshake: (handshakeId: String, password: String) -> Unit,
     onExportHandshake: (handshakeId: String) -> String,
     onSaveHc22000: (content: String, fileName: String) -> Unit,
-    communications: MonitorCommunicationUiState? = null,
     showDeviceDetails: Boolean = true,
     renderSheet: Boolean = true,
     initialHandshakeId: String? = null,
@@ -130,24 +132,13 @@ internal fun MonitorDeviceDetailSheet(
         mutableStateMapOf<String, Boolean>()
     }
     var page by remember(accessPoint.bssid, device.mac) { mutableStateOf(DeviceSheetPage.DETAILS) }
-    val communicationDisplay = communications?.state?.collectAsState()?.value
-    DisposableEffect(page, accessPoint.bssid, device.mac, communications) {
-        val readingCommunications = page == DeviceSheetPage.COMMUNICATION
-        if (readingCommunications) communications?.open(accessPoint.bssid, device.mac)
-        onDispose { if (readingCommunications) communications?.close() }
-    }
-    LaunchedEffect(device.decryptionStatus) {
-        if (device.decryptionStatus == MonitorDecryptionStatus.SECURE && page == DeviceSheetPage.COMMUNICATION) {
-            page = DeviceSheetPage.DETAILS
-        }
-    }
     var selectedSubtypeIds by remember(accessPoint.bssid, device.mac) {
         mutableStateOf(emptySet<String>())
     }
     val totalPacketCount = device.frameGroups.sumOf(MonitorFrameGroupStatistics::packetCount)
     val totalByteCount = device.frameGroups.sumOf(MonitorFrameGroupStatistics::byteCount)
-    val savedConfiguration = remember(savedNetworks, accessPoint.ssid, accessPoint.securityProtocols) {
-        findSavedWpaPskConfiguration(accessPoint, savedNetworks)
+    val savedConfiguration = remember(savedNetworks, accessPoint.ssid, accessPoint.securityProtocols, device.handshakes.any { it.canValidate }) {
+        findSavedWpaPskConfiguration(accessPoint, savedNetworks, device.handshakes.any { it.canValidate })
     }
     var handshakeTestTarget by remember(accessPoint.bssid, device.mac) {
         mutableStateOf<MonitorHandshakeRecord?>(null)
@@ -253,10 +244,13 @@ internal fun MonitorDeviceDetailSheet(
                                         "\n此提示表示当前功能无法凭已保存密码被动解密该协议，不代表应用层与网络具有绝对安全性。"
                                     } else "",
                             )
-                            if (communications != null && device.decryptionStatus != MonitorDecryptionStatus.SECURE &&
+                            if (device.decryptionStatus != MonitorDecryptionStatus.SECURE &&
                                 (device.decryptionStatus == MonitorDecryptionStatus.READY || device.communicationCount > 0)) {
                                 BasicComponent(title = "通信数据", summary = "${device.communicationCount} 条记录 · 按需读取详情",
-                                    onClick = { page = DeviceSheetPage.COMMUNICATION })
+                                    onClick = {
+                                        onDismiss()
+                                        navigator.push(Route.Capture(accessPoint.bssid, device.mac))
+                                    })
                             }
                         }
                     }
@@ -312,13 +306,6 @@ internal fun MonitorDeviceDetailSheet(
                     }
                 }
 
-                DeviceSheetPage.COMMUNICATION -> {
-                    item { SmallTitle(text = "通信数据") }
-                    item { TextButton(text = "返回设备详情", onClick = { page = DeviceSheetPage.DETAILS }) }
-                    if (communications != null && communicationDisplay != null) {
-                        monitorCommunicationItems(communications, communicationDisplay)
-                    }
-                }
                 DeviceSheetPage.EXPORT -> {
                     item {
                         Text(
@@ -372,7 +359,6 @@ internal fun MonitorDeviceDetailSheet(
             title = when (page) {
                 DeviceSheetPage.DETAILS -> "设备详情"
                 DeviceSheetPage.EXPORT -> "导出 PCAP"
-                DeviceSheetPage.COMMUNICATION -> "通信数据"
             },
             allowDismiss = true,
             enableNestedScroll = true,
@@ -653,46 +639,7 @@ internal fun MonitorDeviceDetailSheet(
                             .scrollEndHaptic()
                             .overScrollVertical(),
                     ) {
-                        Card {
-                            BasicComponent(
-                                title = "网络名称",
-                                summary = accessPoint.ssid ?: monitorNetworkPlaceholder(accessPoint),
-                            )
-                            BasicComponent(title = "接入点 MAC", summary = accessPoint.bssid)
-                            BasicComponent(title = "目标设备 MAC", summary = device.mac)
-                            BasicComponent(
-                                title = "开始时间",
-                                summary = formatHandshakeStartTime(visibleExportTarget.startUnixMillis),
-                            )
-                            BasicComponent(
-                                title = "持续时间",
-                                summary = formatHandshakeDuration(visibleExportTarget.durationMillis),
-                            )
-                            BasicComponent(
-                                title = "握手结果",
-                                summary = handshakeStatusText(visibleExportTarget),
-                            )
-                            BasicComponent(
-                                title = "已捕获阶段",
-                                summary = visibleExportTarget.capturedSteps
-                                    .joinToString("、", transform = ::handshakeStepText)
-                                    .ifEmpty { "暂无" },
-                            )
-                            visibleExportTarget.failedAtStep?.let { failedAtStep ->
-                                BasicComponent(
-                                    title = "失败阶段",
-                                    summary = handshakeStepText(failedAtStep),
-                                )
-                            }
-                            BasicComponent(
-                                title = "M2 捕获次数",
-                                summary = visibleExportTarget.m2AttemptCount.toString(),
-                            )
-                            BasicComponent(
-                                title = "导出包数量",
-                                summary = visibleExportTarget.exportPacketCount.toString(),
-                            )
-                        }
+                        HandshakeDetailsCard(accessPoint, device, visibleExportTarget)
                     }
                     Row(
                         modifier = Modifier
@@ -751,6 +698,69 @@ internal fun MonitorDeviceDetailSheet(
 }
 
 @Composable
+internal fun HandshakeDetailsCard(accessPoint: MonitorAccessPoint, device: MonitorDevice, record: MonitorHandshakeRecord) {
+    Card {
+        BasicComponent(title = "网络名称", summary = accessPoint.ssid ?: monitorNetworkPlaceholder(accessPoint))
+        BasicComponent(title = "接入点 MAC", summary = accessPoint.bssid)
+        device.name?.let { BasicComponent(title = "设备名称", summary = it) }
+        BasicComponent(title = "目标设备 MAC", summary = device.mac)
+        BasicComponent(title = "开始时间", summary = formatHandshakeStartTime(record.startUnixMillis))
+        if (record.status == MonitorHandshakeStatus.IN_PROGRESS) {
+            BasicComponent(title = "用时", summary = "结束后计算")
+        }
+        record.durationMillis?.let { duration ->
+            BasicComponent(title = "用时", summary = formatHandshakeDuration(duration))
+            BasicComponent(title = "最后一个包", summary = formatHandshakeStartTime(record.startUnixMillis + duration))
+        }
+        BasicComponent(title = "握手结果", summary = handshakeStatusText(record))
+        BasicComponent(title = "已捕获阶段", summary = record.capturedSteps.joinToString("、", transform = ::handshakeStepText).ifEmpty { "暂无" })
+        val packetTypes = record.capturedPacketTypes.toSet()
+        val normalPackets = listOf(
+            "SSID 上下文（Beacon / Probe Response / Association）" to setOf(MonitorHandshakePacketType.SSID_CONTEXT),
+            "Authentication 请求" to setOf(MonitorHandshakePacketType.AUTHENTICATION_REQUEST),
+            "Authentication 响应" to setOf(MonitorHandshakePacketType.AUTHENTICATION_RESPONSE),
+            "Association / Reassociation 请求" to setOf(MonitorHandshakePacketType.ASSOCIATION_REQUEST, MonitorHandshakePacketType.REASSOCIATION_REQUEST),
+            "Association / Reassociation 响应" to setOf(MonitorHandshakePacketType.ASSOCIATION_RESPONSE, MonitorHandshakePacketType.REASSOCIATION_RESPONSE),
+            "EAPOL M1" to setOf(MonitorHandshakePacketType.EAPOL1),
+            "EAPOL M2" to setOf(MonitorHandshakePacketType.EAPOL2),
+            "EAPOL M3" to setOf(MonitorHandshakePacketType.EAPOL3),
+            "EAPOL M4" to setOf(MonitorHandshakePacketType.EAPOL4),
+        )
+        val capturedColor = if (MiuixTheme.colorScheme.surface.luminance() > .5f) Color(0xFF238636) else Color(0xFF75D38A)
+        Text("正常握手过程的包类型", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MiuixTheme.textStyles.body1)
+        normalPackets.forEach { (label, types) ->
+            val captured = types.any(packetTypes::contains)
+            val color = if (captured) capturedColor else MiuixTheme.colorScheme.error
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (captured) Icons.Rounded.CheckCircle else Icons.Rounded.Cancel, null, Modifier.size(20.dp), tint = color)
+                Spacer(Modifier.width(10.dp))
+                Text(label, modifier = Modifier.weight(1f), style = MiuixTheme.textStyles.body2, color = color)
+                Text(if (captured) "已捕获" else "未捕获", style = MiuixTheme.textStyles.footnote2, color = color)
+            }
+        }
+        record.failedAtStep?.let { BasicComponent(title = "失败阶段", summary = handshakeStepText(it)) }
+        BasicComponent(title = "M2 捕获次数", summary = record.m2AttemptCount.toString())
+        BasicComponent(title = "导出包数量", summary = record.exportPacketCount.toString())
+        record.hc22000?.split('*')?.takeIf { it.size == 9 }?.let { fields ->
+            val frame = fields[7]
+            BasicComponent(title = "校验格式", summary = "Hashcat HC22000 · WPA*02")
+            BasicComponent(title = "消息配对", summary = fields[8])
+            BasicComponent(title = "MIC", summary = fields[2])
+            BasicComponent(title = "ANonce", summary = fields[6])
+            if (frame.length >= 198) {
+                BasicComponent(title = "SNonce", summary = frame.substring(34, 98))
+                BasicComponent(title = "Replay Counter", summary = frame.substring(18, 34).toULongOrNull(16)?.toString().orEmpty())
+                BasicComponent(title = "Key Descriptor Version", summary = ((frame.substring(10, 14).toIntOrNull(16) ?: 0) and 7).toString())
+                BasicComponent(title = "EAPOL 长度", summary = "${frame.length / 2} B")
+            }
+        }
+        if (record.captureQuality == MonitorHandshakeCaptureQuality.PARTIALLY_MISSING) {
+            BasicComponent(title = "捕获情况", summary = "部分缺失")
+        }
+    }
+}
+
+@Composable
 private fun HandshakeRecordsCard(
     records: List<MonitorHandshakeRecord>,
     testing: Boolean,
@@ -773,9 +783,13 @@ private fun HandshakeRecordsCard(
                             summary = buildString {
                                 append("开始时间：")
                                 append(formatHandshakeStartTime(record.startUnixMillis))
-                                append("\n持续时间：")
-                                append(formatHandshakeDuration(record.durationMillis))
-                                append(" · ")
+                                if (record.status == MonitorHandshakeStatus.IN_PROGRESS || record.durationMillis != null) {
+                                    append("\n持续时间：")
+                                    append(if (record.status == MonitorHandshakeStatus.IN_PROGRESS) "结束后计算" else formatHandshakeDuration(record.durationMillis))
+                                    append(" · ")
+                                } else {
+                                    append('\n')
+                                }
                                 append(handshakeStatusText(record))
                                 record.failedAtStep?.let { failedAtStep ->
                                     append("\n失败阶段：")
@@ -827,10 +841,11 @@ private fun HandshakeRecordsCard(
 private fun findSavedWpaPskConfiguration(
     accessPoint: MonitorAccessPoint,
     savedNetworks: List<WifiConfiguration>,
+    hasPskHandshake: Boolean = false,
 ): WifiConfiguration? {
     val ssid = accessPoint.ssid?.takeIf(String::isNotBlank) ?: return null
     if (
-        MonitorSecurityProtocol.WPA !in accessPoint.securityProtocols &&
+        !hasPskHandshake && MonitorSecurityProtocol.WPA !in accessPoint.securityProtocols &&
         MonitorSecurityProtocol.WPA2 !in accessPoint.securityProtocols
     ) {
         return null
@@ -848,13 +863,13 @@ private fun findSavedWpaPskConfiguration(
 internal fun formatHandshakeStartTime(value: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(value))
 
-internal fun formatHandshakeDuration(value: Long): String =
-    if (value < 1000L) "$value ms" else "%.3f 秒".format(value / 1000.0)
+internal fun formatHandshakeDuration(value: Long?): String =
+    if (value == null) "未知" else if (value < 1000L) "$value ms" else "%.3f 秒".format(value / 1000.0)
 
 internal fun handshakeStatusText(record: MonitorHandshakeRecord): String = when (record.status) {
     MonitorHandshakeStatus.IN_PROGRESS -> "握手过程中"
     MonitorHandshakeStatus.SUCCESS -> "握手成功"
-    MonitorHandshakeStatus.UNKNOWN -> "握手状态未知（等待握手超时）"
+    MonitorHandshakeStatus.UNKNOWN -> "未知状态（捕获超过 10 秒）"
     MonitorHandshakeStatus.FAILED -> when (record.failureReason) {
         MonitorHandshakeFailureReason.ROUTER_REJECTED_CONNECTION ->
             "握手失败（路由器拒绝接入）"

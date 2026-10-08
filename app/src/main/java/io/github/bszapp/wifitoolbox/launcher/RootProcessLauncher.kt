@@ -22,7 +22,10 @@ import kotlinx.coroutines.runInterruptible
  * Binder 统一等待服务进程通过 Provider 主动投递。Root 服务进程使用固定 nice-name，
  * 生命周期不跟随应用侧 launcher；显式 shutdown、取消时强杀、系统重启或外部强杀才退出。
  */
-internal class RootProcessLauncher(private val context: Context) : AutoCloseable {
+internal class RootProcessLauncher(
+    private val context: Context,
+    private val serviceUid: Int? = null,
+) : AutoCloseable {
 
     suspend fun getServiceBinder(className: String): IBinder = coroutineScope {
         ToolboxServiceProvider.clearBinder()
@@ -44,7 +47,13 @@ internal class RootProcessLauncher(private val context: Context) : AutoCloseable
         Log.d(TAG, "启动独立 root 服务：$className")
 
         val process = try {
-            ProcessBuilder("su", "-c", command)
+            ProcessBuilder(buildList {
+                add("su")
+                // 更新服务沿用原 UID；普通启动继续使用原来的 su 默认身份。
+                serviceUid?.takeIf { it != 0 }?.let { add(it.toString()) }
+                add("-c")
+                add(command)
+            })
                 .redirectErrorStream(true)
                 .start()
         } catch (_: java.io.IOException) {

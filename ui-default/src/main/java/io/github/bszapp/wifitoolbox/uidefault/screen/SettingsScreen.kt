@@ -27,7 +27,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
-import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ContainerProgressSheet
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.InstallContainerConfirmationDialog
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.ResetContainerConfirmationDialog
 import io.github.bszapp.wifitoolbox.uidefault.screen.settings.UninstallContainerConfirmationDialog
@@ -103,7 +102,6 @@ fun SettingsScreen(
             viewModel.uninstallContainer()
         },
     )
-    ContainerProgressSheet(state = containerState, onInterrupt = viewModel::interruptContainer)
 
     Scaffold(
         topBar = {

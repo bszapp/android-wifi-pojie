@@ -1,14 +1,15 @@
 # WiFi 工具箱
 
+## USB monitor / Wireshark
+
+全新 Windows 电脑的软件安装、插件安装、连接手机与捕获步骤见
+[tools/wireshark/README.md](tools/wireshark/README.md)。
+电脑使用内置 WinUSB 驱动，通过 extcap 接收原始无线帧，并可调频或提交原始帧发送请求。
+应用内电脑控制持续运行到手动停止；独立调试脚本使用 20 秒自动还原。
+
 ## 原生 hashcat
 
-本项目使用 **hashcat 官方主线固定提交 `5108769476e1019ef0900b7b6b21ec39d1cb92a3` 的代码**。
-构建版本标记为 `v7.1.2-mainline-5108769476e1`，不会在构建时自动跟随主线更新。
-源码放在 `app/src/main/cpp/hashcat/`，
-官方来源、版本、SHA-256 和适配范围记录在 `app/src/main/cpp/hashcat/SOURCES.md`。
-保留上游每个文件已有的许可证声明及 `docs/license.txt`、`docs/license_libs/`。
-构建参考该提交的 [官方 Android 文档](https://github.com/hashcat/hashcat/blob/5108769476e1019ef0900b7b6b21ec39d1cb92a3/BUILD_Android.md)，
-沿用上游 Android 分支、模块/feed 插件及 ABI 检查，构建裁剪为 WPA/WPA2 文件字典用途：
+构建裁剪为 WPA/WPA2 文件字典用途：
 保留 22000（密码推导 PMK，PMKID/EAPOL）和 22001（已有 PMK，PMKID/EAPOL）两种模式。
 普通 UTF-8 TXT 字典无需编码转换库，构建不再捆绑 libiconv、liblzma 和 Markov 数据。
 
@@ -19,10 +20,9 @@
 - 直接执行这份 `.so` 时，通过 ARM64 ELF 入口与系统 `/system/bin/linker64` 启动原始命令行流程。
   使用标准 Android/bionic 环境，不经过 rootfs、proot 或 chroot。
 
-WPA/WPA2 模块、文件字典 feed、对应 OpenCL 源码及其传递依赖、通用调优配置和许可证
+WPA/WPA2 模块、文件字典 feed、对应 OpenCL 源码及其传递依赖、通用调优配置
 在构建时打包进 `.so`。插件剥离非运行必需符号，资源以 gzip 最高级别压缩，原生链接回收无用代码段。
 其他哈希模块、bridge/feed、内置规则库、掩码库、字符集和无关内核不进入构建产物。
-上游完整源码和许可证保留在源码目录，便于核对来源。
 未指定算法时双入口默认使用 22000，启动资源完整性检查也使用 WPA 模块和内核。
 首次运行解包到调用方的专属运行目录，随后复用内容哈希对应的资源目录与内核缓存。
 直接执行时，即便只复制这一份 `.so`，也不需要另外复制 hashcat 的模块或 OpenCL 资源。
@@ -92,22 +92,12 @@ gzip 使用 Android 系统 zlib。额外编码转换、XZ/zstd 字典等可选�
 官方 Android 文档记录了部分模式（包括 22000）在其测试设备上的内存不足问题；
 该记录不代表本机结果。保留跨设备的上游实现，仍需设备具备可访问且满足要求的计算驱动。
 
-### 构建与许可证注意事项
+### 构建
 
 APK 的原生打包任务从项目内源码编译 `libhashcat.so`、两个 WPA/WPA2 模块和文件字典插件，
 使用 Android NDK 的 bionic 工具链和静态 C++ 运行库。源码目录不内嵌预编译 ELF、静态库
 或可执行程序；构建生成的资源包也只收集本次 Android ARM64 编译产物和官方数据文件。
 现有 Gradle debug/release 原生打包均包含 `libterminal.so` 和 `libhashcat.so`。
-
-此前 7.1.2 集成保留了 UnRAR，其用途限制与 GPLv3 存在兼容性问题。
-当前固定主线提交已移除该依赖，未将旧 UnRAR 重新带入构建。
-GPL 的组合程序判断涉及链接、进程边界与通信语义：
-JNI/同地址空间调用和独立命令行程序存在差异；独立进程或 proot 本身不自动保证简单聚合。
-仅保留许可证头、从源码构建或更换启动方式，均不能自动消除许可证限制。
-本次精简移除了 GNU libiconv 的静态链接，项目其他依赖仍需单独核对，
-因此此迁移**不宣称已完成 F-Droid 官方仓库的完整合规审核**。
-参考 [GNU GPL FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#MereAggregation)
-和 [F-Droid 开发者说明](https://f-droid.org/docs/FAQ_-_App_Developers/)。
 
 ## 一键打包
 

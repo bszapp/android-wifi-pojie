@@ -36,11 +36,9 @@ class WifiListUiState(
     val modeState = controller.wifiList.modeState
 
     val monitorPcapExports = controller.wifiList.monitorPcapExports
-    val communications = MonitorCommunicationUiState(controller.wifiList, scope)
 
-    private val _monitorHandshakeTest = MutableStateFlow(MonitorHandshakeTestUiState())
-    val monitorHandshakeTest: StateFlow<MonitorHandshakeTestUiState> =
-        _monitorHandshakeTest.asStateFlow()
+    private val handshakeActions = MonitorHandshakeUiState(controller.wifiList, scope)
+    val monitorHandshakeTest = handshakeActions.state
 
     val monitorMapFilterState = controller.monitorMapFilterState
 
@@ -99,15 +97,6 @@ class WifiListUiState(
                         }
 
                 if (shouldAutoScan) startScan()
-            }
-        }
-        scope.launch {
-            controller.wifiList.monitorHandshakeTestResults.collect { result ->
-                if (result.requestId == _monitorHandshakeTest.value.requestId) {
-                    _monitorHandshakeTest.value = MonitorHandshakeTestUiState(
-                        outcome = result.outcome,
-                    )
-                }
             }
         }
     }
@@ -170,17 +159,11 @@ class WifiListUiState(
         handshakeId: String,
         password: String,
     ) {
-        val requestId = controller.wifiList.testMonitorHandshake(
-            bssid = bssid,
-            deviceMac = deviceMac,
-            handshakeId = handshakeId,
-            password = password,
-        )
-        _monitorHandshakeTest.value = MonitorHandshakeTestUiState(requestId = requestId)
+        handshakeActions.test(bssid, deviceMac, handshakeId, password)
     }
 
     fun clearMonitorHandshakeTestResult() {
-        _monitorHandshakeTest.value = MonitorHandshakeTestUiState()
+        handshakeActions.clear()
     }
 
     suspend fun saveWifiNetwork(ssid: String, password: String): Int =
@@ -225,3 +208,25 @@ data class MonitorHandshakeTestUiState(
     val requestId: String? = null,
     val outcome: MonitorHandshakeTestOutcome? = null,
 )
+
+/** 列表 Sheet 与抓包详情复用同一套校验事件跟踪，不触发扫描或模式操作。 */
+class MonitorHandshakeUiState(
+    private val controller: io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController,
+    scope: CoroutineScope,
+) {
+    private val mutable = MutableStateFlow(MonitorHandshakeTestUiState())
+    val state = mutable.asStateFlow()
+    init {
+        scope.launch {
+            controller.monitorHandshakeTestResults.collect { result ->
+                if (result.requestId == mutable.value.requestId) {
+                    mutable.value = MonitorHandshakeTestUiState(outcome = result.outcome)
+                }
+            }
+        }
+    }
+    fun test(bssid: String, mac: String, id: String, password: String) {
+        mutable.value = MonitorHandshakeTestUiState(requestId = controller.testMonitorHandshake(bssid, mac, id, password))
+    }
+    fun clear() { mutable.value = MonitorHandshakeTestUiState() }
+}

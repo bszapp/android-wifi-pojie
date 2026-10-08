@@ -79,7 +79,7 @@ internal fun MonitorCaptureSheet(
                 item(key = "hopping") {
                     io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = channels.isNotEmpty()) {
                         Card {
-                            BasicComponent(title = "跳频录制", summary = "自动循环监听所有可用信道",
+                            BasicComponent(title = "跳频录制", summary = "按上次扫描的信号指数分配停留时间，指数越高停留越久",
                                 role = Role.RadioButton,
                                 onClick = { hopping = true },
                                 endActions = { RadioButton(selected = hopping, onClick = null) })

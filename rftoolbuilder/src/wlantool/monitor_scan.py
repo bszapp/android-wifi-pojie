@@ -2,6 +2,7 @@
 """Three-second monitor scan: management-frame discovery, never associates."""
 import argparse
 import json
+import math
 import os
 import re
 import select
@@ -99,16 +100,36 @@ class ChannelState:
     """信道控制线程记录最后一次被内核 ACK 确认的频率。"""
     def __init__(self):
         self.frequency_mhz = None
+        self.layouts = {}
+
+    def observe(self, result):
+        frequency = result["frequency"]
+        layout = (result.get("channelWidth", 0), result.get("centerFreq0", frequency), result.get("centerFreq1", 0))
+        # Operation IEs describe the occupied bandwidth; capabilities do not.
+        previous = self.layouts.get(frequency)
+        if previous is None or layout[0] >= previous[0]:
+            self.layouts[frequency] = layout
 
 
-def set_frequency(scanner, frequency, channel_state):
+def set_frequency(scanner, frequency, channel_state, capture=False):
     attributes = managed.pack_attr(3, struct.pack("=I", scanner.ifindex))
     attributes += managed.pack_attr(38, struct.pack("=I", frequency))
-    attributes += managed.pack_attr(39, struct.pack("=I", 1))
+    width, center0, center1 = channel_state.layouts.get(frequency, (0, frequency, 0)) if capture else (0, frequency, 0)
+    # nl80211 channel-width enum differs from Android ScanResult's enum.
+    if width == 0:
+        attributes += managed.pack_attr(39, struct.pack("=I", 1))
+    else:
+        attributes += managed.pack_attr(159, struct.pack("=I", {1: 2, 2: 3, 3: 5, 4: 4, 5: 13}[width]))
+        attributes += managed.pack_attr(160, struct.pack("=I", center0 or frequency))
+        if center1:
+            attributes += managed.pack_attr(161, struct.pack("=I", center1))
     sequence = scanner._send(scanner.command_socket, scanner.family_id, 2,
                              managed.NLM_F_REQUEST | managed.NLM_F_ACK, attributes)
     scanner._receive_ack(scanner.command_socket, sequence)
     channel_state.frequency_mhz = frequency
+    if capture:
+        diagnostic("captureChannelAck", frequencyMhz=frequency, channelWidth=width,
+                   centerFreq0=center0, centerFreq1=center1)
 
 
 def run(interface, duration, channel_state, request_id=None):
@@ -163,6 +184,7 @@ def run(interface, duration, channel_state, request_id=None):
                     except (ValueError, IndexError, struct.error):
                         continue
                 if result:
+                    channel_state.observe(result)
                     previous = found.get(result["BSSID"])
                     if previous and not result["SSID"]:
                         result["SSID"] = previous["SSID"]
@@ -221,7 +243,7 @@ if __name__ == "__main__":
         hopping = False
         hop_scanner = None
         hop_index = 0
-        dwell = args.duration / len(frequencies)
+        hop_dwells = {}
         next_hop = 0.0
         awaiting_resume = False
         input_buffer = b""
@@ -271,14 +293,24 @@ if __name__ == "__main__":
                                     if frequency not in frequencies:
                                         raise ValueError("所选频率不可用")
                                     scanner = managed.Nl80211Scanner(args.interface)
-                                    set_frequency(scanner, frequency, channel_state)
+                                    set_frequency(scanner, frequency, channel_state, capture=True)
                                 elif kind == "hopping":
+                                    # 权重由服务根据上次扫描快照计算；此处只执行时间表。
+                                    entries = plan["channelDwells"]
+                                    updated_dwells = {entry["frequencyMhz"]: float(entry["dwellMillis"]) / 1000
+                                                      for entry in entries}
+                                    if (len(entries) != len(frequencies) or set(updated_dwells) != set(frequencies)
+                                            or any(not math.isfinite(value) or value < 0.1
+                                                   for value in updated_dwells.values())):
+                                        raise ValueError("跳频停留时间表无效")
+                                    hop_dwells = updated_dwells
                                     if hop_scanner is None:
                                         hop_scanner = managed.Nl80211Scanner(args.interface)
                                     # 第一次跳频成功后才确认恢复，后续继续同一个循环。
-                                    set_frequency(hop_scanner, frequencies[hop_index], channel_state)
+                                    frequency = frequencies[hop_index]
+                                    set_frequency(hop_scanner, frequency, channel_state, capture=True)
                                     hop_index = (hop_index + 1) % len(frequencies)
-                                    next_hop = time.monotonic() + dwell
+                                    next_hop = time.monotonic() + hop_dwells[frequency]
                                     hopping = True
                                 awaiting_resume = False
                                 diagnostic("resumeAck", requestId=request_id, capturePlan=plan,
@@ -299,9 +331,10 @@ if __name__ == "__main__":
                                     scanner.close()
                 if hopping and time.monotonic() >= next_hop:
                     try:
-                        set_frequency(hop_scanner, frequencies[hop_index], channel_state)
+                        frequency = frequencies[hop_index]
+                        set_frequency(hop_scanner, frequency, channel_state, capture=True)
                         hop_index = (hop_index + 1) % len(frequencies)
-                        next_hop = time.monotonic() + dwell
+                        next_hop = time.monotonic() + hop_dwells[frequency]
                     except Exception as error:
                         hopping = False
                         hop_scanner.close()

@@ -27,6 +27,11 @@ need_tool ln
 need_tool rm
 need_tool mkdir
 
+# Gradle supplies the application's sole version definition.
+case "${APP_VERSION_CODE:-}" in
+  ''|*[!0-9]*) die "APP_VERSION_CODE must contain the application version number" ;;
+esac
+
 for required in \
   "$DIST_DIR/alpine/alpine-minirootfs-3.23.4-aarch64.tar.gz" \
   "$DIST_DIR/alpine/dbus-libs-1.16.2-r1.apk" \
@@ -141,6 +146,7 @@ mkdir -p \
   "$ROOTFS_STAGE/usr/local/bin"
 # Copy the entire tool directory so future scripts are packaged automatically.
 cp -R "$ROOT_DIR/src/wlantool/." "$ROOTFS_STAGE/wlantool/"
+printf '%s' "$APP_VERSION_CODE" > "$ROOTFS_STAGE/wlantool/ver"
 rm -rf "$ROOTFS_STAGE/wlantool/__pycache__"
 : > "$ROOTFS_STAGE/wlantool/vulnwsc.txt"
 chmod 755 "$ROOTFS_STAGE/wlantool/scan.py"

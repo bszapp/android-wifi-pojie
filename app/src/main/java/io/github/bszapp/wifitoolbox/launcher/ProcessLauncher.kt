@@ -21,6 +21,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
@@ -40,6 +42,7 @@ class ProcessLauncher(
     private var brokerWatchJob: Job? = null
     private var autoReconnectEnabled = true
     private var stoppingBinder: IBinder? = null
+    private var expectedServiceUid: Int? = null
 
     private val _state = kotlinx.coroutines.flow.MutableStateFlow(StartupState())
     val state: kotlinx.coroutines.flow.StateFlow<StartupState> = _state
@@ -171,6 +174,11 @@ class ProcessLauncher(
             }
 
             val serviceMode = startupInfo.startupMode.toStartupMode()
+            expectedServiceUid?.let { expected ->
+                check(startupInfo.serviceUid == expected) {
+                    "服务重启权限不一致：原 UID=$expected，新 UID=${startupInfo.serviceUid}"
+                }
+            }
             if (!service.connect()) {
                 Log.w(TAG, "connect() 被服务拒绝")
                 cleanupActive()
@@ -248,7 +256,10 @@ class ProcessLauncher(
         }
     }
 
-    fun launch(mode: StartupMode) {
+    fun launch(mode: StartupMode) = launch(mode, serviceUid = null)
+
+    private fun launch(mode: StartupMode, serviceUid: Int?, replacedServicePid: Int? = null) {
+        expectedServiceUid = serviceUid
         val modeName = mode.displayName()
         Log.d(TAG, "开始以 $modeName 模式启动服务")
 
@@ -263,8 +274,19 @@ class ProcessLauncher(
 
             runCatching {
                 withTimeout(5.seconds) {
-                    val (launcher, binder) = createLauncherAndBinder(mode)
+                    val (launcher, launchedBinder) = createLauncherAndBinder(mode, serviceUid)
                     activeLauncher = launcher
+                    // 强制重启时旧服务仍可能投递 Binder；独立进程必须等到新 PID 再连接。
+                    val binder = if (replacedServicePid != null && mode != StartupMode.SHIZUKU) {
+                        ToolboxServiceProvider.binderFlow.filterNotNull().first { candidate ->
+                            candidate.isBinderAlive && runCatching {
+                                val info = IMainService.Stub.asInterface(candidate).getStartupInfo()
+                                info.servicePid != replacedServicePid &&
+                                    info.versionCode == BuildConfig.VERSION_CODE.toLong() &&
+                                    info.isTrustedForAppUid(Process.myUid())
+                            }.getOrDefault(false)
+                        }
+                    } else launchedBinder
                     if (_state.value.status == StartupStatus.RUNNING &&
                         activeBinder?.isBinderAlive == true &&
                         mainService != null
@@ -368,6 +390,14 @@ class ProcessLauncher(
         }
     }
 
+    /** 复用服务初始化时的启动方式及实际 UID；正常退出失败时保留连接供用户确认。 */
+    suspend fun restart(force: Boolean = false) = withContext(Dispatchers.Main) {
+        val info = requireNotNull(_state.value.serviceInfo) { "缺少原服务启动信息" }
+        val mode = requireNotNull(info.startupMode.toStartupMode()) { "未知服务启动方式" }
+        if (force) disconnect() else stop()
+        launch(mode, info.serviceUid, info.servicePid)
+    }
+
     /** 仅断开应用侧连接，不再请求服务退出。主动启动服务后恢复自动接收 Binder。 */
     suspend fun disconnect(resetStartupState: Boolean = true) = withContext(Dispatchers.Main) {
         autoReconnectEnabled = false
@@ -382,26 +412,36 @@ class ProcessLauncher(
         if (resetStartupState) _state.value = StartupState()
     }
 
-    private suspend fun createLauncherAndBinder(mode: StartupMode): Pair<AutoCloseable, IBinder> =
+    private suspend fun createLauncherAndBinder(mode: StartupMode, serviceUid: Int?): Pair<AutoCloseable, IBinder> =
         when (mode) {
-            StartupMode.SHIZUKU -> launchViaShizukuDirect()
-            StartupMode.SHIZUKU_TERMINAL -> launchViaShizukuTerminal()
-            StartupMode.ROOT -> launchViaRoot()
+            StartupMode.SHIZUKU -> launchViaShizukuDirect(serviceUid)
+            StartupMode.SHIZUKU_TERMINAL -> launchViaShizukuTerminal(serviceUid)
+            StartupMode.ROOT -> launchViaRoot(serviceUid)
         }
 
-    private suspend fun launchViaShizukuDirect(): Pair<AutoCloseable, IBinder> {
+    private suspend fun launchViaShizukuDirect(serviceUid: Int?): Pair<AutoCloseable, IBinder> {
         val launcher = ShizukuProcessLauncher(context)
+        checkShizukuUid(launcher, serviceUid)
         return launcher to launcher.getDirectServiceBinder()
     }
 
-    private suspend fun launchViaShizukuTerminal(): Pair<AutoCloseable, IBinder> {
+    private suspend fun launchViaShizukuTerminal(serviceUid: Int?): Pair<AutoCloseable, IBinder> {
         val launcher = ShizukuProcessLauncher(context)
+        checkShizukuUid(launcher, serviceUid)
         return launcher to launcher.getTerminalServiceBinder(MainServiceStarter::class.java.name)
     }
 
-    private suspend fun launchViaRoot(): Pair<AutoCloseable, IBinder> {
-        val launcher = RootProcessLauncher(context)
+    private suspend fun launchViaRoot(serviceUid: Int?): Pair<AutoCloseable, IBinder> {
+        val launcher = RootProcessLauncher(context, serviceUid)
         return launcher to launcher.getServiceBinder(MainServiceStarter::class.java.name)
+    }
+
+    private suspend fun checkShizukuUid(launcher: ShizukuProcessLauncher, serviceUid: Int?) {
+        if (serviceUid == null) return
+        launcher.ensurePermission()
+        check(rikka.shizuku.Shizuku.getUid() == serviceUid) {
+            "Shizuku 当前权限与原服务 UID=$serviceUid 不一致，请恢复原权限后重试"
+        }
     }
 
         private fun createStartupInfo(mode: StartupMode): StartupInfo = StartupInfo.forAppLaunch(

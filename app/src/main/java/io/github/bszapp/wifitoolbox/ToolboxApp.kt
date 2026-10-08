@@ -20,6 +20,7 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
+import io.github.bszapp.wifitoolbox.launcher.RuntimeUpdateController
 import io.github.bszapp.wifitoolbox.logs.ServiceLogController
 import io.github.bszapp.wifitoolbox.logs.AppLogController
 import io.github.bszapp.wifitoolbox.terminal.TerminalController
@@ -62,6 +63,8 @@ class ToolboxApp : Application(), IAppController {
     private lateinit var taskController: TaskController
     private lateinit var hashcatController: io.github.bszapp.wifitoolbox.hashcat.HashcatTaskController
     private lateinit var containerController: ContainerController
+    override lateinit var runtimeUpdates: io.github.bszapp.wifitoolbox.contract.startup.IRuntimeUpdateController
+        private set
     override lateinit var settings: SettingsManager
         private set
 
@@ -231,6 +234,13 @@ class ToolboxApp : Application(), IAppController {
             onServiceCrash = ::captureServiceCrash,
         )
         AppControllerProvider.register(this)
+        runtimeUpdates = RuntimeUpdateController(
+            scope = appScope,
+            startup = processLauncher.state,
+            containers = containerController,
+            restartService = processLauncher::restart,
+            reportError = ::publishError,
+        )
         processLauncher.tryAutoReconnect()
         appScope.launch(Dispatchers.IO) {
             HashcatStartupCheck.run(this@ToolboxApp)

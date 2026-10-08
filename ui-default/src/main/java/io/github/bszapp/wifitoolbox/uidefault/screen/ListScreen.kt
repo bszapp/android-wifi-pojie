@@ -1,41 +1,30 @@
 package io.github.bszapp.wifitoolbox.uidefault.screen
 
-import android.net.wifi.WifiConfiguration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.state.ToggleableState
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.bszapp.wifitoolbox.contract.task.*
 import io.github.bszapp.wifitoolbox.contract.wifilist.*
-import io.github.bszapp.wifitoolbox.uidefault.component.ImmediateContent
 import io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
-import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
-import io.github.bszapp.wifitoolbox.uidefault.model.MonitorHandshakeTestUiState
+import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
+import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
 import io.github.bszapp.wifitoolbox.uidefault.util.BlurredBar
 import io.github.bszapp.wifitoolbox.uidefault.util.rememberBlurBackdrop
@@ -47,7 +36,6 @@ import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.icon.extended.Refresh
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -58,14 +46,16 @@ fun ListScreen(
     viewModel: DefaultViewModel = viewModel(),
     bottomInnerPadding: Dp = 0.dp,
 ) {
+    val navigator = LocalNavigator.current
     val wifiState by viewModel.wifiList.state.collectAsStateWithLifecycle()
     val isSendingScanRequest by
         viewModel.wifiList.isSendingScanRequest.collectAsStateWithLifecycle()
     val modeState by
         viewModel.wifiList.modeState.collectAsStateWithLifecycle()
-    val savedWifiList by viewModel.wifiList.savedWifiList.collectAsStateWithLifecycle()
-    val monitorHandshakeTest by
-        viewModel.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
+    val currentTask by viewModel.currentTask.collectAsStateWithLifecycle()
+    val usbMonitorTask = currentTask?.takeIf {
+        it.state == TaskExecutionState.RUNNING && it.request.payload is TaskRequestPayload.UsbMonitor
+    }
     val displayedTask by viewModel.displayedTask.collectAsStateWithLifecycle()
     val selectedSource = modeState?.mode ?: WifiMode.NORMAL
     val isScanning = wifiState.isScanning || isSendingScanRequest
@@ -76,7 +66,6 @@ fun ListScreen(
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
-    var showStatistics by remember { mutableStateOf(false) }
     var inlineConnectTaskId by remember { mutableStateOf<Long?>(null) }
     var showMonitorCommand by rememberSaveable { mutableStateOf(false) }
     var showCaptureChannels by rememberSaveable { mutableStateOf(false) }
@@ -157,6 +146,7 @@ fun ListScreen(
                             IconButton(
                                 onClick = { showTopPopup.value = true },
                                 holdDownState = showTopPopup.value,
+                                enabled = usbMonitorTask == null,
                             ) {
                                 Icon(
                                     imageVector = MiuixIcons.MoreCircle,
@@ -176,7 +166,10 @@ fun ListScreen(
                         }
                         ImmediateVisibility(visible = selectedSource == WifiMode.MONITOR) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { viewModel.wifiList.exportAllMonitorPcap() }) {
+                                IconButton(onClick = { navigator.push(Route.Capture()) }, enabled = usbMonitorTask == null) {
+                                    Icon(Icons.Rounded.ManageSearch, "抓包解析", tint = colorScheme.onSurface)
+                                }
+                                IconButton(onClick = { viewModel.wifiList.exportAllMonitorPcap() }, enabled = usbMonitorTask == null) {
                                     Icon(Icons.Rounded.Download, "导出全部 PCAP", tint = colorScheme.onSurface)
                                 }
                                 Box {
@@ -202,12 +195,32 @@ fun ListScreen(
                                             }
                                         }
                                     }
-                                    IconButton(onClick = { showClear.value = true }, enabled = !controlsBusy && modeState?.clearingCapture != true) {
+                                    IconButton(onClick = { showClear.value = true }, enabled = usbMonitorTask == null && !controlsBusy && modeState?.clearingCapture != true) {
                                         Icon(Icons.Rounded.DeleteSweep, "清理抓取数据", tint = colorScheme.onSurface)
                                     }
                                 }
-                                IconButton(onClick = { showStatistics = true }) {
-                                    Icon(Icons.Rounded.BarChart, "抓取统计", tint = colorScheme.onSurface)
+                                // 电脑控制入口暂时隐藏；保留现有任务实现。
+                                ImmediateVisibility(visible = false) {
+                                    var showComputerControl by remember { mutableStateOf(false) }
+                                    OverlayListPopup(
+                                        show = showComputerControl,
+                                        popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
+                                        alignment = PopupPositionProvider.Align.TopEnd,
+                                        onDismissRequest = { showComputerControl = false },
+                                    ) {
+                                        ListPopupColumn {
+                                            DropdownImpl(
+                                                text = "电脑控制", isSelected = false, optionSize = 1, index = 0,
+                                                onSelectedIndexChange = {
+                                                    showComputerControl = false
+                                                    taskActionScope.launch { runCatching { viewModel.startUsbMonitorTask() } }
+                                                },
+                                            )
+                                        }
+                                    }
+                                    IconButton(onClick = { showComputerControl = true }, enabled = usbMonitorTask == null) {
+                                        Icon(Icons.Rounded.MoreVert, "更多", tint = colorScheme.onSurface)
+                                    }
                                 }
                             }
                         }
@@ -239,7 +252,7 @@ fun ListScreen(
                             }
                         }
                         IconButton(onClick = { viewModel.wifiList.startScan() },
-                            enabled = !controlsBusy && modeState?.clearingCapture != true) {
+                            enabled = usbMonitorTask == null && !controlsBusy && modeState?.clearingCapture != true) {
                             Icon(MiuixIcons.Refresh, "刷新", tint = colorScheme.onSurface)
                         }
                     },
@@ -251,6 +264,19 @@ fun ListScreen(
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal),
     ) { innerPadding ->
         val layoutDirection = LocalLayoutDirection.current
+        if (usbMonitorTask != null) {
+            UsbMonitorTaskContent(
+                progress = usbMonitorTask.progress as? TaskProgress.UsbMonitor,
+                onStop = viewModel::stopUsbMonitorTask,
+                modifier = Modifier.fillMaxSize().padding(
+                    top = innerPadding.calculateTopPadding() + 14.dp,
+                    start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
+                    end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
+                    bottom = bottomInnerPadding + 12.dp,
+                ),
+            )
+            return@Scaffold
+        }
         val refreshTexts = listOf("下拉刷新", "松开刷新", "正在刷新…", "刷新完成")
         PullToRefresh(
             isRefreshing = isScanning,
@@ -302,7 +328,7 @@ fun ListScreen(
                         },
                     ) {
                         Icon(
-                            if (modeState?.capturing == true) Icons.Rounded.Stop else Icons.Rounded.AirplanemodeActive,
+                            if (modeState?.capturing == true) Icons.Outlined.StopCircle else Icons.Rounded.RocketLaunch,
                             if (modeState?.capturing == true) "停止持续抓取" else "持续抓取",
                             tint = colorScheme.onPrimary,
                         )
@@ -332,29 +358,6 @@ fun ListScreen(
             viewModel.wifiList.setMonitorCapture(true, frequency, hopping)
         },
     )
-
-    SingleOverlayBottomSheet(
-        show = showStatistics && selectedSource == WifiMode.MONITOR,
-        title = "抓取统计",
-        onDismissRequest = { showStatistics = false },
-    ) {
-        MonitorStatisticsContent(
-                statistics = modeState?.monitorStatistics,
-                hopping = modeState?.hoppingCapture == true,
-                savedNetworks = savedWifiList?.networks.orEmpty(),
-                handshakeTest = monitorHandshakeTest,
-                onClearHandshakeTestResult = viewModel.wifiList::clearMonitorHandshakeTestResult,
-                onTestHandshake = { bssid, mac, id, password -> viewModel.wifiList.testMonitorHandshake(bssid, mac, id, password) },
-                onExportHandshake = { bssid, mac, id -> viewModel.wifiList.exportMonitorHandshakePcap(bssid, mac, id) },
-                onExportDisconnection = { bssid, mac, id -> viewModel.wifiList.exportMonitorDisconnectionPcap(bssid, mac, id) },
-                onSaveHc22000 = { content, fileName ->
-                    pendingHc22000Export = PendingHc22000Export(content, fileName)
-                    hc22000SaveLauncher.launch(fileName)
-                },
-                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.8f),
-                contentPadding = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom).asPaddingValues(),
-            )
-    }
 
     displayedTask?.let { task ->
         if (task.snapshot.taskId != inlineConnectTaskId) {
@@ -405,634 +408,11 @@ private fun DisplayedTaskSheet(
             onStop = viewModel::stopDisplayedTask,
             onDismiss = viewModel::closeDisplayedTask,
         )
+        TaskRequestPayload.UsbMonitor -> Unit
     }
 }
-
-@Composable
-private fun MonitorStatisticsContent(
-    statistics: MonitorModeStatistics?,
-    hopping: Boolean,
-    savedNetworks: List<WifiConfiguration>,
-    handshakeTest: MonitorHandshakeTestUiState,
-    onClearHandshakeTestResult: () -> Unit,
-    onTestHandshake: (
-        bssid: String,
-        deviceMac: String,
-        handshakeId: String,
-        password: String,
-    ) -> Unit,
-    onExportHandshake: (
-        bssid: String,
-        deviceMac: String,
-        handshakeId: String,
-    ) -> String,
-    onExportDisconnection: (
-        bssid: String,
-        deviceMac: String,
-        disconnectionId: String,
-    ) -> String,
-    onSaveHc22000: (content: String, fileName: String) -> Unit,
-    modifier: Modifier,
-    contentPadding: PaddingValues,
-) {
-    val pagerState = rememberPagerState(pageCount = { 2 })
-    val coroutineScope = rememberCoroutineScope()
-    var handshakeAction by remember { mutableStateOf<MonitorHandshakeActionSelection?>(null) }
-    var disconnectionExportTarget by remember {
-        mutableStateOf<MonitorDisconnectionRecord?>(null)
-    }
-    var disconnectionExportConsent by remember { mutableStateOf(false) }
-    val accessPoints = statistics?.accessPoints.orEmpty()
-    val connectionLogItems = buildMonitorConnectionLogItems(
-        accessPoints = accessPoints,
-        disconnections = statistics?.disconnections.orEmpty(),
-    )
-    val layoutDirection = LocalLayoutDirection.current
-    val topBarPadding = contentPadding.calculateTopPadding()
-
-    Box(modifier = modifier) {
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxSize(),
-        ) { page ->
-            val listContentPadding = PaddingValues(
-                top = 14.dp,
-                start = contentPadding.calculateStartPadding(layoutDirection),
-                end = contentPadding.calculateEndPadding(layoutDirection),
-                bottom = contentPadding.calculateBottomPadding() + 12.dp,
-            )
-            LazyColumn(
-                modifier = Modifier
-                    .padding(top = topBarPadding)
-                    .fillMaxSize()
-                    .scrollEndHaptic()
-                    .overScrollVertical(),
-                contentPadding = listContentPadding,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item(key = "monitor-overview") {
-                    ImmediateContent(
-                        targetState = statistics.takeIf { page == 0 },
-                        contentKey = { it == null },
-                        label = "monitor-overview-visibility",
-                    ) { visibleStatistics ->
-                        if (visibleStatistics != null) {
-                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                SmallTitle(text = "数据总览")
-                                MonitorModeOverviewCard(statistics = visibleStatistics, hopping = hopping)
-                            }
-                        }
-                    }
-                }
-                stickyHeader(key = "monitor-mode-tabs-$page") {
-                    MonitorModeTabRow(
-                        selectedTab = pagerState.currentPage,
-                        onSelectedTabChange = { targetPage ->
-                            coroutineScope.launch {
-                                pagerState.animateScrollToPage(targetPage)
-                            }
-                        },
-                    )
-                }
-                item(key = "connection-log-empty") {
-                    ImmediateVisibility(
-                        visible = page == 1 && connectionLogItems.isEmpty(),
-                    ) {
-                        Card { BasicComponent(title = "暂无连接日志") }
-                    }
-                }
-                items(
-                    count = connectionLogItems.size,
-                    key = { index -> connectionLogItems[index].stableKey },
-                ) { index ->
-                    val logItem = connectionLogItems[index]
-                    ImmediateVisibility(visible = page == 1) {
-                            MonitorConnectionLogCard(
-                                item = logItem,
-                                onTestHandshake = { accessPoint, device, record ->
-                                    handshakeAction = MonitorHandshakeActionSelection(
-                                        bssid = accessPoint.bssid,
-                                        deviceMac = device.mac,
-                                        handshakeId = record.id,
-                                        action = MonitorHandshakeAction.TEST,
-                                    )
-                                },
-                                onExportHandshake = { accessPoint, device, record ->
-                                    handshakeAction = MonitorHandshakeActionSelection(
-                                        bssid = accessPoint.bssid,
-                                        deviceMac = device.mac,
-                                        handshakeId = record.id,
-                                        action = MonitorHandshakeAction.EXPORT,
-                                    )
-                                },
-                                onExportDisconnection = { record ->
-                                    disconnectionExportConsent = false
-                                    disconnectionExportTarget = record
-                                },
-                            )
-                    }
-                }
-            }
-        }
-    }
-
-    val handshakeDetailTarget = handshakeAction?.let { selection ->
-        accessPoints.firstOrNull { it.bssid == selection.bssid }?.let { accessPoint ->
-            accessPoint.devices.firstOrNull { it.mac == selection.deviceMac }?.let { device ->
-                Triple(selection, accessPoint, device)
-            }
-        }
-    }
-    ImmediateContent(
-        targetState = handshakeDetailTarget,
-        contentKey = { it?.first },
-        label = "monitor-handshake-detail",
-    ) { detail ->
-        if (detail != null) {
-            val (selection, accessPoint, device) = detail
-            MonitorDeviceDetailSheet(
-                accessPoint = accessPoint,
-                device = device,
-                savedNetworks = savedNetworks,
-                handshakeTest = handshakeTest,
-                onClearHandshakeTestResult = onClearHandshakeTestResult,
-                onDismiss = { handshakeAction = null },
-                onExport = { _ -> },
-                onTestHandshake = { handshakeId, password ->
-                    onTestHandshake(accessPoint.bssid, device.mac, handshakeId, password)
-                },
-                onExportHandshake = { handshakeId ->
-                    onExportHandshake(accessPoint.bssid, device.mac, handshakeId)
-                },
-                onSaveHc22000 = onSaveHc22000,
-                showDeviceDetails = false,
-                initialHandshakeId = selection.handshakeId,
-                initialHandshakeAction = selection.action,
-                onInitialActionFinished = { handshakeAction = null },
-            )
-        }
-    }
-
-    MonitorDisconnectionExportDialog(
-        record = disconnectionExportTarget,
-        accessPoint = disconnectionExportTarget?.let { record ->
-            accessPoints.firstOrNull { it.bssid == record.bssid }
-        },
-        consent = disconnectionExportConsent,
-        onConsentChange = { disconnectionExportConsent = it },
-        onDismiss = {
-            disconnectionExportTarget = null
-            disconnectionExportConsent = false
-        },
-        onExport = { record ->
-            onExportDisconnection(record.bssid, record.deviceMac, record.id)
-            disconnectionExportTarget = null
-            disconnectionExportConsent = false
-        },
-    )
-}
-
-@Composable
-private fun MonitorModeTabRow(
-    selectedTab: Int,
-    onSelectedTabChange: (Int) -> Unit,
-) {
-    TabRow(
-        tabs = listOf("数据总览", "连接记录"),
-        selectedTabIndex = selectedTab,
-        onTabSelected = onSelectedTabChange,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(colorScheme.surface)
-            .padding(vertical = 6.dp),
-        colors = TabRowDefaults.tabRowColors(backgroundColor = Color.Transparent),
-    )
-}
-
-private sealed interface MonitorConnectionLogItem {
-    val stableKey: String
-    val timestampUnixMillis: Long
-
-    data class Handshake(
-        val accessPoint: MonitorAccessPoint,
-        val device: MonitorDevice,
-        val record: MonitorHandshakeRecord,
-    ) : MonitorConnectionLogItem {
-        override val stableKey = "handshake:${accessPoint.bssid}:${device.mac}:${record.id}"
-        override val timestampUnixMillis = record.startUnixMillis
-    }
-
-    data class Disconnection(
-        val accessPoint: MonitorAccessPoint?,
-        val record: MonitorDisconnectionRecord,
-    ) : MonitorConnectionLogItem {
-        override val stableKey = "disconnection:${record.bssid}:${record.deviceMac}:${record.id}"
-        override val timestampUnixMillis = record.timestampUnixMillis
-    }
-}
-
-private fun buildMonitorConnectionLogItems(
-    accessPoints: List<MonitorAccessPoint>,
-    disconnections: List<MonitorDisconnectionRecord>,
-): List<MonitorConnectionLogItem> = buildList {
-    accessPoints.forEach { accessPoint ->
-        accessPoint.devices.forEach { device ->
-            device.handshakes.forEach { record ->
-                add(MonitorConnectionLogItem.Handshake(accessPoint, device, record))
-            }
-        }
-    }
-    disconnections.forEach { record ->
-        add(
-            MonitorConnectionLogItem.Disconnection(
-                accessPoint = accessPoints.firstOrNull { it.bssid == record.bssid },
-                record = record,
-            ),
-        )
-    }
-}.sortedByDescending(MonitorConnectionLogItem::timestampUnixMillis)
-
-@Composable
-private fun MonitorConnectionLogCard(
-    item: MonitorConnectionLogItem,
-    onTestHandshake: (
-        MonitorAccessPoint,
-        MonitorDevice,
-        MonitorHandshakeRecord,
-    ) -> Unit,
-    onExportHandshake: (
-        MonitorAccessPoint,
-        MonitorDevice,
-        MonitorHandshakeRecord,
-    ) -> Unit,
-    onExportDisconnection: (MonitorDisconnectionRecord) -> Unit,
-) {
-    Card {
-        when (item) {
-            is MonitorConnectionLogItem.Handshake -> {
-                val qualityText = if (item.record.status == MonitorHandshakeStatus.IN_PROGRESS) {
-                    "捕获中"
-                } else {
-                    when (item.record.captureQuality) {
-                        MonitorHandshakeCaptureQuality.COMPLETE -> "完整"
-                        MonitorHandshakeCaptureQuality.DATA_INCOMPLETE -> "数据不完整"
-                        MonitorHandshakeCaptureQuality.PARTIALLY_MISSING -> "部分缺失"
-                    }
-                }
-                BasicComponent(
-                    title = "设备连接 · ${item.accessPoint.ssid ?: monitorUnknownName(item.accessPoint)}",
-                    summary = buildString {
-                        append("设备：${item.device.mac}\n")
-                        append("接入点：${item.accessPoint.bssid}\n")
-                        append("开始时间：${formatHandshakeStartTime(item.record.startUnixMillis)}\n")
-                        append("持续时间：${formatHandshakeDuration(item.record.durationMillis)} · ")
-                        append(handshakeStatusText(item.record))
-                        append("\n捕获情况：$qualityText")
-                        append("\n捕获阶段：")
-                        append(
-                            item.record.capturedSteps
-                                .joinToString("、", transform = ::handshakeStepText)
-                                .ifEmpty { "暂无" },
-                        )
-                        item.record.failedAtStep?.let { failedAtStep ->
-                            append("\n失败阶段：${handshakeStepText(failedAtStep)}")
-                        }
-                        append("\nM2 捕获次数：${item.record.m2AttemptCount}")
-                        append(" · 导出包数量：${item.record.exportPacketCount}")
-                    },
-                    bottomAction = {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            ImmediateVisibility(visible = item.record.canValidate) {
-                                TextButton(
-                                    text = "校验",
-                                    onClick = {
-                                        onTestHandshake(
-                                            item.accessPoint,
-                                            item.device,
-                                            item.record,
-                                        )
-                                    },
-                                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                                )
-                            }
-                            TextButton(
-                                text = "导出",
-                                onClick = {
-                                    onExportHandshake(
-                                        item.accessPoint,
-                                        item.device,
-                                        item.record,
-                                    )
-                                },
-                                colors = ButtonDefaults.textButtonColorsPrimary(),
-                            )
-                        }
-                    },
-                )
-            }
-            is MonitorConnectionLogItem.Disconnection -> {
-                val eventName = when (item.record.type) {
-                    MonitorDisconnectionType.DISASSOCIATION -> "解除关联"
-                    MonitorDisconnectionType.DEAUTHENTICATION -> "解除认证"
-                }
-                BasicComponent(
-                    title = eventName,
-                    summary = buildString {
-                        append("时间：${formatHandshakeStartTime(item.record.timestampUnixMillis)}\n")
-                        append("网络：")
-                        append(item.accessPoint?.ssid ?: item.accessPoint?.let(::monitorUnknownName) ?: "<未知网络>")
-                        append("\n接入点：${item.record.bssid}\n")
-                        append("设备：${item.record.deviceMac}\n")
-                        append("原因码：${item.record.reasonCode?.toString() ?: "未知"}")
-                    },
-                    bottomAction = {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            TextButton(
-                                text = "导出",
-                                onClick = { onExportDisconnection(item.record) },
-                                colors = ButtonDefaults.textButtonColorsPrimary(),
-                            )
-                        }
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun MonitorDisconnectionExportDialog(
-    record: MonitorDisconnectionRecord?,
-    accessPoint: MonitorAccessPoint?,
-    consent: Boolean,
-    onConsentChange: (Boolean) -> Unit,
-    onDismiss: () -> Unit,
-    onExport: (MonitorDisconnectionRecord) -> Unit,
-) {
-    OverlayDialog(
-        show = record != null,
-        title = "确认导出断开事件",
-        summary = "将导出这一次解除认证或解除关联事件的原始 802.11 数据包。",
-        onDismissRequest = onDismiss,
-        content = {
-            ImmediateContent(
-                targetState = record?.let { it to accessPoint },
-                contentKey = { it == null },
-                label = "disconnection-export-detail",
-            ) { exportDetail ->
-            if (exportDetail != null) {
-                val (visibleRecord, visibleAccessPoint) = exportDetail
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Card {
-                        BasicComponent(
-                            title = "网络名称",
-                            summary = visibleAccessPoint?.ssid
-                                ?: visibleAccessPoint?.let(::monitorUnknownName)
-                                ?: "<未知网络>",
-                        )
-                        BasicComponent(title = "接入点 MAC", summary = visibleRecord.bssid)
-                        BasicComponent(title = "目标设备 MAC", summary = visibleRecord.deviceMac)
-                        BasicComponent(
-                            title = "发生时间",
-                            summary = formatHandshakeStartTime(visibleRecord.timestampUnixMillis),
-                        )
-                        BasicComponent(
-                            title = "事件类型",
-                            summary = when (visibleRecord.type) {
-                                MonitorDisconnectionType.DISASSOCIATION -> "解除关联"
-                                MonitorDisconnectionType.DEAUTHENTICATION -> "解除认证"
-                            },
-                        )
-                        BasicComponent(
-                            title = "原因码",
-                            summary = visibleRecord.reasonCode?.toString() ?: "未知",
-                        )
-                        BasicComponent(
-                            title = "导出包数量",
-                            summary = visibleRecord.exportPacketCount.toString(),
-                        )
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onConsentChange(!consent) }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            state = if (consent) ToggleableState.On else ToggleableState.Off,
-                            onClick = { onConsentChange(!consent) },
-                        )
-                        Text(
-                            text = "我已拥有目标设备或目标接入点的所有权，并知晓握手包仅用于诊断连接情况使用",
-                            modifier = Modifier.padding(start = 12.dp).weight(1f),
-                            color = colorScheme.onSurface,
-                        )
-                    }
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        TextButton(
-                            text = "取消",
-                            onClick = onDismiss,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(20.dp))
-                        TextButton(
-                            text = "导出",
-                            enabled = consent,
-                            onClick = { onExport(visibleRecord) },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.textButtonColorsPrimary(),
-                        )
-                    }
-                }
-            }
-            }
-        },
-    )
-}
-
-private data class MonitorHandshakeActionSelection(
-    val bssid: String,
-    val deviceMac: String,
-    val handshakeId: String,
-    val action: MonitorHandshakeAction,
-)
 
 private data class PendingHc22000Export(
     val content: String,
     val fileName: String,
 )
-
-@Composable
-private fun MonitorModeOverviewCard(statistics: MonitorModeStatistics, hopping: Boolean) {
-    Card {
-        BasicComponent(
-            title = "已进入监听模式",
-            summary = if (hopping) "跳频录制 · 循环监听所有可用信道" else if (statistics.frequencyMhz <= 0) "尚未选择抓取信道" else "信道 ${statistics.channel} · " +
-                "${frequencyBand(statistics.frequencyMhz)} · " +
-                "${statistics.frequencyMhz} MHz",
-        )
-        BasicComponent(
-            title = "已录制的大小",
-            summary = formatMonitorByteCount(statistics.recordedBytes),
-        )
-        Text(
-            text = "当前处于监听模式，如需退出请在左上角切换为其他模式。" +
-                "请勿操作系统WiFi以免打断监听过程。",
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            color = colorScheme.onSurfaceVariantSummary,
-            style = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.footnote1,
-        )
-    }
-}
-
-//TODO: 这个tag样式以及内容可用
-@Composable
-internal fun MonitorAccessPointCard(
-    accessPoint: MonitorAccessPoint,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    onDeviceClick: (MonitorDevice) -> Unit,
-) {
-    val handshakeDeviceCount = accessPoint.devices
-        .asSequence()
-        .filter { it.completeSuccessfulHandshakeCount() > 0 }
-        .distinctBy { it.mac.lowercase() }
-        .count()
-    val arrowRotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        label = "MonitorAccessPointArrow",
-    )
-    Card {
-        BasicComponent(
-            startAction = {
-                Icon(
-                    imageVector = Icons.Rounded.Router,
-                    contentDescription = null,
-                    modifier = Modifier.padding(end = 8.dp).size(24.dp),
-                    tint = colorScheme.onBackground,
-                )
-            },
-            endActions = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "${accessPoint.devices.size} 台设备",
-                        color = colorScheme.onSurfaceVariantActions,
-                        style = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.body2,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Icon(
-                        imageVector = Icons.Rounded.ExpandMore,
-                        contentDescription = if (expanded) "折叠" else "展开",
-                        modifier = Modifier.size(20.dp).rotate(arrowRotation),
-                        tint = colorScheme.onSurfaceVariantActions,
-                    )
-                }
-            },
-            onClick = { onExpandedChange(!expanded) },
-        ) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = accessPoint.ssid ?: monitorUnknownName(accessPoint),
-                    fontSize = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.headline1.fontSize,
-                    fontWeight = FontWeight.Medium,
-                    color = colorScheme.onSurface,
-                    softWrap = true,
-                )
-                val badges = buildList {
-                    if (accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN &&
-                        !accessPoint.ssid.isNullOrBlank()
-                    ) {
-                        add("隐藏网络")
-                    }
-                    if (handshakeDeviceCount > 0) {
-                        add("成功握手${handshakeDeviceCount}台")
-                    }
-                }
-                badges.forEach { badge ->
-                    MonitorMapBadge(text = badge)
-                }
-            }
-            Text(
-                text = accessPoint.bssid,
-                fontSize = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.body2.fontSize,
-                color = colorScheme.onSurfaceVariantSummary,
-            )
-        }
-        AnimatedVisibility(visible = expanded) {
-            Column {
-                accessPoint.devices
-                    .sortedWith(
-                        compareByDescending<MonitorDevice> { it.completeSuccessfulHandshakeCount() > 0 }
-                            .thenByDescending { it.completeSuccessfulHandshakeCount() },
-                    )
-                    .forEach { device ->
-                        val handshakeCount = device.completeSuccessfulHandshakeCount()
-                        BasicComponent(
-                            title = device.name ?: device.mac,
-                            summary = device.name?.let { device.mac },
-                            startAction = { MonitorDeviceIcon() },
-                            endActions = {
-                                ImmediateVisibility(
-                                    visible = handshakeCount > 0,
-                                ) {
-                                    MonitorMapBadge(
-                                        text = "成功握手${handshakeCount}次",
-                                        withStartPadding = false,
-                                    )
-                                }
-                            },
-                            onClick = { onDeviceClick(device) },
-                        )
-                    }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MonitorMapBadge(
-    text: String,
-    withStartPadding: Boolean = true,
-) {
-    Badge(
-        modifier = if (withStartPadding) Modifier.padding(start = 8.dp) else Modifier,
-        containerColor = colorScheme.primary,
-        contentColor = colorScheme.onPrimary,
-    ) {
-        Text(text = text, softWrap = true)
-    }
-}
-
-@Composable
-private fun MonitorDeviceIcon() {
-    Icon(
-        imageVector = Icons.Rounded.Smartphone,
-        contentDescription = null,
-        modifier = Modifier.padding(end = 8.dp).size(24.dp),
-        tint = colorScheme.onBackground,
-    )
-}
-
-private fun monitorUnknownName(accessPoint: MonitorAccessPoint): String =
-    if (accessPoint.ssidVisibility == MonitorSsidVisibility.HIDDEN) {
-        "<隐藏的网络>"
-    } else {
-        "<未知网络>"
-    }
-
-private fun MonitorDevice.completeSuccessfulHandshakeCount(): Int = handshakes.count { record ->
-    record.status == MonitorHandshakeStatus.SUCCESS &&
-        record.captureQuality == MonitorHandshakeCaptureQuality.COMPLETE
-}

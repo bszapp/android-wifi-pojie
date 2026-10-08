@@ -122,7 +122,8 @@ data class MonitorDevice(
 data class MonitorHandshakeRecord(
     val id: String,
     val startUnixMillis: Long,
-    val durationMillis: Long,
+    /** 结束后由实际首尾包计算；进行中及超时没有用时。 */
+    val durationMillis: Long?,
     val status: MonitorHandshakeStatus,
     val canValidate: Boolean,
     val captureQuality: MonitorHandshakeCaptureQuality = MonitorHandshakeCaptureQuality.COMPLETE,
@@ -132,7 +133,17 @@ data class MonitorHandshakeRecord(
     val m2AttemptCount: Int = 0,
     val exportPacketCount: Int = 0,
     val hc22000: String? = null,
+    val capturedPacketTypes: List<MonitorHandshakePacketType> = emptyList(),
 ) : Parcelable
+
+enum class MonitorHandshakePacketType {
+    SSID_CONTEXT,
+    AUTHENTICATION_REQUEST, AUTHENTICATION_RESPONSE,
+    ASSOCIATION_REQUEST, ASSOCIATION_RESPONSE,
+    REASSOCIATION_REQUEST, REASSOCIATION_RESPONSE,
+    EAPOL1, EAPOL2, EAPOL3, EAPOL4,
+    DEAUTHENTICATION, DISASSOCIATION,
+}
 
 enum class MonitorHandshakeCaptureQuality {
     COMPLETE,

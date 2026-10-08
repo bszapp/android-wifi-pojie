@@ -1,7 +1,10 @@
 package io.github.bszapp.wifitoolbox.service
 
+import android.net.wifi.ScanResult
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChannel
+import io.github.bszapp.wifitoolbox.contract.wifilist.monitorHoppingDwellMillis
 import java.util.concurrent.CompletableFuture
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** monitor 扫描专用进程；空闲只等待命令，结果仍由 Wi-Fi 控制器发布。 */
@@ -139,7 +142,7 @@ internal class MonitorWifiScanner(
     }
 
     @Synchronized
-    fun resume(plan: MonitorCapturePlan): CompletableFuture<Unit> {
+    fun resume(plan: MonitorCapturePlan, scanResults: List<ScanResult>): CompletableFuture<Unit> {
         check((pending == null || pending?.scanCode != null) && resumeRequest == null) { "monitor 操作正在执行" }
         if (plan is MonitorCapturePlan.Fixed) {
             require(channels.any { it.frequencyMhz == plan.frequencyMhz }) { "所选信道不可用" }
@@ -147,9 +150,19 @@ internal class MonitorWifiScanner(
         val request = ResumeRequest(++nextRequestId, plan, CompletableFuture())
         resumeRequest = request
         try {
+            val capturePlan = plan.toJson()
+            if (plan == MonitorCapturePlan.Hopping) {
+                val dwellMillis = monitorHoppingDwellMillis(scanResults, channels)
+                capturePlan.put("channelDwells", JSONArray().apply {
+                    channels.forEachIndexed { index, channel ->
+                        put(JSONObject().put("frequencyMhz", channel.frequencyMhz)
+                            .put("dwellMillis", dwellMillis[index]))
+                    }
+                })
+            }
             terminals.writeInput(requireNotNull(terminalId), JSONObject()
                 .put("action", "resume").put("requestId", request.id)
-                .put("capturePlan", plan.toJson()).toString())
+                .put("capturePlan", capturePlan).toString())
         } catch (error: Throwable) {
             resumeRequest = null
             request.completion.completeExceptionally(error)

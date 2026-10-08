@@ -10,7 +10,6 @@ import android.os.SystemClock
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChangesPage
-import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationDetailPage
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChange
 import kotlinx.coroutines.Job
@@ -36,6 +35,7 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 
 /**
@@ -105,6 +106,13 @@ class WifiListController(
 
     private val connectionLock = Any()
     private var monitorSyncJob: Job? = null
+    private val communicationDetails = MonitorCommunicationDetailCache(context)
+    private val communicationIndex = MonitorCommunicationIndex(context)
+    private val _monitorCommunicationUpdates = MutableStateFlow(0L)
+    override val monitorCommunicationUpdates = _monitorCommunicationUpdates.asStateFlow()
+    private val communicationSync: MonitorCommunicationSync = MonitorCommunicationSync(scope, communicationIndex, communicationDetails,
+        onUpdated = { _monitorCommunicationUpdates.update { it + 1 } },
+        onError = { report("同步抓包记录", it) })
 
     private data class DetachedConnection(
         val service: IMainService,
@@ -159,6 +167,7 @@ class WifiListController(
         _state.value = null
         _savedWifiList.value = null
         _modeState.value = null
+        communicationSync.connect(plan.generation, service) { isCurrentConnection(plan.generation, plan.callback) }
         unregisterDetached(plan.detached, operation = "注销已替换的 Wi-Fi 数据回调")
 
         scope.launch(Dispatchers.IO) {
@@ -197,6 +206,7 @@ class WifiListController(
      * 远端注销只做后台尽力清理，不阻塞 Service 关闭或 StartupState 更新。
      */
     fun disconnect() {
+        communicationSync.disconnect()
         monitorSyncJob?.cancel()
         monitorSyncJob = null
         val detached = synchronized(connectionLock) {
@@ -212,6 +222,9 @@ class WifiListController(
         _state.value = null
         _savedWifiList.value = null
         _modeState.value = null
+        val disconnectedGeneration = connectionGeneration
+        scope.launch(Dispatchers.IO) { communicationIndex.reset(disconnectedGeneration, -1L) }
+        _monitorCommunicationUpdates.update { it + 1 }
         unregisterDetached(detached, operation = "注销 Wi-Fi 数据回调")
     }
 
@@ -507,6 +520,12 @@ class WifiListController(
             }
         }
 
+        override fun onMonitorCommunicationChanged(sessionGeneration: Long, oldestAvailableId: Long, latestId: Long, updatedIds: LongArray) {
+            if (!isCurrentConnection(generation, this)) return
+            communicationSync.announce(generation,
+                io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationRange(sessionGeneration, oldestAvailableId, latestId), updatedIds)
+        }
+
         override fun onMonitorPcapExported(
             requestId: String,
             path: String,
@@ -583,15 +602,43 @@ class WifiListController(
         }
     }
 
-    override suspend fun readMonitorCommunications(sessionGeneration: Long, bssid: String, deviceMac: String, fromIndex: Long): MonitorCommunicationPage =
-        readCommunicationPage("读取设备通信记录") { service ->
-            PagedDataTransport.decode(service.getMonitorCommunications(sessionGeneration, bssid, deviceMac, fromIndex), MonitorCommunicationPage::class.java)
+    override suspend fun monitorCommunicationWindow(query: io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationQuery,
+        first: Int, last: Int): io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationWindow = withContext(Dispatchers.IO) {
+        if (communicationIndex.requestKeyword(query.keyword)) communicationSync.search()
+        val window = communicationIndex.window(connectionGeneration, query, first, last)
+        window.copy(viewed = window.session?.let {
+            communicationDetails.viewed(connectionGeneration, it, window.rows.values.map { row -> row.id })
+        }.orEmpty())
+    }
+
+    override suspend fun readMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long, channel: io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationChannel): MonitorCommunicationDetailPage =
+        readCommunicationPage("读取设备通信详情") { service ->
+            PagedDataTransport.decode(service.getMonitorCommunicationDetail(sessionGeneration, bssid, deviceMac, recordId, cursor, channel.name), MonitorCommunicationDetailPage::class.java)
         }
 
-    override suspend fun readMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long): MonitorCommunicationDetailPage =
-        readCommunicationPage("读取设备通信详情") { service ->
-            PagedDataTransport.decode(service.getMonitorCommunicationDetail(sessionGeneration, bssid, deviceMac, recordId, cursor), MonitorCommunicationDetailPage::class.java)
-        }
+    override suspend fun saveMonitorCommunication(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String,
+        channel: io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationChannel, destination: Uri) = withContext(Dispatchers.IO) {
+        val lease = currentLease() ?: error("service 未连接")
+        var cursor = 0L
+        var snapshotSize: Long? = null
+        try {
+            context.contentResolver.openOutputStream(destination, "wt")!!.use { output ->
+                do {
+                    check(isCurrentLease(lease)) { "service 连接已经失效" }
+                    val page = PagedDataTransport.decode(lease.service.getMonitorCommunicationDetail(sessionGeneration,
+                        bssid, deviceMac, recordId, cursor, channel.name), MonitorCommunicationDetailPage::class.java)
+                    if (snapshotSize == null) snapshotSize = page.totalBytes
+                    val count = minOf(page.bytes.size.toLong(), snapshotSize!! - cursor).toInt()
+                    if (count > 0) output.write(page.bytes, 0, count)
+                    cursor += count
+                    check(count > 0 || cursor >= snapshotSize!!) { "通信数据导出未前进" }
+                } while (cursor < snapshotSize!!)
+                check(isCurrentLease(lease)) { "service 连接已经失效" }
+                output.flush()
+            }
+        } catch (error: CancellationException) { throw error }
+        catch (error: Throwable) { report("导出通信原始数据", error); throw error }
+    }
 
     private suspend fun <T> readCommunicationPage(operation: String, read: (IMainService) -> T): T = withContext(Dispatchers.IO) {
         val lease = currentLease() ?: throw IllegalStateException("service 未连接")
@@ -603,6 +650,49 @@ class WifiListController(
         } catch (error: CancellationException) { throw error }
         catch (error: Throwable) { report(operation, error); throw error }
     }
+
+    override suspend fun prepareMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String,
+        recordId: String, onProgress: (Long, Long) -> Unit): String {
+        var prepared: String? = null
+        try {
+            return withContext(Dispatchers.IO) {
+                val lease = currentLease() ?: error("service 未连接")
+                communicationDetails.prepare(sessionGeneration, recordId,
+                    valid = { isCurrentLease(lease) && communicationIndex.isCurrent(lease.generation, sessionGeneration) },
+                    read = { id, cursor, channel -> PagedDataTransport.decode(lease.service.getMonitorCommunicationDetail(
+                        sessionGeneration, bssid, deviceMac, id, cursor, channel.name), MonitorCommunicationDetailPage::class.java) },
+                    progress = onProgress).also { prepared = it; communicationSync.refreshDetails() }
+            }
+        } catch (error: CancellationException) {
+            prepared?.let { token -> withContext(NonCancellable + Dispatchers.IO) { communicationDetails.release(token) } }
+            throw error
+        }
+        catch (error: Throwable) { report("预取通信详情", error); throw error }
+    }
+
+    override suspend fun readPreparedMonitorCommunicationDetail(snapshotId: String, cursor: Long,
+        channel: io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationChannel): MonitorCommunicationDetailPage =
+        withContext(Dispatchers.IO) { communicationDetails.read(snapshotId, cursor, channel) }
+
+    override suspend fun savePreparedMonitorCommunication(snapshotId: String,
+        channel: io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationChannel, destination: Uri) = withContext(Dispatchers.IO) {
+        try { communicationDetails.save(snapshotId, channel, destination) }
+        catch (error: CancellationException) { throw error }
+        catch (error: Throwable) { report("导出通信原始数据", error); throw error }
+    }
+
+    override fun releasePreparedMonitorCommunication(snapshotId: String) {
+        scope.launch(Dispatchers.IO) { communicationDetails.release(snapshotId) }
+    }
+
+    override suspend fun viewedMonitorCommunications(sessionGeneration: Long, recordIds: List<String>): Set<String> =
+        withContext(Dispatchers.IO) { communicationDetails.viewed(connectionGeneration, sessionGeneration, recordIds) }
+
+    override suspend fun markMonitorCommunicationViewed(sessionGeneration: Long, recordId: String) =
+        withContext(Dispatchers.IO) {
+            if (communicationIndex.isCurrent(connectionGeneration, sessionGeneration))
+                communicationDetails.markViewed(connectionGeneration, sessionGeneration, recordId)
+        }
 
     override fun exportAllMonitorPcap(): String {
         val requestId = UUID.randomUUID().toString()

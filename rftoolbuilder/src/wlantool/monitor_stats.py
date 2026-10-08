@@ -25,7 +25,7 @@ from scapy.layers.dot11 import Dot11, Dot11Elt, RadioTap
 from scapy.layers.eap import EAPOL
 from scapy.layers.inet import UDP
 from monitor_diagnostics import interface_snapshot, process_snapshot
-from monitor_decrypt import CommunicationDecoder, CredentialStore
+from monitor_decrypt import CommunicationDecoder, CredentialStore, dhcp_device_name, eapol_security
 
 CREDENTIALS = CredentialStore()
 
@@ -39,7 +39,7 @@ PCAP_GLOBAL_HEADER_SIZE = 24
 PCAP_PACKET_HEADER_SIZE = 16
 MAX_CAPTURED_PACKET_SIZE = 16 * 1024 * 1024
 EXPORT_BATCH_PACKETS = 2048
-HANDSHAKE_TIMEOUT_MILLIS = 15_000
+HANDSHAKE_TIMEOUT_MILLIS = 10_000
 HANDSHAKE_EVENT_CHUNK_BYTES = 24 * 1024
 WPS_VENDOR_PREFIX = b"\x00\x50\xf2\x04"
 WPS_DEVICE_NAME = 0x1011
@@ -416,13 +416,8 @@ def wps_device_identity(packet):
 
 
 def dhcp_device_identity(packet):
-    dhcp = packet.getlayer(DHCP)
-    if dhcp is None:
-        return None, 0
-    for option in dhcp.options:
-        if isinstance(option, tuple) and option and option[0] in ("hostname", "host_name"):
-            return decode_text(option[1]), 35
-    return None, 0
+    name = dhcp_device_name(packet)
+    return name, 35 if name else 0
 
 
 def dns_names(section, count):
@@ -763,6 +758,7 @@ def create_handshake_record(
         "lastUnixMillis": timestamp_millis,
         "status": "inProgress",
         "capturedSteps": set(),
+        "capturedPacketTypes": set(),
         "lastStep": None,
         "failedAtStep": None,
         "failureReason": None,
@@ -797,6 +793,7 @@ def create_handshake_record(
             ssid_context_packets,
             key=lambda value: value[0],
         )
+        record["capturedPacketTypes"].add("SSID_CONTEXT")
     context_packets = {
         packet[0]: packet
         for packet in (
@@ -828,6 +825,7 @@ def add_context_to_handshake_records(
             if ssid_bytes:
                 record["ssidBytes"] = ssid_bytes
                 record["latestSsidContextPacket"] = packet_record
+                record["capturedPacketTypes"].add("SSID_CONTEXT")
             if has_security:
                 record["latestSecurityContextPacket"] = packet_record
 
@@ -851,6 +849,9 @@ def set_handshake_validation_data(
     ):
         return
     if supplicant_key["descriptorVersion"] not in (1, 2, 3):
+        return
+    selected = eapol_security(supplicant_key["frame"])
+    if selected is not None and selected[0] not in ("wpaPsk", "wpa2Psk", "wpa2PskSha256"):
         return
     record["validation"] = {
         "anonce": authenticator_key["nonce"],
@@ -879,7 +880,8 @@ def finish_handshake(
     ):
         if context_packet is not None:
             append_handshake_packet(record, context_packet)
-    record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
+    # Completion/timeout is a notification, not an additional captured packet.
+    # The duration is derived only from the first and last handshake packets.
     record["status"] = status
     record["failureReason"] = failure_reason
     record["failedAtStep"] = failed_at_step
@@ -902,6 +904,11 @@ def authentication_sequence(packet):
     dot11 = packet.getlayer(Dot11)
     if dot11 is None:
         return None
+    sequence = getattr(dot11.payload, "seqnum", None)
+    try:
+        return int(sequence) if sequence is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def management_reason_code(packet):
@@ -911,11 +918,6 @@ def management_reason_code(packet):
     reason = getattr(dot11.payload, "reason", None)
     try:
         return int(reason) if reason is not None else None
-    except (TypeError, ValueError):
-        return None
-    sequence = getattr(dot11.payload, "seqnum", None)
-    try:
-        return int(sequence) if sequence is not None else None
     except (TypeError, ValueError):
         return None
 
@@ -1000,9 +1002,19 @@ def process_handshake_packet(
         if record is not None:
             previous_step = record["lastStep"]
             append_handshake_packet(record, packet_record)
+            packet_type = {
+                0: "ASSOCIATION_REQUEST", 1: "ASSOCIATION_RESPONSE",
+                2: "REASSOCIATION_REQUEST", 3: "REASSOCIATION_RESPONSE",
+                10: "DISASSOCIATION", 12: "DEAUTHENTICATION",
+            }.get(management_subtype)
+            if management_subtype == 11:
+                packet_type = "AUTHENTICATION_REQUEST" if transmitter == device_mac else "AUTHENTICATION_RESPONSE"
+            if packet_type:
+                record["capturedPacketTypes"].add(packet_type)
             packet_ssid_bytes = ssid_element(packet)
             if packet_ssid_bytes:
                 record["ssidBytes"] = packet_ssid_bytes
+                record["capturedPacketTypes"].add("SSID_CONTEXT")
             record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
             if management_subtype == 11:
                 add_handshake_step(record, "authentication")
@@ -1053,6 +1065,7 @@ def process_handshake_packet(
             and is_protected_data_from_device(packet, transmitter, device_mac)
         ):
             append_handshake_packet(record, packet_record)
+            record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
             finish_handshake(device, "success", timestamp_millis)
         return next_handshake_id
     record = device["activeHandshake"]
@@ -1083,6 +1096,7 @@ def process_handshake_packet(
     append_handshake_packet(record, packet_record)
     record["lastUnixMillis"] = max(record["lastUnixMillis"], timestamp_millis)
     add_handshake_step(record, f"eapol{key['message']}")
+    record["capturedPacketTypes"].add(f"EAPOL{key['message']}")
     if key["message"] == 1:
         record["lastM1"] = key
         return next_handshake_id
@@ -1373,6 +1387,7 @@ def handshake_event_metadata(record, hc22000=None):
             record["capturedSteps"],
             key=HANDSHAKE_STEP_ORDER.index,
         ),
+        "capturedPacketTypes": sorted(record["capturedPacketTypes"]),
         "failedAtStep": record["failedAtStep"],
         "failureReason": record["failureReason"],
         "m2AttemptCount": record["m2AttemptCount"],
@@ -1394,6 +1409,12 @@ def handoff_handshake_updates(
             continue
         for record in list(device["handshakes"]):
             hc22000 = build_hc22000(record, record["ssidBytes"])
+            # Candidates stay local until they contain a usable PSK verification
+            # record. Neither an isolated authentication nor an M4 is a record.
+            if hc22000 is None:
+                if record["status"] != "inProgress":
+                    device["handshakes"].remove(record)
+                continue
             pending_packets = record["packets"][record["transferredPacketCount"] :]
             for _, packet_header, packet_payload in pending_packets:
                 if not record["headerTransferred"]:
@@ -1746,26 +1767,48 @@ class CaptureAnalysis:
         self.signal_samples = 0
         self.last_signal_unix_millis = None
         self.rejected_packets = 0
+        self.delayed_names = deque()
 
     def fork(self):
         # 包体 bytes 为不可变对象，deepcopy 共享它们；只分离可变解析状态。
         return copy.deepcopy(self)
 
     def consume_communication(self, bssid, mac, decoded, direction, timestamp, event_writer):
-        name = self.decoder.consume_network(decoded, bssid, mac, direction, timestamp, event_writer)
+        name = (self.decoder.consume_network(decoded, bssid, mac, direction, timestamp, event_writer)
+                if self.decode_communications else dhcp_device_name(decoded, mac))
         if name:
             update_device_identity(self.access_points[bssid]["devices"][mac], name, 35)
             previous = self.device_identities.get(mac)
             if previous is None or previous[1] < 35:
                 self.device_identities[mac] = (name, 35)
             self.dirty_devices.add((bssid, mac))
+        return bool(name)
+
+    def dhcp_packets(self, packet):
+        """只试解密当前帧，供尾部清理分类；返回的明文交回 consume，避免解密两次。"""
+        relation = packet_device_relation(packet, known_bssids=self.access_points.keys())
+        if relation is not None:
+            bssid, mac, direction = relation
+            decoded = self.decoder.cleartext(packet, bssid, mac, direction) or ()
+            if packet.haslayer(DHCP):
+                decoded = (packet,)
+            return [(bssid, mac, value, direction) for value in decoded if dhcp_device_name(value, mac)]
+        dot = packet.getlayer(Dot11)
+        transmitter = normalized_unicast_mac(dot.addr2) if dot else None
+        point = self.access_points.get(transmitter)
+        return [(transmitter, mac, decoded, "download")
+                for mac, decoded in self.decoder.group_packets(packet, point)
+                if dhcp_device_name(decoded, mac)] if point else []
 
     def drain_communications(self, event_writer):
         if self.decode_communications:
-            for bssid, mac, decoded, direction, timestamp in self.decoder.ready_packets(self.access_points):
-                self.consume_communication(bssid, mac, decoded, direction, timestamp, event_writer)
+            for bssid, mac, decoded, direction, timestamp, original in self.decoder.ready_packets(self.access_points):
+                if self.consume_communication(bssid, mac, decoded, direction, timestamp, event_writer):
+                    context = getattr(original, "_monitor_capture_context", None)
+                    if context is not None:
+                        self.delayed_names.append((context, bssid, mac, decoded, direction))
 
-    def consume(self, record, packet, pcap_header, event_writer):
+    def consume(self, record, packet, pcap_header, event_writer, decoded_dhcp=None):
         payload, recorded_bytes, link_type, _, packet_header, packet_timestamp = record
         # 分段切换后物理偏移会归零，使用单调 ID 标识握手证据与上下文。
         self.next_packet_id += 1
@@ -1874,14 +1917,17 @@ class CaptureAnalysis:
             known_bssids=self.access_points.keys(),
         )
         if relation is None:
-            if self.decode_communications:
-                group_point = self.access_points.get(transmitter)
-                if group_point:
+            keep_dhcp = False
+            group_point = self.access_points.get(transmitter)
+            if group_point:
+                if self.decode_communications:
                     if not self.decoder.group_clients.get(transmitter):
                         self.decoder.queue_packet(packet, transmitter, None, "download", packet_timestamp)
-                    for mac, decoded in self.decoder.group_packets(packet, group_point):
-                        self.consume_communication(transmitter, mac, decoded, "download", packet_timestamp, event_writer)
-            return False
+                group_packets = ([(mac, decoded) for _, mac, decoded, _ in decoded_dhcp]
+                                 if decoded_dhcp is not None else self.decoder.group_packets(packet, group_point))
+                for mac, decoded in group_packets:
+                    keep_dhcp |= self.consume_communication(transmitter, mac, decoded, "download", packet_timestamp, event_writer)
+            return keep_dhcp
         bssid, device_mac, direction = relation
         access_point = self.access_points.setdefault(bssid, empty_access_point(bssid))
         self.dirty_access_points.add(bssid)
@@ -1932,14 +1978,18 @@ class CaptureAnalysis:
             self.handshake_device_keys.add(device_key)
         previous_decryption = device["decryptionStatus"]
         session = self.decoder.inspect(packet, access_point, device, parse_eapol_key(packet), CREDENTIALS, event_writer)
+        keep_dhcp = False
         if self.decode_communications:
             if previous_decryption != "ready" and session["status"] == "ready":
                 self.drain_communications(event_writer)
             if session["status"] == "loading":
                 self.decoder.queue_packet(packet, bssid, device_mac, direction, packet_timestamp)
-            decoded_packets = self.decoder.cleartext(packet, bssid, device_mac, direction) or ()
-            for decoded in decoded_packets:
-                self.consume_communication(bssid, device_mac, decoded, direction, packet_timestamp, event_writer)
+        decoded_packets = ([value for _, _, value, _ in decoded_dhcp] if decoded_dhcp is not None
+                           else self.decoder.cleartext(packet, bssid, device_mac, direction) or ())
+        if packet.haslayer(DHCP):
+            decoded_packets = (packet,)
+        for decoded in decoded_packets:
+            keep_dhcp |= self.consume_communication(bssid, device_mac, decoded, direction, packet_timestamp, event_writer)
         if direction == "upload" and subtype_id != "data.eapol":
             device["uploadSamples"].append((packet_timestamp, frame_bytes))
             self.realtime_devices.add(device_key)
@@ -1966,7 +2016,7 @@ class CaptureAnalysis:
         for name, priority in identity_candidates:
             update_device_identity(device, name, priority)
 
-        return any(packet_start in value["packetOffsets"] for value in device["handshakes"])
+        return keep_dhcp or any(packet_start in value["packetOffsets"] for value in device["handshakes"])
 
     def publish(self, pcap_header, event_writer, now):
         self.decoder.flush_details(event_writer)
@@ -2213,18 +2263,21 @@ def may_contain_handshake_evidence(record, has_active_handshakes):
     if body + 8 > len(payload):
         return True
     llc = payload[body:body + 8]
-    # 明确的 IP/ARP 普通数据无握手证据；其余封装仍交给完整解析器。
+    # IPv4 中可能包含 DHCP 名称协商，交给解析器判定；IPv6/ARP 不含 DHCPv4。
     return not (llc[:6] == b"\xaa\xaa\x03\x00\x00\x00" and
-                llc[6:] in (b"\x08\x00", b"\x86\xdd", b"\x08\x06"))
+                llc[6:] in (b"\x86\xdd", b"\x08\x06"))
 
 
 def consume_capture_record(record, header, full, retained, files,
                            full_writer, retained_writer, retain_to_file=True, retain_only=False):
-    if retain_only and not may_contain_handshake_evidence(record, retained.handshake_device_keys):
+    if retain_only and not may_contain_handshake_evidence(record, retained.handshake_device_keys or retained.decoder.sessions):
         files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
         return
     try:
         packet = decode_packet(record[0], record[2])
+        if packet is not None:
+            # 仅随有界的待解密队列存活，密码响应到达后可把 DHCP 原包补入保留流。
+            packet._monitor_capture_context = (record, header, retain_to_file, False)
         dot11 = packet.getlayer(Dot11) if packet is not None else None
         candidate = packet is not None and (frame_subtype_id(packet) == "data.eapol" or (
             dot11 is not None and int(dot11.type) == 0 and
@@ -2241,14 +2294,20 @@ def consume_capture_record(record, header, full, retained, files,
                     active = device["activeHandshake"] if device else None
                     completes_handshake = active is not None and active["m3ReplayCounter"] is not None and (
                         is_protected_data_from_device(packet, normalized_unicast_mac(dot11.addr2), mac))
-            evidence = retained.consume(record, packet, header, retained_writer) if (
-                candidate or completes_handshake) else False
+            dhcp = retained.dhcp_packets(packet) if packet is not None and not candidate else None
+            evidence = retained.consume(record, packet, header, retained_writer, decoded_dhcp=dhcp) if (
+                candidate or completes_handshake or dhcp) else False
+            for bssid, mac, decoded, direction in dhcp or ():
+                # 尾部仍未进入完整流的名称协商也要写入服务通信索引，随后随 DHCP 一同保留。
+                full.decoder.consume_network(decoded, bssid, mac, direction, record[5], full_writer)
             if candidate or evidence:
                 files.retain(record, header)
             else:
                 files.non_handshake_bytes += PCAP_PACKET_HEADER_SIZE + len(record[0])
             return
         evidence = full.consume(record, packet, header, full_writer)
+        if packet is not None:
+            packet._monitor_capture_context = (record, header, retain_to_file, bool(candidate or evidence))
         if candidate or evidence:
             if retain_to_file:
                 files.retain(record, header)
@@ -2263,6 +2322,24 @@ def consume_capture_record(record, header, full, retained, files,
         if full.rejected_packets <= 5 or full.rejected_packets % 1000 == 0:
             diagnostic("packetDecodeFailed", offset=record[3],
                        count=full.rejected_packets, errorType=type(error).__name__, message=str(error))
+
+
+def retain_delayed_names(full, retained, files, retained_writer):
+    """只处理有界解密等待队列刚恢复的 DHCP，不回读历史 PCAP。"""
+    retained_records = set()
+    while full.delayed_names:
+        context, bssid, mac, decoded, direction = full.delayed_names.popleft()
+        record, header, write_file, already_retained = context
+        record_key = (record[3], record[5])
+        if not already_retained and record_key not in retained_records:
+            if write_file:
+                files.retain(record, header)
+                files.non_handshake_bytes = max(0, files.non_handshake_bytes - PCAP_PACKET_HEADER_SIZE - len(record[0]))
+            packet = decode_packet(record[0], record[2])
+            retained.consume(record, packet, header, retained_writer, decoded_dhcp=[(bssid, mac, decoded, direction)])
+            retained_records.add(record_key)
+        elif mac in retained.access_points.get(bssid, {}).get("devices", {}):
+            retained.consume_communication(bssid, mac, decoded, direction, record[5], retained_writer)
 
 
 def command_loop(
@@ -2410,6 +2487,7 @@ def main():
                             consume_capture_record(record, replay.global_header, full, retained, files,
                                                    full_writer, retained_writer, retain_to_file=False)
                         full.publish(replay.global_header, full_writer, records[-1][5])
+                        retain_delayed_names(full, retained, files, retained_writer)
                         retained.publish(replay.global_header, retained_writer, records[-1][5])
                 finally:
                     replay.close()
@@ -2465,6 +2543,7 @@ def main():
                                                full_writer, retained_writer,
                                                retain_only=pending_clear is not None)
                     capture.analyzed_offset = reader.offset
+                    retain_delayed_names(full, retained, files, retained_writer)
 
                 if recovering and (reader.offset >= recovery_cutoff or not records):
                     recovering = False
@@ -2478,6 +2557,7 @@ def main():
                     DIAGNOSTICS.phase("main", "publishFull")
                     if pending_clear is None:
                         full.publish(reader.global_header, full_writer, timestamp)
+                        retain_delayed_names(full, retained, files, retained_writer)
                     DIAGNOSTICS.phase("main", "publishRetained")
                     retained.publish(reader.global_header, retained_writer, timestamp)
                     DIAGNOSTICS.phase("main", "flushRetained")
@@ -2500,8 +2580,11 @@ def main():
                                       "processedBytes": 0, "totalBytes": 0,
                                       "requestId": command.get("requestId")})
                         if command["handshakesOnly"]:
+                            full.decoder.flush_details(full_writer, force=True)
                             next_full = retained.fork()
                             next_full.decode_communications = True
+                            # 服务保留了 DHCP 通信 ID，新通信不可复用这些 ID。
+                            next_full.decoder.next_id = max(next_full.decoder.next_id, full.decoder.next_id)
                             next_retained = retained
                         else:
                             next_full = CaptureAnalysis()

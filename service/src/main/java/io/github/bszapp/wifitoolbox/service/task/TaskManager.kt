@@ -23,12 +23,15 @@ import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
 import io.github.bszapp.wifitoolbox.contract.log.sliceLogRange
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 internal class TaskManager(
     private val androidApiProvider: () -> AndroidApi?,
     private val wifiLogAnalyzer: WifiLogAnalyzer,
     private val terminalManager: TerminalManager,
     private val normalModeTaskReadyProvider: () -> Boolean,
+    private val usbMonitorTaskReadyProvider: () -> Boolean,
+    private val acquireUsbMonitor: () -> AutoCloseable,
     private val onSavedWifiNetworksChanged: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) : AutoCloseable {
@@ -252,6 +255,9 @@ internal class TaskManager(
         }
         if (active != null) stop(active)
         taskExecutor.shutdownNow()
+        check(taskExecutor.awaitTermination(20, TimeUnit.SECONDS)) {
+            "任务清理尚未完成，不能退出服务"
+        }
         callbackExecutor.shutdown()
         callbacks.kill()
     }
@@ -263,6 +269,7 @@ internal class TaskManager(
             val androidApi = androidApiProvider()
                 ?: throw IllegalStateException("AndroidApi 尚未初始化")
             val task = when (val payload = request.payload) {
+                TaskRequestPayload.UsbMonitor -> UsbMonitorTask(terminalManager, acquireUsbMonitor)
                 is TaskRequestPayload.ConnectWifi -> {
                     val connectRequest = payload.request
                     val cardTarget = connectRequest.input.target as? ConnectWifiTarget.NetworkCard
@@ -323,6 +330,7 @@ internal class TaskManager(
                 taskId,
                 "任务失败：${error.message ?: error.javaClass.name}",
             )
+            if (request.payload is TaskRequestPayload.UsbMonitor) onError("电脑控制", error)
         } finally {
             synchronized(lock) { records[taskId]?.runnerThread = null }
             finish(taskId)
@@ -346,6 +354,14 @@ internal class TaskManager(
 
     private fun validate(request: TaskStartRequest) {
         when (val payload = request.payload) {
+            TaskRequestPayload.UsbMonitor -> {
+                require(android.os.Process.myUid() == 0) { "电脑控制需要 Root 工作模式" }
+                check(usbMonitorTaskReadyProvider()) { "电脑控制只能在监听模式运行" }
+                require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
+                require(terminalManager.hasRootfsFile("wlantool/usb_monitor.py")) {
+                    "容器缺少 usb_monitor.py，请更新容器系统"
+                }
+            }
             is TaskRequestPayload.ConnectWifi -> {
                 val connect = payload.request
                 when (val target = connect.input.target) {

@@ -18,6 +18,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.SavedWifiList
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiParcelTransport
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiModeState
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
+import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationRange
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -49,6 +50,10 @@ class ServiceCommunication(
     private val monitorRecordedBytesLock = Any()
     private var pendingMonitorRecordedBytes: Pair<Long, Long>? = null
     private val monitorRecordedBytesDeliveryScheduled = AtomicBoolean(false)
+    private val communicationRangeLock = Any()
+    private var pendingCommunicationRange: MonitorCommunicationRange? = null
+    private val pendingCommunicationIds = linkedSetOf<Long>()
+    private val communicationDeliveryScheduled = AtomicBoolean(false)
     private val callbackBroadcastLock = Any()
     private val deliveryExecutor = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "wifi-ipc-delivery").apply { isDaemon = true }
@@ -310,6 +315,44 @@ class ServiceCommunication(
             pendingMonitorRecordedBytes = sessionGeneration to recordedBytes
         }
         scheduleMonitorRecordedBytesDelivery()
+    }
+
+    fun pushMonitorCommunicationChanged(callback: IMainServiceCallback, range: MonitorCommunicationRange, updatedIds: LongArray = longArrayOf()) {
+        require(updatedIds.size <= 100)
+        runCatching { callback.onMonitorCommunicationChanged(range.sessionGeneration, range.oldestAvailableId, range.latestId, updatedIds) }
+            .onFailure { Log.w(TAG, "推送抓包记录范围失败：${it.message}", it) }
+    }
+
+    fun broadcastMonitorCommunicationChanged(range: MonitorCommunicationRange, updatedIds: LongArray) {
+        synchronized(communicationRangeLock) {
+            val previous = pendingCommunicationRange
+            if (previous != null && previous.sessionGeneration > range.sessionGeneration) return
+            if (previous?.sessionGeneration != range.sessionGeneration) pendingCommunicationIds.clear()
+            pendingCommunicationRange = range
+            pendingCommunicationIds.addAll(updatedIds.toList())
+        }
+        scheduleCommunicationDelivery()
+    }
+
+    private fun scheduleCommunicationDelivery() {
+        if (!communicationDeliveryScheduled.compareAndSet(false, true)) return
+        deliveryExecutor.execute {
+            try {
+                while (true) {
+                    val pending = synchronized(communicationRangeLock) {
+                        val range = pendingCommunicationRange ?: return@synchronized null
+                        val ids = pendingCommunicationIds.take(100).toLongArray()
+                        ids.forEach(pendingCommunicationIds::remove)
+                        if (pendingCommunicationIds.isEmpty()) pendingCommunicationRange = null
+                        range to ids
+                    } ?: break
+                    forEachCallback { pushMonitorCommunicationChanged(it, pending.first, pending.second) }
+                }
+            } finally {
+                communicationDeliveryScheduled.set(false)
+                if (synchronized(communicationRangeLock) { pendingCommunicationRange != null }) scheduleCommunicationDelivery()
+            }
+        }
     }
 
     private fun scheduleMonitorRecordedBytesDelivery() {

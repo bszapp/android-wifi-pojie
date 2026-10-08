@@ -11,6 +11,8 @@ interface IWifiListController {
     val modeState: StateFlow<WifiModeState?>
     val monitorPcapExports: SharedFlow<MonitorPcapExportResult>
     val monitorHandshakeTestResults: SharedFlow<MonitorHandshakeTestResult>
+    /** App 已完成本地通信索引或详情增量同步后更新，页面只读取本地镜像。 */
+    val monitorCommunicationUpdates: StateFlow<Long>
 
     /** 请求 Service 只更新独立的 SavedWifiList。 */
     fun updateSavedNetworks()
@@ -33,8 +35,18 @@ interface IWifiListController {
     /** 请求 Service 执行进入脚本；持续抓取时单独选择信道。 */
     fun enterMonitorMode(command: String)
 
-    suspend fun readMonitorCommunications(sessionGeneration: Long, bssid: String, deviceMac: String, fromIndex: Long): MonitorCommunicationPage
-    suspend fun readMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long): MonitorCommunicationDetailPage
+    suspend fun monitorCommunicationWindow(query: MonitorCommunicationQuery, first: Int, last: Int): MonitorCommunicationWindow
+    suspend fun readMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long, channel: MonitorCommunicationChannel = MonitorCommunicationChannel.DETAIL): MonitorCommunicationDetailPage
+    suspend fun saveMonitorCommunication(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, channel: MonitorCommunicationChannel, destination: Uri)
+
+    /** 完整预取当前各通道的已捕获内容到 App 磁盘，成功后才允许导航。 */
+    suspend fun prepareMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, onProgress: (Long, Long) -> Unit): String
+    /** 仅访问已完成的本地快照，不向服务发起读取。 */
+    suspend fun readPreparedMonitorCommunicationDetail(snapshotId: String, cursor: Long, channel: MonitorCommunicationChannel): MonitorCommunicationDetailPage
+    suspend fun savePreparedMonitorCommunication(snapshotId: String, channel: MonitorCommunicationChannel, destination: Uri)
+    fun releasePreparedMonitorCommunication(snapshotId: String)
+    suspend fun viewedMonitorCommunications(sessionGeneration: Long, recordIds: List<String>): Set<String>
+    suspend fun markMonitorCommunicationViewed(sessionGeneration: Long, recordId: String)
 
     fun exportAllMonitorPcap(): String
 

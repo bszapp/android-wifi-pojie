@@ -50,8 +50,11 @@ interface IMainService {
     void interruptMonitorClear(long operationId);
     void enterMonitorMode(String command);
     ParcelFileDescriptor getMonitorChanges(long sessionGeneration, long afterRevision);
-    ParcelFileDescriptor getMonitorCommunications(long sessionGeneration, String bssid, String deviceMac, long fromIndex);
-    ParcelFileDescriptor getMonitorCommunicationDetail(long sessionGeneration, String bssid, String deviceMac, String recordId, long cursor);
+    ParcelFileDescriptor getMonitorCommunicationRange();
+    // ranges 为闭区间的起止 ID 对；去重后最多请求 100 条记录。
+    ParcelFileDescriptor getMonitorCommunicationRecords(long sessionGeneration, in long[] ranges, String keyword);
+    ParcelFileDescriptor searchMonitorCommunications(long sessionGeneration, String keyword, long afterId, long throughId);
+    ParcelFileDescriptor getMonitorCommunicationDetail(long sessionGeneration, String bssid, String deviceMac, String recordId, long cursor, String channel);
     void exportMonitorPcap(String requestId, String mode, String bssid, String deviceMac, in String[] subtypeIds);
     void exportMonitorHandshakePcap(String requestId, String bssid, String deviceMac, String handshakeId);
     void exportMonitorDisconnectionPcap(String requestId, String bssid, String deviceMac, String disconnectionId);
@@ -110,4 +113,7 @@ interface IMainService {
     void shutdown();
     void registerCallback(IMainServiceCallback cb);
     void unregisterCallback(IMainServiceCallback cb);
+
+    // 追加在末尾，保持已有事务编号；仅在确认服务版本不旧后调用。
+    long getContainerVersionCode();
 }

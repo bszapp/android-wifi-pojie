@@ -117,6 +117,7 @@ open class MainService(
             serviceNotifications.refresh()
         },
         onMonitorRecordedBytesChanged = communication::broadcastMonitorRecordedBytes,
+        onMonitorCommunicationChanged = communication::broadcastMonitorCommunicationChanged,
         onMonitorPcapExported = communication::broadcastMonitorPcapExported,
         onError = { operation, error ->
             communication.broadcastServiceError(
@@ -132,10 +133,12 @@ open class MainService(
         wifiLogAnalyzer = wifiLogAnalyzer,
         terminalManager = terminalManager,
         normalModeTaskReadyProvider = wifiListController::isNormalModeTaskReady,
+        usbMonitorTaskReadyProvider = wifiListController::isUsbMonitorTaskReady,
+        acquireUsbMonitor = wifiListController::acquireUsbMonitor,
         onSavedWifiNetworksChanged = wifiListController::refreshSavedNetworks,
         onError = { operation, error ->
             communication.broadcastServiceError(
-                source = "Service.WpsPbcTask",
+                source = "Service.TaskManager",
                 operation = operation,
                 error = error,
             )
@@ -284,6 +287,8 @@ open class MainService(
     }
 
     override fun getContainerState(): ContainerState = communication.callFromApp { containerSystemManager.state() }
+
+    override fun getContainerVersionCode(): Long = communication.callFromApp { containerSystemManager.versionCode() }
 
     override fun interruptContainerOperation(operationId: Long) = communication.callFromApp {
         containerSystemManager.interrupt(operationId)
@@ -440,17 +445,26 @@ open class MainService(
             )
         }
 
-    override fun getMonitorCommunications(sessionGeneration: Long, bssid: String, deviceMac: String, fromIndex: Long): ParcelFileDescriptor =
+    override fun getMonitorCommunicationRange(): ParcelFileDescriptor = communication.callFromApp {
+        io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(wifiListController.getMonitorCommunicationRange())
+    }
+
+    override fun getMonitorCommunicationRecords(sessionGeneration: Long, ranges: LongArray, keyword: String): ParcelFileDescriptor =
         communication.callFromApp {
             io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
-                wifiListController.getMonitorCommunications(sessionGeneration, bssid, deviceMac, fromIndex),
-            )
+                wifiListController.getMonitorCommunicationRecords(sessionGeneration, ranges, keyword))
         }
 
-    override fun getMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long): ParcelFileDescriptor =
+    override fun searchMonitorCommunications(sessionGeneration: Long, keyword: String, afterId: Long, throughId: Long): ParcelFileDescriptor =
         communication.callFromApp {
             io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
-                wifiListController.getMonitorCommunicationDetail(sessionGeneration, bssid, deviceMac, recordId, cursor),
+                wifiListController.searchMonitorCommunications(sessionGeneration, keyword, afterId, throughId))
+        }
+
+    override fun getMonitorCommunicationDetail(sessionGeneration: Long, bssid: String, deviceMac: String, recordId: String, cursor: Long, channel: String): ParcelFileDescriptor =
+        communication.callFromApp {
+            io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(
+                wifiListController.getMonitorCommunicationDetail(sessionGeneration, bssid, deviceMac, recordId, cursor, channel),
             )
         }
 
@@ -729,10 +743,10 @@ open class MainService(
     override fun shutdown() = communication.callFromApp {
         check(hashcatManager.prepareShutdown()) { "Hashcat 任务备份尚未完成，服务保持运行" }
         Log.d(TAG, "收到 shutdown，服务退出")
+        taskManager.close()
         wifiListController.stop()
         taskManager.unregisterCallback(notificationTaskCallback)
         serviceNotifications.close()
-        taskManager.close()
         terminalManager.close()
         containerSystemManager.close()
         initializer.close()
@@ -746,6 +760,7 @@ open class MainService(
 
     override fun registerCallback(cb: IMainServiceCallback) {
         communication.registerCallback(cb)
+        communication.pushMonitorCommunicationChanged(cb, wifiListController.getMonitorCommunicationRange())
         // 重连时分别发送当前两种原始数据；不存在的数据等首次初始化后再推送。
         wifiListController.getWifiState()?.let { communication.pushWifiState(cb, it) }
         wifiListController.getSavedWifiList()?.let { communication.pushSavedWifiList(cb, it) }

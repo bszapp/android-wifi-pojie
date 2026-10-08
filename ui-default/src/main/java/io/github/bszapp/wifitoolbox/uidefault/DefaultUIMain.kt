@@ -77,6 +77,7 @@ fun DefaultUI(
     val context = LocalContext.current
     val confirmationDialogs by
         viewModel.confirmationDialogs.collectAsStateWithLifecycle()
+    val containerState by viewModel.containerState.collectAsStateWithLifecycle()
 
     LaunchedEffect(viewModel, snackbarHostState, context) {
         coroutineScope {
@@ -140,10 +141,17 @@ fun DefaultUI(
                                     snackbarHostState = snackbarHostState,
                                 )
                             }
+                            entry<Route.Capture> { route -> io.github.bszapp.wifitoolbox.uidefault.screen.CaptureScreen(route.bssid, route.deviceMac) }
+                            entry<Route.CaptureDetail> { route -> io.github.bszapp.wifitoolbox.uidefault.screen.CaptureDetailScreen(route) }
                             entry<Route.WpaHashcat> { io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(snackbarHostState = snackbarHostState) }
                             entry<Route.HashcatRun> { route -> io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(
                                 snackbarHostState = snackbarHostState, initialHandshake = route.handshake) }
                         },
+                    )
+
+                    io.github.bszapp.wifitoolbox.uidefault.screen.settings.ContainerProgressSheet(
+                        state = containerState,
+                        onInterrupt = viewModel::interruptContainer,
                     )
 
                     confirmationDialogs.forEach { dialog ->

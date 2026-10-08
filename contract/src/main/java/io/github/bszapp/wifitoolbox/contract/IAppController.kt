@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 interface IAppController {
     val startup: IStartupController
+    val runtimeUpdates: io.github.bszapp.wifitoolbox.contract.startup.IRuntimeUpdateController
     val wifiList: IWifiListController
     val serviceLogs: IServiceLogController
     val appLogs: ILogController

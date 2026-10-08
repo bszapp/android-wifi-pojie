@@ -16,6 +16,8 @@ import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.uidefault.model.task.TaskTracker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import io.github.bszapp.wifitoolbox.contract.startup.RuntimeUpdateTarget
 
 data class ConnectWifiSheetCloseRequest(
     val id: Long,
@@ -55,6 +57,35 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
         UiConfirmationDialogManager(viewModelScope)
     val confirmationDialogs = confirmationDialogManager.dialogs
 
+    init {
+        viewModelScope.launch {
+            var updateDialogId: Long? = null
+            controller.runtimeUpdates.prompt.collect { prompt ->
+                updateDialogId?.let(confirmationDialogManager::dismiss)
+                updateDialogId = prompt?.let {
+                    val serviceUpdate = it.target == RuntimeUpdateTarget.SERVICE
+                    val failed = it.errorMessage != null
+                    showConfirmationDialog(
+                        title = when {
+                            failed -> "服务退出失败"
+                            serviceUpdate -> "服务版本有更新"
+                            else -> "容器系统有更新"
+                        },
+                        content = when {
+                            failed -> "${it.errorMessage}\n\n确认断开旧服务，并按原权限方式强制重启？旧服务尚未保存的任务数据可能丢失。"
+                            serviceUpdate -> "是否立即重启服务？服务将正常退出，并沿用初始化时的权限加载新版本。"
+                            else -> "容器系统未安装、缺少版本记录或版本低于应用。是否使用应用内置容器覆盖安装？已有文件会替换，其他文件会保留。"
+                        },
+                        confirmButtonText = if (failed) "强制重启" else "确定",
+                        onDismissed = { controller.runtimeUpdates.dismiss(it) },
+                        onCancelled = { controller.runtimeUpdates.dismiss(it) },
+                        onConfirmed = { controller.runtimeUpdates.confirm(it) },
+                    )
+                }
+            }
+        }
+    }
+
     private var nextConnectWifiSheetCloseRequestId = 1L
     private val _connectWifiSheetCloseRequest =
         MutableStateFlow<ConnectWifiSheetCloseRequest?>(null)
@@ -65,6 +96,14 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun startTask(request: TaskStartRequest): Long = taskTracker.startTask(request)
 
     suspend fun startWpsPbcTask(): Long = startTask(TaskStartRequest.wpsPbc())
+
+    suspend fun startUsbMonitorTask(): Long = startTask(TaskStartRequest.usbMonitor())
+
+    fun stopUsbMonitorTask() {
+        currentTask.value?.takeIf {
+            it.request.payload is io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload.UsbMonitor
+        }?.let { controller.tasks.stopTask(it.taskId) }
+    }
 
     suspend fun startSavedNetworkConnectTask(
         networkId: Int,

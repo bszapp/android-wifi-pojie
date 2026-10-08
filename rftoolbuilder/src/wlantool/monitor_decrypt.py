@@ -6,6 +6,7 @@ State belongs to CaptureAnalysis; no second pcap reader or accumulated JSON blob
 """
 
 import base64
+import codecs
 import hashlib
 import hmac
 import struct
@@ -14,6 +15,7 @@ import time
 import zlib
 from collections import OrderedDict, deque
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -27,10 +29,42 @@ from scapy.layers.dhcp import BOOTP, DHCP
 from scapy.layers.dns import DNS
 from scapy.layers.dot11 import Dot11, Dot11Elt, Dot11FCS
 from scapy.layers.eap import EAPOL
-from scapy.layers.inet import IP, TCP, UDP
+from scapy.layers.inet import IP, TCP, UDP, ICMP
 from scapy.layers.inet6 import IPv6
-from scapy.layers.l2 import LLC
+from scapy.layers.l2 import LLC, ARP
 from scapy.modules.krack.crypto import gen_TKIP_RC4_key, michael
+
+
+def dhcp_device_name(packet, mac=None):
+    """同一实现供通信解析与清理保留使用，按 BOOTP chaddr 归属设备。"""
+    udp, bootp, dhcp = packet.getlayer(UDP), packet.getlayer(BOOTP), packet.getlayer(DHCP)
+    if udp is None or bootp is None or dhcp is None or {int(udp.sport), int(udp.dport)} != {67, 68}:
+        return None
+    if mac is not None and bytes(bootp.chaddr)[:6].hex() != mac.replace(":", "").lower():
+        return None
+    for option in dhcp.options:
+        if isinstance(option, tuple) and option[0] in ("hostname", "host_name"):
+            value = option[1]
+            name = (value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)).strip("\x00 ")
+            if name:
+                return name
+    for option in dhcp.options:
+        if isinstance(option, tuple) and option[0] == "client_FQDN" and isinstance(option[1], bytes):
+            value = option[1]
+            if len(value) <= 3:
+                continue
+            domain = value[3:]
+            if not value[0] & 4:
+                return domain.decode("utf-8", "replace").strip("\x00 ") or None
+            labels, position = [], 0
+            while position < len(domain) and domain[position]:
+                length = domain[position]
+                if length > 63 or position + length + 1 > len(domain):
+                    return None
+                labels.append(domain[position + 1:position + 1 + length].decode("utf-8", "replace"))
+                position += length + 1
+            return ".".join(labels) or None
+    return None
 
 
 class CredentialStore:
@@ -282,6 +316,8 @@ class CommunicationDecoder:
         self.group_keys = {}
         self.group_clients = {}
         self.pending_details = {}
+        self.dirty_records = {}
+        self.datagrams = OrderedDict()
         self.quic_streams = OrderedDict()
         self.pending_frames = deque()
         self.pending_frame_bytes = 0
@@ -316,13 +352,13 @@ class CommunicationDecoder:
                 if mac and session and session["handshakeId"] == handshake_id:
                     if session["status"] == "ready":
                         for decoded in self.cleartext(packet, bssid, mac, direction) or ():
-                            yield bssid, mac, decoded, direction, timestamp
+                            yield bssid, mac, decoded, direction, timestamp, packet
                     else:
                         keep = session["status"] == "loading"
                 elif mac is None:
                     if self.group_clients.get(bssid):
                         for target, decoded in self.group_packets(packet, point):
-                            yield bssid, target, decoded, "download", timestamp
+                            yield bssid, target, decoded, "download", timestamp, packet
                     else:
                         keep = True
             if keep:
@@ -628,12 +664,14 @@ class CommunicationDecoder:
                 changed.add((bssid, mac))
         return changed
 
-    def new_record(self, bssid, mac, kind, timestamp, source, destination, summary, writer, complete=True):
+    def new_record(self, bssid, mac, kind, timestamp, source, destination, summary, writer, complete=True, tcp_stream_id=""):
         record = dict(id=str(self.next_id), timestampUnixMillis=int(timestamp * 1000),
                       kind=kind, sourceAddress=source, destinationAddress=destination,
-                      summary=summary[:512], complete=complete)
+                      summary=summary[:512], complete=complete, tcpStreamId=tcp_stream_id)
         self.next_id += 1
-        state = dict(record=record, part=0, bssid=bssid, mac=mac, detailBuffer=bytearray(), lastFlush=time.monotonic())
+        record.update(uploadBytes=0, downloadBytes=0, protocol=kind.upper(),
+                      transport="tcp" if kind in ("tcp", "http") else "udp" if kind in ("dns", "dhcp", "udp") else "other")
+        state = dict(record=record, bssid=bssid, mac=mac, channels={})
         self.emit_record(state, writer)
         return state
 
@@ -641,42 +679,64 @@ class CommunicationDecoder:
     def emit_record(state, writer):
         writer.write(dict(type="communication", bssid=state["bssid"], deviceMac=state["mac"], **state["record"]))
 
-    def detail(self, state, value, writer, final=True):
+    def detail(self, state, value, writer, final=True, channel="DETAIL"):
         if isinstance(value, str):
             value = value.encode("utf-8")
-        state["detailBuffer"].extend(value)
+        part = state["channels"].setdefault(channel, dict(buffer=bytearray(), index=0, lastFlush=time.monotonic()))
+        part["buffer"].extend(value)
         # Each independently keyed part remains well below the transport page limit.
-        while len(state["detailBuffer"]) >= 8192 or (final and state["detailBuffer"]):
-            data = bytes(state["detailBuffer"][:8192])
-            del state["detailBuffer"][:8192]
+        while len(part["buffer"]) >= 8192 or (final and part["buffer"]):
+            data = bytes(part["buffer"][:8192])
+            del part["buffer"][:8192]
             writer.write(dict(type="communicationPart", bssid=state["bssid"], deviceMac=state["mac"],
-                id=state["record"]["id"], index=state["part"], data=base64.b64encode(data).decode("ascii")))
-            state["part"] += 1
-            state["lastFlush"] = time.monotonic()
-        if state["detailBuffer"]:
-            self.pending_details[state["record"]["id"]] = state
+                id=state["record"]["id"], channel=channel, index=part["index"],
+                searchable=channel in ("RAW_UPLOAD", "RAW_DOWNLOAD") and state["record"]["kind"] == "tcp",
+                data=base64.b64encode(data).decode("ascii")))
+            part["index"] += 1
+            part["lastFlush"] = time.monotonic()
+        key = (state["record"]["id"], channel)
+        if part["buffer"]:
+            self.pending_details[key] = state
         else:
-            self.pending_details.pop(state["record"]["id"], None)
+            self.pending_details.pop(key, None)
+
+    def counted(self, state, direction, size):
+        state["record"]["uploadBytes" if direction == "upload" else "downloadBytes"] += size
+        self.dirty_records[state["record"]["id"]] = state
 
     def flush_details(self, writer, force=False):
-        for state in tuple(self.pending_details.values()):
-            if force or time.monotonic() - state["lastFlush"] >= 0.25:
-                self.detail(state, b"", writer)
+        for (_, channel), state in tuple(self.pending_details.items()):
+            if force or time.monotonic() - state["channels"][channel]["lastFlush"] >= 0.25:
+                self.detail(state, b"", writer, channel=channel)
+        for state in tuple(self.dirty_records.values()):
+            self.emit_record(state, writer)
+        self.dirty_records.clear()
 
-    def dns(self, payload, bssid, mac, timestamp, source, destination, writer):
+    def dns(self, payload, bssid, mac, timestamp, source, destination, writer, direction="upload"):
         try:
-            dns = DNS(payload)
-            if dns.qr != 0 or not dns.qdcount:
+            if len(payload) < 12:
                 return
+            dns = DNS(payload)
             queries = []
-            for query in dns.qd:
+            for query in dns.qd or []:
                 queries.append(query.qname.decode("utf-8", "replace").rstrip("."))
-            state = self.new_record(bssid, mac, "dns", timestamp, source, destination, ", ".join(queries), writer)
+            state = self.new_record(bssid, mac, "dns", timestamp, source, destination,
+                                    ("Response " if dns.qr else "Query ") + ", ".join(queries), writer)
+            state["record"]["domain"] = queries[0] if queries else ""
+            self.counted(state, direction, len(payload))
+            self.detail(state, payload, writer, channel="RAW_DNS")
             self.detail(state, dns.show(dump=True), writer)
         except (ValueError, IndexError, struct.error):
             return
 
     def consume_network(self, packet, bssid, mac, direction, timestamp, writer):
+        arp = packet.getlayer(ARP)
+        if arp is not None:
+            state = self.new_record(bssid, mac, "arp", timestamp, str(arp.psrc), str(arp.pdst),
+                ("ARP who-has " if int(arp.op) == 1 else "ARP is-at ") + str(arp.pdst if int(arp.op) == 1 else arp.hwsrc), writer)
+            self.counted(state, direction, len(bytes(arp)))
+            self.detail(state, arp.show(dump=True), writer)
+            return None
         ip = packet.getlayer(IP) or packet.getlayer(IPv6)
         if ip is None:
             return None
@@ -724,40 +784,39 @@ class CommunicationDecoder:
                 bootp = packet.getlayer(BOOTP)
                 chaddr = bytes(bootp.chaddr)[:6] if bootp else b""
                 if chaddr.hex() == mac.replace(":", ""):
-                    for option in packet[DHCP].options:
-                        if isinstance(option, tuple) and option[0] in ("hostname", "host_name"):
-                            value = option[1]
-                            dhcp_name = (value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)).strip("\x00 ") or None
-                    if not dhcp_name:
-                        for option in packet[DHCP].options:
-                            if isinstance(option, tuple) and option[0] == "client_FQDN" and isinstance(option[1], bytes):
-                                value = option[1]
-                                if len(value) > 3:
-                                    domain = value[3:]
-                                    if value[0] & 4:
-                                        labels, position = [], 0
-                                        while position < len(domain) and domain[position]:
-                                            length = domain[position]
-                                            if length > 63 or position + length + 1 > len(domain):
-                                                labels = []
-                                                break
-                                            labels.append(domain[position + 1:position + 1 + length].decode("utf-8", "replace"))
-                                            position += length + 1
-                                        dhcp_name = ".".join(labels) or None
-                                    else:
-                                        dhcp_name = domain.decode("utf-8", "replace").strip("\x00 ") or None
+                    dhcp_name = dhcp_device_name(packet, mac)
                     state = self.new_record(bssid, mac, "dhcp", timestamp, source, destination, "DHCP" + (" · " + dhcp_name if dhcp_name else ""), writer)
+                    state["record"]["retainDeviceName"] = bool(dhcp_name)
+                    self.counted(state, direction, len(bytes(udp.payload)))
                     self.detail(state, packet[BOOTP].show(dump=True), writer)
-            if direction == "upload" and int(udp.dport) in (53, 5353):
-                self.dns(bytes(udp.payload), bssid, mac, timestamp, source, destination, writer)
-            if direction == "upload":
-                self.quic(bytes(udp.payload), bssid, mac, timestamp, source, destination, writer)
+            if int(udp.dport) in (53, 5353) or int(udp.sport) in (53, 5353):
+                self.dns(bytes(udp.payload), bssid, mac, timestamp, source, destination, writer, direction)
+            elif not packet.haslayer(DHCP):
+                key = (bssid, mac, source, destination) if direction == "upload" else (bssid, mac, destination, source)
+                state = self.datagrams.get(key)
+                if state is None:
+                    state = self.new_record(bssid, mac, "udp", timestamp, source, destination, "UDP", writer)
+                    self.datagrams[key] = state
+                self.datagrams.move_to_end(key)
+                while len(self.datagrams) > 4096:
+                    self.datagrams.popitem(last=False)
+                self.counted(state, direction, len(bytes(udp.payload)))
+                if direction == "upload":
+                    self.quic(bytes(udp.payload), bssid, mac, timestamp, source, destination, writer, state)
+                if state["record"]["kind"] == "udp":
+                    self.detail(state, direction + " " + source + " -> " + destination + "\n" +
+                        bytes(udp.payload).decode("utf-8", "replace") + "\n", writer, final=False)
         tcp = packet.getlayer(TCP)
-        if tcp is not None and direction == "upload":
-            self.tcp(tcp, bssid, mac, timestamp, source, destination, writer)
+        if tcp is not None:
+            self.tcp(tcp, bssid, mac, timestamp, source, destination, writer, direction)
+        elif udp is None:
+            state = self.new_record(bssid, mac, "icmp" if packet.haslayer(ICMP) or int(getattr(ip, "nh", 0)) == 58 else "other", timestamp, source, destination,
+                                    ip.payload.name, writer)
+            self.counted(state, direction, len(bytes(ip.payload)))
+            self.detail(state, ip.show(dump=True), writer)
         return dhcp_name
 
-    def quic(self, datagram, bssid, mac, timestamp, source, destination, writer):
+    def quic(self, datagram, bssid, mac, timestamp, source, destination, writer, state):
         offset = 0
         try:
             while offset + 7 <= len(datagram):
@@ -808,6 +867,7 @@ class CommunicationDecoder:
                 nonce = (int.from_bytes(iv, "big") ^ pn).to_bytes(12, "big")
                 aad = bytes((first,)) + data[1:pn_offset] + pn_bytes
                 clear = AESGCM(key).decrypt(nonce, data[pn_offset + pn_len:end], aad)
+                state["record"].update(kind="https", protocol="QUIC", summary=state["record"]["summary"] if state["record"]["kind"] == "https" else "QUIC · domain not captured / ECH")
                 stream["largest"] = max(stream["largest"], pn)
                 position = 0
                 while position < len(clear):
@@ -845,7 +905,8 @@ class CommunicationDecoder:
                 if len(hello) >= 4 and hello[0] == 1 and len(hello) >= 4 + int.from_bytes(hello[1:4], "big"):
                     name = tls_sni(bytes(hello[4:4 + int.from_bytes(hello[1:4], "big")]))
                     if name:
-                        state = self.new_record(bssid, mac, "https", timestamp, source, destination, name, writer)
+                        state["record"].update(kind="https", summary=name, domain=name, url="https://" + name, protocol="QUIC")
+                        self.emit_record(state, writer)
                         self.detail(state, "QUIC Initial / TLS ClientHello SNI: " + name + "\nHTTPS 正文保持加密。", writer)
                     stream["parts"].clear()
                     stream["done"] = True
@@ -855,164 +916,328 @@ class CommunicationDecoder:
 
     @staticmethod
     def flow_size(flow):
-        return len(flow["buffer"]) + len(flow["tls"]) + sum(map(len, flow["pending"].values()))
+        return sum(len(s["buffer"]) + len(s["tls"]) + sum(map(len, s["pending"].values()))
+                   for s in flow["streams"].values())
 
     def drop_flow(self, key):
-        self.buffered_bytes -= self.flow_size(self.flows.pop(key))
+        flow = self.flows.pop(key)
+        self.buffered_bytes -= self.flow_size(flow)
+        writer = flow["writer"]
+        for stream in flow["streams"].values():
+            active = stream.get("message")
+            if active:
+                self.finish_http(active, writer, complete=False)
+        flow["record"]["record"]["complete"] = (
+            flow.get("ended", False) and
+            not flow["partial"] and not any(s["pending"] or s["gap"] for s in flow["streams"].values()))
+        self.emit_record(flow["record"], writer)
+        for state in [flow["record"]] + list(flow["requests"]):
+            for channel in tuple(state["channels"]):
+                self.detail(state, b"", writer, channel=channel)
 
-    def tcp(self, tcp, bssid, mac, timestamp, source, destination, writer):
-        key = (bssid, mac, source, int(tcp.sport), destination, int(tcp.dport))
+    @staticmethod
+    def stream_state():
+        return dict(next=None, pending={}, buffer=b"", tls=b"", message=None, fin=False, gap=False)
+
+    def tcp(self, tcp, bssid, mac, timestamp, source, destination, writer, direction):
+        local = (source, int(tcp.sport)) if direction == "upload" else (destination, int(tcp.dport))
+        remote = (destination, int(tcp.dport)) if direction == "upload" else (source, int(tcp.sport))
+        key = (bssid, mac, local, remote)
         while self.flows:
             first = next(iter(self.flows))
             if self.flows[first]["lastSeen"] >= timestamp - 60 and len(self.flows) < 4096 and self.buffered_bytes < 16 * 1024 * 1024:
                 break
-            # Only incomplete stream reassembly is evicted. Emitted history stays on disk.
             self.drop_flow(first)
-        sequence = int(tcp.seq)
-        if int(tcp.flags) & 2:
-            if key in self.flows:
+        flags, sequence = int(tcp.flags), int(tcp.seq)
+        if flags & 2 and not flags & 16 and key in self.flows:
+            # A retransmitted SYN belongs to the same connection.
+            if self.flows[key].get("syn") != sequence:
                 self.drop_flow(key)
-            self.flows[key] = dict(next=sequence + 1, pending={}, buffer=b"", tls=b"", request=None, remaining=0, chunked=False, chunkRemaining=None, lastSeen=timestamp)
-            sequence += 1
-        data = bytes(tcp.payload)
-        if not data:
-            if int(tcp.flags) & 5:
-                if key in self.flows:
-                    self.drop_flow(key)
-            return
-        flow = self.flows.setdefault(key, dict(next=sequence, pending={}, buffer=b"", tls=b"", request=None, remaining=0, chunked=False, chunkRemaining=None, lastSeen=timestamp))
+        if key not in self.flows:
+            state = self.new_record(bssid, mac, "tcp", timestamp,
+                local[0] + ":" + str(local[1]), remote[0] + ":" + str(remote[1]), "TCP stream", writer, False)
+            self.flows[key] = dict(streams={d: self.stream_state() for d in ("upload", "download")},
+                record=state, requests=deque(), lastSeen=timestamp, writer=writer,
+                partial=not bool(flags & 2), syn=sequence if flags & 2 and not flags & 16 else None)
+        flow = self.flows[key]
         self.flows.move_to_end(key)
         flow["lastSeen"] = timestamp
-        # Unwrap 32-bit TCP sequence numbers relative to the contiguous frontier.
-        sequence = flow["next"] + ((sequence - flow["next"] + 0x80000000) & 0xffffffff) - 0x80000000
-        end = sequence + len(data)
-        if end <= flow["next"]:
-            return
-        if sequence > flow["next"]:
-            existing = flow["pending"].get(sequence, b"")
-            if len(data) > len(existing):
-                flow["pending"][sequence] = data
-                self.buffered_bytes += len(data) - len(existing)
-            if self.flow_size(flow) > 1024 * 1024:
-                self.drop_flow(key)
-            return
+        stream = flow["streams"][direction]
+        if flags & 2:
+            sequence = (sequence + 1) & 0xffffffff
+        if stream["next"] is None:
+            stream["next"] = sequence
+        sequence = stream["next"] + ((sequence - stream["next"] + 0x80000000) & 0xffffffff) - 0x80000000
+        data = bytes(tcp.payload)
         previous_size = self.flow_size(flow)
-        data = data[flow["next"] - sequence:]
-        flow["next"] += len(data)
-        flow["buffer"] += data
-        for pending_sequence in sorted(tuple(flow["pending"])):
-            if pending_sequence > flow["next"]:
-                break
-            pending = flow["pending"].pop(pending_sequence)
-            tail = pending[max(0, flow["next"] - pending_sequence):]
-            flow["buffer"] += tail
-            flow["next"] += len(tail)
-        self.parse_stream(flow, bssid, mac, int(tcp.dport), timestamp, source + ":" + str(tcp.sport), destination + ":" + str(tcp.dport), writer)
+        if data and sequence + len(data) > stream["next"]:
+            if sequence > stream["next"]:
+                existing = stream["pending"].get(sequence, b"")
+                if len(data) > len(existing):
+                    stream["pending"][sequence] = data
+            else:
+                parts = [data[max(0, stream["next"] - sequence):]]
+                stream["next"] += len(parts[0])
+                for start in sorted(tuple(stream["pending"])):
+                    if start > stream["next"]:
+                        break
+                    pending = stream["pending"].pop(start)
+                    tail = pending[max(0, stream["next"] - start):]
+                    parts.append(tail)
+                    stream["next"] += len(tail)
+                contiguous = b"".join(parts)
+                channel = "RAW_UPLOAD" if direction == "upload" else "RAW_DOWNLOAD"
+                self.detail(flow["record"], contiguous, writer, final=False, channel=channel)
+                self.counted(flow["record"], direction, len(contiguous))
+                stream["buffer"] += contiguous
+                self.parse_stream(flow, stream, bssid, mac, local, remote, direction, timestamp, writer)
         self.buffered_bytes += self.flow_size(flow) - previous_size
         if self.flow_size(flow) > 1024 * 1024:
+            flow["partial"] = True
             self.drop_flow(key)
             return
-        if int(tcp.flags) & 5:
+        if flags & 1:
+            stream["fin"] = True
+            stream["gap"] = sequence + len(data) != stream["next"]
+            active = stream["message"]
+            if active and active["remaining"] is None and not active["chunked"]:
+                self.finish_http(active, writer, complete=not bool(stream["pending"]) and not stream["gap"])
+                stream["message"] = None
+        if flags & 4 or all(s["fin"] for s in flow["streams"].values()):
+            flow["ended"] = True
             self.drop_flow(key)
 
-    def parse_stream(self, flow, bssid, mac, port, timestamp, source, destination, writer):
-        while flow["buffer"]:
-            data = flow["buffer"]
-            if port == 53:
+    def finish_http(self, message, writer, complete=True):
+        state, direction = message["state"], message["direction"]
+        decoder = message.get("decoder")
+        if decoder:
+            try:
+                self.http_text(message, decoder.flush(), writer)
+                complete = complete and decoder.eof
+            except zlib.error:
+                complete = False
+        text_decoder = message.get("textDecoder")
+        if text_decoder:
+            try:
+                text = text_decoder.decode(b"", final=True)
+                self.detail(state, text, writer, channel=message["channel"])
+                self.detail(state, text, writer, channel=message["channel"] + "_BODY")
+            except (UnicodeError, ValueError):
+                message["decodeError"] = True
+                complete = False
+        self.detail(state, b"", writer, channel=message["channel"])
+        for channel in ("RAW_" + message["channel"], message["channel"] + "_BODY", "RAW_" + message["channel"] + "_BODY"):
+            self.detail(state, b"", writer, channel=channel)
+        state[direction + "Done"] = complete
+        state["record"]["complete"] = state.get("uploadDone", False) and state.get("downloadDone", False)
+        self.emit_record(state, writer)
+
+    def http_body(self, message, value, writer):
+        self.detail(message["state"], value, writer, final=False, channel="RAW_" + message["channel"])
+        self.detail(message["state"], value, writer, final=False, channel="RAW_" + message["channel"] + "_BODY")
+        self.counted(message["state"], message["direction"], len(value))
+        if message.get("decoder"):
+            try:
+                # Bound each decompressor output; large responses stream directly to FIFO.
+                pending = value
+                while pending:
+                    output = message["decoder"].decompress(pending, 8192)
+                    self.http_text(message, output, writer)
+                    pending = message["decoder"].unconsumed_tail
+            except zlib.error:
+                message["decodeError"] = True
+        else:
+            self.http_text(message, value, writer)
+
+    def http_text(self, message, value, writer):
+        text_decoder = message.get("textDecoder")
+        try:
+            text = text_decoder.decode(value) if text_decoder else value
+        except (UnicodeError, ValueError):
+            message["decodeError"] = True
+            message["textDecoder"] = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            text = message["textDecoder"].decode(value)
+        self.detail(message["state"], text, writer, final=False, channel=message["channel"])
+        self.detail(message["state"], text, writer, final=False, channel=message["channel"] + "_BODY")
+
+    def parse_stream(self, connection, stream, bssid, mac, local, remote, direction, timestamp, writer):
+        source, destination = (local, remote) if direction == "upload" else (remote, local)
+        source = source[0] + ":" + str(source[1])
+        destination = destination[0] + ":" + str(destination[1])
+        while stream["buffer"]:
+            data = stream["buffer"]
+            if remote[1] in (53, 5353):
                 if len(data) < 2 or len(data) < 2 + int.from_bytes(data[:2], "big"):
                     return
                 length = int.from_bytes(data[:2], "big")
-                self.dns(data[2:2 + length], bssid, mac, timestamp, source, destination, writer)
-                flow["buffer"] = data[2 + length:]
+                self.dns(data[2:2 + length], bssid, mac, timestamp, source, destination, writer, direction)
+                stream["buffer"] = data[2 + length:]
                 continue
-            if flow["request"]:
-                if flow["chunked"]:
-                    if flow["chunkRemaining"] is None:
+            message = stream["message"]
+            if message:
+                if message["chunked"]:
+                    if message.get("trailers"):
+                        end = 2 if data.startswith(b"\r\n") else data.find(b"\r\n\r\n") + 4
+                        if end < 4 and not data.startswith(b"\r\n"):
+                            return
+                        self.detail(message["state"], data[:end], writer, channel=message["channel"])
+                        self.detail(message["state"], data[:end], writer, channel="RAW_" + message["channel"])
+                        stream["buffer"] = data[end:]
+                        self.finish_http(message, writer, not message.get("decodeError"))
+                        stream["message"] = None
+                        continue
+                    if message["chunkRemaining"] is None:
                         end = data.find(b"\r\n")
                         if end < 0:
                             return
                         try:
                             length = int(data[:end].split(b";", 1)[0], 16)
+                            if length < 0:
+                                raise ValueError()
                         except ValueError:
-                            flow["buffer"] = b""
+                            stream["buffer"] = b""
+                            connection["partial"] = True
                             return
+                        stream["buffer"] = data[end + 2:]
+                        self.detail(message["state"], data[:end + 2], writer, final=False, channel="RAW_" + message["channel"])
+                        message["chunkRemaining"] = length
                         if length == 0:
-                            trailer_end = data.find(b"\r\n\r\n")
-                            if trailer_end < 0:
-                                return
-                            self.detail(flow["request"], data[:trailer_end + 4], writer)
-                            flow["buffer"] = data[trailer_end + 4:]
-                            flow["request"]["record"]["complete"] = True
-                            self.emit_record(flow["request"], writer)
-                            flow["request"] = None
-                            continue
-                        self.detail(flow["request"], data[:end + 2], writer)
-                        flow["buffer"] = data[end + 2:]
-                        flow["chunkRemaining"] = length + 2
+                            message["trailers"] = True
                         continue
-                    count = min(len(data), flow["chunkRemaining"])
-                    self.detail(flow["request"], data[:count], writer, final=False)
-                    flow["buffer"] = data[count:]
-                    flow["chunkRemaining"] -= count
-                    if flow["chunkRemaining"] == 0:
-                        flow["chunkRemaining"] = None
+                    count = min(len(data), message["chunkRemaining"])
+                    self.http_body(message, data[:count], writer)
+                    stream["buffer"] = data[count:]
+                    message["chunkRemaining"] -= count
+                    if message["chunkRemaining"] == 0:
+                        message["chunkCrlf"] = True
+                    if message.get("chunkCrlf"):
+                        if len(stream["buffer"]) < 2:
+                            return
+                        if not stream["buffer"].startswith(b"\r\n"):
+                            connection["partial"] = True
+                            stream["buffer"] = b""
+                            return
+                        stream["buffer"] = stream["buffer"][2:]
+                        self.detail(message["state"], b"\r\n", writer, final=False, channel="RAW_" + message["channel"])
+                        message["chunkCrlf"] = False
+                        message["chunkRemaining"] = None
                     continue
-                count = min(len(data), flow["remaining"])
-                self.detail(flow["request"], data[:count], writer, final=False)
-                flow["buffer"] = data[count:]
-                flow["remaining"] -= count
-                if flow["remaining"] == 0:
-                    self.detail(flow["request"], b"", writer)
-                    flow["request"]["record"]["complete"] = True
-                    self.emit_record(flow["request"], writer)
-                    flow["request"] = None
+                count = len(data) if message["remaining"] is None else min(len(data), message["remaining"])
+                self.http_body(message, data[:count], writer)
+                stream["buffer"] = data[count:]
+                if message["remaining"] is not None:
+                    message["remaining"] -= count
+                    if message["remaining"] == 0:
+                        self.finish_http(message, writer, not message.get("decodeError"))
+                        stream["message"] = None
                 continue
-            # TLS records and handshake messages can each span several TCP segments.
-            if data[0] in (20, 21, 22, 23) and len(data) >= 2 and data[1] == 3:
+            if data[0] in (20, 21, 22, 23) and (len(data) < 2 or data[1] == 3):
+                state = connection["record"]
+                state["record"]["kind"] = "https"
+                state["record"]["protocol"] = "TLS"
                 if len(data) < 5:
                     return
                 length = int.from_bytes(data[3:5], "big")
+                if length > 18432:
+                    stream["buffer"] = b""
+                    connection["partial"] = True
+                    return
                 if len(data) < length + 5:
                     return
-                if data[0] == 22:
-                    flow["tls"] += data[5:5 + length]
-                    while len(flow["tls"]) >= 4:
-                        hello = flow["tls"]
+                if data[0] == 22 and direction == "upload":
+                    stream["tls"] += data[5:5 + length]
+                    while len(stream["tls"]) >= 4:
+                        hello = stream["tls"]
                         hello_len = int.from_bytes(hello[1:4], "big")
                         if len(hello) < 4 + hello_len:
                             break
                         if hello[0] == 1:
                             name = tls_sni(hello[4:4 + hello_len])
+                            state["record"]["summary"] = name or "TLS · domain not captured / ECH"
                             if name:
-                                state = self.new_record(bssid, mac, "https", timestamp, source, destination, name, writer)
-                                self.detail(state, "TLS ClientHello SNI: " + name + "\nHTTPS 正文保持加密；未从流量推测缺失域名。", writer)
-                        flow["tls"] = hello[4 + hello_len:]
-                flow["buffer"] = data[5 + length:]
+                                state["record"].update(domain=name, url="https://" + name)
+                            self.detail(state, "TLS ClientHello SNI: " + (name or "<unknown>") +
+                                "\nHTTPS application data remains encrypted.\n", writer)
+                        stream["tls"] = hello[4 + hello_len:]
+                stream["buffer"] = data[5 + length:]
+                self.dirty_records[state["record"]["id"]] = state
                 continue
-            # Do not interpret arbitrary binary/encrypted protocols as HTTP.
             methods = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ", b"TRACE ")
-            if not any(data.startswith(method) for method in methods):
-                if any(method.startswith(data) for method in methods) or (len(data) < 5 and data[0] in (20, 21, 22, 23)):
+            response = data.startswith(b"HTTP/")
+            if not response and not any(data.startswith(method) for method in methods):
+                if any(prefix.startswith(data) for prefix in methods + (b"HTTP/",)):
                     return
-                flow["buffer"] = b""
+                stream["buffer"] = b""
                 return
-            header_end = data.find(b"\r\n\r\n")
-            if header_end < 0:
+            end = data.find(b"\r\n\r\n")
+            if end < 0:
                 return
-            header = data[:header_end + 4]
+            header, stream["buffer"] = data[:end + 4], data[end + 4:]
             lines = header.decode("iso-8859-1").split("\r\n")
             fields = dict(line.split(":", 1) for line in lines[1:] if ":" in line)
             fields = {key.strip().lower(): value.strip() for key, value in fields.items()}
-            if " HTTP/" not in lines[0]:
-                flow["buffer"] = b""
-                return
+            connection["record"]["record"]["streamContainer"] = True
+            self.dirty_records[connection["record"]["record"]["id"]] = connection["record"]
+            if response:
+                state = connection["requests"][0] if connection["requests"] else self.new_record(
+                    bssid, mac, "http", timestamp, destination, source, "HTTP response · request not captured", writer, False, connection["record"]["record"]["id"])
+                try:
+                    status = int(lines[0].split()[1])
+                except (ValueError, IndexError):
+                    return
+                informational = 100 <= status < 200 and status != 101
+                no_body = informational or status in (101, 204, 304) or state.get("method") == "HEAD" or (state.get("method") == "CONNECT" and 200 <= status < 300)
+                if not informational and connection["requests"]:
+                    connection["requests"].popleft()
+                channel = "RESPONSE"
+                state["record"].update(statusCode=status, protocol=lines[0].split()[0],
+                    contentType=fields.get("content-type", ""), responseHeaderCount=sum(":" in line for line in lines[1:]))
+            else:
+                state = self.new_record(bssid, mac, "http", timestamp, source, destination,
+                    lines[0] + (" · " + fields["host"] if fields.get("host") else ""), writer, False, connection["record"]["record"]["id"])
+                state["method"] = lines[0].split()[0]
+                request_parts = lines[0].split()
+                path = request_parts[1] if len(request_parts) > 1 else ""
+                url = path if path.startswith(("http://", "https://")) else "http://" + fields.get("host", remote[0]) + path
+                try:
+                    domain = urlsplit(url).hostname or ""
+                except ValueError:
+                    domain = ""
+                state["record"].update(method=state["method"], url=url[:2048], domain=domain[:253],
+                    protocol=request_parts[-1], requestHeaderCount=sum(":" in line for line in lines[1:]), contentType=fields.get("content-type", ""))
+                connection["requests"].append(state)
+                while len(connection["requests"]) > 256:
+                    connection["requests"].popleft()
+                no_body, informational, channel = False, False, "REQUEST"
             try:
-                remaining = max(0, int(fields.get("content-length", "0")))
+                remaining = 0 if no_body else int(fields["content-length"]) if "content-length" in fields else (None if response else 0)
+                if remaining is not None and remaining < 0:
+                    raise ValueError()
             except ValueError:
-                flow["buffer"] = b""
+                connection["partial"] = True
                 return
-            chunked = "chunked" in fields.get("transfer-encoding", "").lower()
-            state = self.new_record(bssid, mac, "http", timestamp, source, destination, lines[0] + (" · " + fields["host"] if fields.get("host") else ""), writer, not remaining and not chunked)
-            self.detail(state, header, writer)
-            flow.update(buffer=data[header_end + 4:], request=state if remaining or chunked else None,
-                        remaining=remaining, chunked=chunked, chunkRemaining=None)
+            chunked = not no_body and "chunked" in fields.get("transfer-encoding", "").lower()
+            encoding = fields.get("content-encoding", "").lower()
+            decoder = zlib.decompressobj(31 if encoding == "gzip" else 15) if (chunked or remaining != 0) and encoding in ("gzip", "deflate") else None
+            self.detail(state, header.decode("iso-8859-1"), writer, channel=channel)
+            self.detail(state, header, writer, channel="RAW_" + channel)
+            self.detail(state, header.decode("iso-8859-1"), writer, channel=channel + "_HEADERS")
+            self.dirty_records[state["record"]["id"]] = state
+            self.counted(state, direction, len(header))
+            charset = "utf-8"
+            for parameter in fields.get("content-type", "").split(";")[1:]:
+                if parameter.strip().lower().startswith("charset="):
+                    charset = parameter.strip().split("=", 1)[1].strip("\"' ")
+            try:
+                b"".decode(charset)  # Reject non-text codecs in untrusted HTTP headers.
+                text_decoder = codecs.getincrementaldecoder(charset)(errors="replace")
+            except (LookupError, ValueError):
+                text_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            message = dict(state=state, direction=direction, channel=channel, remaining=remaining,
+                chunked=chunked, chunkRemaining=None, decoder=decoder, textDecoder=text_decoder)
+            if not chunked and remaining == 0:
+                if informational:
+                    continue
+                self.finish_http(message, writer)
+            else:
+                stream["message"] = message

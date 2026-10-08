@@ -77,6 +77,15 @@ import kotlinx.parcelize.Parcelize
  * 结果按每次获取顺序保留，不按 BSSID、SSID 或密码去重；其中 mac 表示目标接入点 BSSID。
  * 普通网卡模式只约束任务的启动时机。任务获得 ID 后独立运行，切换扫描来源不得停止任务；
  * 只有显式停止任务、任务自行结束或 Service 进程结束时才结束当前任务终端。
+ *
+ * ## UsbMonitorTask
+ *
+ * 电脑控制只在 Root 服务、monitor 模式和已安装容器下启动。Service 暂停自身的扫描、
+ * 跳频和录制，保留已捕获数据，再通过 libterminal 的 chroot 终端运行 USB FunctionFS。
+ * 任务不设运行时限；USB 配置连接与电脑采集程序连接分别由实际 USB 事件和协议请求确认。
+ * 拔线后任务等待重新连接。显式停止、服务退出或执行异常时须还原原 USB 配置；确认还原
+ * 完成后才结束任务并交还网卡。退出不恢复信道，USB 交还 Android（如 ADB）。
+ * UI 不自行维护任务 ID 或电脑连接状态。
  */
 
 enum class TaskExecutionState {
@@ -96,6 +105,12 @@ sealed class TaskProgress : Parcelable {
         val useIncompleteProtocol: Boolean,
         val ignoreRepeatedDevices: Boolean,
         val networkCount: Int,
+    ) : TaskProgress()
+
+    data class UsbMonitor(
+        val usbConnected: Boolean,
+        val clientConnected: Boolean,
+        val capturing: Boolean,
     ) : TaskProgress()
 }
 
@@ -194,6 +209,8 @@ sealed class TaskRequestPayload : Parcelable {
     data class WpsPbc(
         val input: WpsPbcTaskInput,
     ) : TaskRequestPayload()
+
+    data object UsbMonitor : TaskRequestPayload()
 }
 
 @Parcelize
@@ -225,6 +242,8 @@ data class TaskStartRequest(
     val payload: TaskRequestPayload,
 ) : Parcelable {
     companion object {
+        fun usbMonitor() = TaskStartRequest(TaskRequestPayload.UsbMonitor)
+
         fun connectWifi(
             input: ConnectWifiTaskInput,
             config: ConnectWifiTaskConfig,

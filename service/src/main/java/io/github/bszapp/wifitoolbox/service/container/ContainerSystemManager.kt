@@ -47,6 +47,19 @@ internal class ContainerSystemManager(
 
     fun state(): ContainerState = synchronized(lock) { currentState }
 
+    /** 缺少版本文件或内容无效时返回 -1，由 App 提示覆盖更新。 */
+    fun versionCode(): Long = synchronized(lock) {
+        val env = requireNotNull(environment) { "容器环境尚未配置" }
+        val versionFile = File(rootfs(env), "wlantool/ver")
+        if (!versionFile.isFile) return@synchronized -1L
+        versionFile.bufferedReader().use { reader ->
+            val text = CharArray(32)
+            val count = reader.read(text)
+            if (count <= 0 || reader.read() != -1) -1L
+            else String(text, 0, count).trim().toLongOrNull()?.takeIf { it >= 0L } ?: -1L
+        }
+    }
+
     fun initialize(next: ContainerEnvironment) {
         val data = File(next.appDataPath)
         require(data.isAbsolute && data.absolutePath != "/") {

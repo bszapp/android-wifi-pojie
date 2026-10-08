@@ -34,6 +34,8 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChannel
+import io.github.bszapp.wifitoolbox.contract.wifilist.monitorSignalIndices
+import io.github.bszapp.wifitoolbox.contract.wifilist.monitorSignalWindows
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -69,27 +71,9 @@ private data class ChannelTickLabel(
     val row: Int,
 )
 
-/** 绘制和命中判断共用的标称工作频率范围；80+80 MHz 分成两个独立区间。 */
-internal fun scanFrequencyWindows(network: ScanResult): List<ClosedFloatingPointRange<Float>> {
-    val width = when (network.channelWidth) {
-        ScanResult.CHANNEL_WIDTH_40MHZ -> 40f
-        ScanResult.CHANNEL_WIDTH_80MHZ, ScanResult.CHANNEL_WIDTH_80MHZ_PLUS_MHZ -> 80f
-        ScanResult.CHANNEL_WIDTH_160MHZ -> 160f
-        ScanResult.CHANNEL_WIDTH_320MHZ -> 320f
-        else -> 20f
-    }
-    val center = network.centerFreq0.takeIf { it > 0 } ?: network.frequency
-    val halfWidth = if (network.centerFreq0 > 0) width / 2 else 10f
-    val windows = mutableListOf((center - halfWidth)..(center + halfWidth))
-    if (network.channelWidth == ScanResult.CHANNEL_WIDTH_80MHZ_PLUS_MHZ && network.centerFreq1 > 0) {
-        windows += (network.centerFreq1 - 40f)..(network.centerFreq1 + 40f)
-    }
-    return windows
-}
-
 internal fun chartHitNetworks(scanResults: List<ScanResult>, frequency: Int): List<ScanResult> =
     scanResults.filter { network ->
-        network.level < 0 && scanFrequencyWindows(network).any { frequency.toFloat() in it }
+        network.level < 0 && monitorSignalWindows(network).any { frequency.toFloat() in it.startMhz..it.endMhz }
     }.distinctBy { it.BSSID.lowercase() }.sortedByDescending { it.level }
 
 @Composable
@@ -108,18 +92,25 @@ internal fun MonitorChannelChart(
         scanResults.filter { it.frequency in band.frequencies }.distinctBy { it.BSSID.lowercase() }
     }
     val visible = remember(networks) { networks.filter { it.level < 0 }.sortedBy { it.level } }
-    val windows = remember(visible) { visible.map { it to scanFrequencyWindows(it) } }
+    val windows = remember(visible) { visible.map { it to monitorSignalWindows(it) } }
     val ticks = remember(band, supported, networks) {
         (standardChartFrequencies(band) + supported.map { it.frequencyMhz } + networks.map { it.frequency })
             .distinct().sorted()
     }
     val axis = remember(ticks) { FrequencyAxis(ticks.first() - 20f, ticks.last() + 20f) }
+    // 1 MHz 采样，平滑算法与服务分配跳频时间完全共用。
+    val signalFrequencies = remember(axis) {
+        (floor(axis.minimum).toInt()..ceil(axis.maximum).toInt()).map { it.toFloat() }
+    }
+    val signalIndices = remember(networks, signalFrequencies) { monitorSignalIndices(networks, signalFrequencies) }
+    val maximumSignalIndex = signalIndices.maxOrNull()?.takeIf { it > 0.0 } ?: 1.0
     val supportedFrequencies = remember(supported) { supported.map { it.frequencyMhz }.toSet() }
     val currentOnSelect by rememberUpdatedState(onSelect)
     val colors = MiuixTheme.colorScheme
     val dark = colors.surface.luminance() < 0.5f
     val axisColor = colors.onSurfaceVariantSummary
     val gridColor = axisColor.copy(alpha = if (dark) 0.22f else 0.16f)
+    val predictionColor = colors.primary.copy(alpha = 0.45f)
     val cursorColor = if (dark) Color(0xFF64B5F6) else Color(0xFF1976D2)
     val labelStyle = MiuixTheme.textStyles.footnote1
     val measurer = rememberTextMeasurer(cacheSize = 128)
@@ -130,10 +121,9 @@ internal fun MonitorChannelChart(
     Card {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Text(band.title, style = MiuixTheme.textStyles.body1, color = colors.onSurface)
-            Text(
-                if (supported.isEmpty()) "网卡不支持此频段" else "信号强度（dBm） · 点击或拖动选信道，淡色刻度不可选",
-                style = labelStyle, color = axisColor,
-            )
+            io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = supported.isEmpty()) {
+                Text("网卡不支持此频段", style = labelStyle, color = axisColor)
+            }
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val widthPx = with(density) { maxWidth.toPx() }
                 val measuredTicks = remember(ticks, labelStyle, measurer) {
@@ -144,10 +134,13 @@ internal fun MonitorChannelChart(
                 val dbmLabels = remember(minimumDbm, maximumDbm, labelStyle, measurer) {
                     (minimumDbm..maximumDbm step 10).map { it to measurer.measure(it.toString(), style = labelStyle) }
                 }
+                val indexLabels = remember(labelStyle, measurer) {
+                    (0..100 step 25).map { it to measurer.measure("$it%", style = labelStyle) }
+                }
                 // 为坐标文字预留真实测量宽度，轴刻度不移动、不裁掉，也不按数量抽样。
                 val halfTickWidth = measuredTicks.maxOf { it.second.size.width } / 2f
                 val left = dbmLabels.maxOf { it.second.size.width } + with(density) { 10.dp.toPx() } + halfTickWidth
-                val right = widthPx - halfTickWidth - with(density) { 8.dp.toPx() }
+                val right = widthPx - halfTickWidth - indexLabels.maxOf { it.second.size.width } - with(density) { 10.dp.toPx() }
                 val top = with(density) { 24.dp.toPx() }
                 val bottom = top + with(density) { 172.dp.toPx() }
                 val rowHeight = measuredTicks.maxOf { it.second.size.height }.toFloat() + with(density) { 4.dp.toPx() }
@@ -214,6 +207,11 @@ internal fun MonitorChannelChart(
                         drawText(text, color = axisColor,
                             topLeft = Offset(left - text.size.width - 5.dp.toPx(), y(dbm) - text.size.height / 2f))
                     }
+                    indexLabels.forEach { (percent, text) ->
+                        val labelY = bottom - percent / 100f * (bottom - top)
+                        drawText(text, color = predictionColor,
+                            topLeft = Offset(right + 5.dp.toPx(), labelY - text.size.height / 2f))
+                    }
                     tickLabels.forEach { tick ->
                         val supportedTick = tick.frequency in supportedFrequencies
                         val selectedTick = tick.frequency == selectedFrequency
@@ -233,19 +231,32 @@ internal fun MonitorChannelChart(
                     drawLine(axisColor.copy(alpha = 0.5f), Offset(left, top), Offset(left, bottom), 1.dp.toPx())
                     drawLine(axisColor.copy(alpha = 0.5f), Offset(left, bottom), Offset(right, bottom), 1.dp.toPx())
                     clipRect(left, 0f, right, bottom) {
+                        val signalPath = Path().apply {
+                            signalIndices.forEachIndexed { index, value ->
+                                val pointX = x(signalFrequencies[index])
+                                val pointY = bottom - (value / maximumSignalIndex).toFloat() * (bottom - top)
+                                if (index == 0) moveTo(pointX, pointY) else lineTo(pointX, pointY)
+                            }
+                        }
+                        val signalFill = Path().apply {
+                            addPath(signalPath)
+                            lineTo(x(signalFrequencies.last()), bottom)
+                            lineTo(x(signalFrequencies.first()), bottom)
+                            close()
+                        }
+                        drawPath(signalFill, colors.primary.copy(alpha = if (dark) 0.10f else 0.06f))
+                        drawPath(signalPath, predictionColor, style = Stroke(1.5.dp.toPx()))
                         windows.forEach { (network, ranges) ->
                             val hue = Math.floorMod(network.BSSID.lowercase().hashCode(), 360).toFloat()
                             val color = Color.hsv(hue, if (dark) 0.55f else 0.78f, if (dark) 0.95f else 0.68f)
-                            val hit = selectedFrequency != null && ranges.any { selectedFrequency.toFloat() in it }
+                            val hit = selectedFrequency != null && ranges.any { selectedFrequency.toFloat() in it.startMhz..it.endMhz }
                             ranges.forEach { range ->
-                                val start = x(range.start)
-                                val end = x(range.endInclusive)
-                                val shoulder = (end - start) * 0.08f
+                                val start = x(range.startMhz)
+                                val end = x(range.endMhz)
                                 val peak = y(network.level)
                                 val path = Path().apply {
                                     moveTo(start, bottom)
-                                    lineTo(start + shoulder, peak)
-                                    lineTo(end - shoulder, peak)
+                                    lineTo(x(range.peakMhz), peak)
                                     lineTo(end, bottom)
                                     close()
                                 }
@@ -271,6 +282,8 @@ internal fun MonitorChannelChart(
                     }
                 }
             }
+            Text("三角形底边为标称覆盖范围；曲线为信号平方和预测，不代表实际流量。",
+                style = labelStyle, color = axisColor.copy(alpha = 0.4f))
             io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = networks.size > visible.size) {
                 Text("${networks.size - visible.size} 个接入点信号未知，未绘制", style = labelStyle, color = axisColor)
             }

@@ -42,6 +42,7 @@ internal class WifiListController(
     private val onSavedWifiListChanged: (SavedWifiList) -> Unit,
     private val onModeStateChanged: (WifiModeState) -> Unit,
     private val onMonitorRecordedBytesChanged: (Long, Long) -> Unit,
+    private val onMonitorCommunicationChanged: (io.github.bszapp.wifitoolbox.contract.wifilist.MonitorCommunicationRange, LongArray) -> Unit,
     private val onMonitorPcapExported: (requestId: String, path: String, fileName: String) -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
 ) {
@@ -77,6 +78,7 @@ internal class WifiListController(
         }
     }
     private var monitorScanActive = false
+    @Volatile private var computerControlActive = false
     private val diagnosticSubmitted = AtomicLong()
     private val diagnosticCompleted = AtomicLong()
     private val diagnosticQueueLoggedAt = AtomicLong()
@@ -107,6 +109,7 @@ internal class WifiListController(
         onRecordedBytesChanged = { sessionGeneration, recordedBytes ->
             execute("monitorRecordedBytes") { publishMonitorRecordedBytes(sessionGeneration, recordedBytes) }
         },
+        onCommunicationChanged = onMonitorCommunicationChanged,
         onExportCompleted = { requestId, path, fileName ->
             execute { onMonitorPcapExported(requestId, path, fileName) }
         },
@@ -158,7 +161,10 @@ internal class WifiListController(
         )
     }
 
-    fun beforeContainerDelete() = normalScanner.beforeContainerDelete()
+    fun beforeContainerDelete() {
+        check(!computerControlActive) { "请先停止电脑控制任务" }
+        normalScanner.beforeContainerDelete()
+    }
     fun afterContainerOperation() = normalScanner.afterContainerOperation()
 
     fun getWifiState(): WifiState? = wifiState
@@ -169,6 +175,55 @@ internal class WifiListController(
 
     fun isNormalModeTaskReady(): Boolean = environmentConfigured &&
         modeState.mode == WifiMode.NORMAL && !modeOperationInProgress
+
+    fun isUsbMonitorTaskReady(): Boolean = environmentConfigured && !stopped &&
+        modeState.mode == WifiMode.MONITOR && !modeOperationInProgress && !computerControlActive
+
+    /** 在扫描调度线程上转交网卡所有权；历史抓包数据保持不动。 */
+    fun acquireUsbMonitor(): AutoCloseable {
+        val acquired = CompletableFuture<Unit>()
+        execute("usbMonitorAcquire") {
+            try {
+                check(isUsbMonitorTaskReady()) { "电脑控制需要处于监听模式" }
+                check(!monitorScanActive && !monitorCaptureChangeActive && !modeState.clearingCapture) {
+                    "请等待扫描或网卡操作或清理完成"
+                }
+                computerControlActive = true
+                monitorCapturePlan = MonitorCapturePlan.Stopped
+                monitorScanner.stop()
+                if (monitorModeController.isCapturing()) {
+                    monitorModeController.setCapture(false).get(5, TimeUnit.SECONDS)
+                }
+                setInterfaceUp(true)
+                publishModeState(modeState.copy(capturing = false, hoppingCapture = false))
+                acquired.complete(Unit)
+            } catch (error: Throwable) {
+                computerControlActive = false
+                acquired.completeExceptionally(error)
+            }
+        }
+        // 接管过程由服务调度线程完成，即使任务收到停止也须等本次接管结果，再交还资源。
+        var interrupted = false
+        try {
+            while (true) {
+                try { acquired.get(); break }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+        return AutoCloseable {
+            val released = CompletableFuture<Unit>()
+            execute("usbMonitorRelease") {
+                try {
+                    computerControlActive = false
+                    if (modeState.mode == WifiMode.MONITOR) setInterfaceUp(false)
+                    released.complete(Unit)
+                } catch (error: Throwable) { released.completeExceptionally(error) }
+            }
+            released.get(5, TimeUnit.SECONDS)
+        }
+    }
 
     fun initialize() {
         execute {
@@ -248,6 +303,7 @@ internal class WifiListController(
             var accepted = false
             try {
                 check(modeState.mode == WifiMode.MONITOR && !modeOperationInProgress) { "网卡操作尚未完成" }
+                check(!computerControlActive) { "电脑控制正在使用网卡" }
                 check((!enabled || (!monitorScanActive && !monitorCaptureChangeActive)) &&
                     !modeState.clearingCapture) { "请等待扫描或网卡操作或清理完成" }
                 if (enabled) {
@@ -386,7 +442,7 @@ internal class WifiListController(
         val plan = monitorCapturePlan
         Log.d(TAG, "[MonitorDiagnostic] resumeBegin generation=$generation plan=$plan")
         val request = try {
-            monitorScanner.resume(plan)
+            monitorScanner.resume(plan, (wifiState as? WifiState.Monitor)?.scanResults.orEmpty())
         } catch (error: Throwable) {
             completion.completeExceptionally(error)
             return
@@ -456,6 +512,7 @@ internal class WifiListController(
         execute("clearMonitorCapture") {
             Log.d(TAG, "[MonitorDiagnostic] clearBegin mode=${modeState.mode} scanning=$monitorScanActive capturing=${modeState.capturing}")
             runCatching {
+                check(!computerControlActive) { "电脑控制正在使用网卡" }
                 check(modeState.mode == WifiMode.MONITOR && !monitorScanActive &&
                     !monitorCaptureChangeActive && !modeOperationInProgress)
                 monitorModeController.clearCapture(handshakesOnly)
@@ -560,6 +617,7 @@ internal class WifiListController(
             var ownsScan = false
             try {
                 check(isCurrentMode(requestedGeneration, WifiMode.MONITOR) && !modeOperationInProgress) { "monitor 模式已改变" }
+                check(!computerControlActive) { "电脑控制正在使用网卡" }
                 check(!monitorScanActive && !monitorCaptureChangeActive && !modeState.clearingCapture) { "monitor 操作正在进行" }
                 check(environmentConfigured) { "容器环境尚未配置" }
                 val generation = modeGeneration
@@ -642,6 +700,7 @@ internal class WifiListController(
     @Throws(Exception::class)
     fun startScan() {
         check(!stopped) { "Wi-Fi 服务已停止" }
+        check(!computerControlActive) { "电脑控制正在使用网卡" }
         check(!modeOperationInProgress) { "网卡操作尚未完成" }
         if (modeState.mode == WifiMode.MONITOR) startMonitorScanSynchronously()
         else normalScanner.startScan()
@@ -652,6 +711,10 @@ internal class WifiListController(
     ) {
         require(mode == WifiMode.NORMAL) { "监听模式通过命令编辑入口进入" }
         execute {
+            if (computerControlActive) {
+                reportError("切换网卡模式", IllegalStateException("请先停止电脑控制任务"))
+                return@execute
+            }
             val current = modeState
             if (current.mode == mode && !modeOperationInProgress) return@execute
             stopInterfaceModePolling()
@@ -908,11 +971,16 @@ internal class WifiListController(
     fun getMonitorChanges(sessionGeneration: Long, afterRevision: Long) =
         monitorModeController.changesPage(sessionGeneration, afterRevision)
 
-    fun getMonitorCommunications(session: Long, bssid: String, mac: String, from: Long) =
-        monitorModeController.communicationPage(session, bssid, mac, from)
+    fun getMonitorCommunicationRange() = monitorModeController.communicationRange()
 
-    fun getMonitorCommunicationDetail(session: Long, bssid: String, mac: String, id: String, cursor: Long) =
-        monitorModeController.communicationDetail(session, bssid, mac, id, cursor)
+    fun getMonitorCommunicationRecords(session: Long, ranges: LongArray, keyword: String) =
+        monitorModeController.communicationRecords(session, ranges, keyword)
+
+    fun searchMonitorCommunications(session: Long, keyword: String, after: Long, through: Long) =
+        monitorModeController.searchCommunications(session, keyword, after, through)
+
+    fun getMonitorCommunicationDetail(session: Long, bssid: String, mac: String, id: String, cursor: Long, channel: String) =
+        monitorModeController.communicationDetail(session, bssid, mac, id, cursor, channel)
 
     private fun publishMonitorStatistics(statistics: MonitorModeStatistics) {
         val current = modeState
@@ -935,7 +1003,7 @@ internal class WifiListController(
                 }
             }
         }
-        if (!monitorScanActive && !monitorCaptureChangeActive && !monitorModeController.isCapturing()) {
+        if (!computerControlActive && !monitorScanActive && !monitorCaptureChangeActive && !monitorModeController.isCapturing()) {
             runCatching { setInterfaceUp(false) }.onFailure { reportError("暂停 monitor 接收", it) }
         }
         val channel = monitorCaptureChannel()
