@@ -23,6 +23,8 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.*
 import io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility
 import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
+import io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode
+import io.github.bszapp.wifitoolbox.uidefault.securityaudit.SecurityAuditTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -58,6 +60,8 @@ fun ListScreen(
     }
     val displayedTask by viewModel.displayedTask.collectAsStateWithLifecycle()
     val selectedSource = modeState?.mode ?: WifiMode.NORMAL
+    val submode by viewModel.securityAudit.submode.collectAsStateWithLifecycle()
+    val auditMode = selectedSource == WifiMode.NORMAL && submode == NormalWifiSubmode.SECURITY_AUDIT
     val isScanning = wifiState.isScanning || isSendingScanRequest
     val controlsBusy = isScanning || modeState?.modeSwitch?.isRunning == true
     val taskActionScope = rememberCoroutineScope()
@@ -107,7 +111,7 @@ fun ListScreen(
             BlurredBar(backdrop) {
                 TopAppBar(
                     color = barColor,
-                    title = selectedSource.displayName,
+                    title = if (auditMode) "安全测试" else selectedSource.displayName,
                     navigationIcon = {
                         Box {
                             val showTopPopup = remember { mutableStateOf(false) }
@@ -157,6 +161,11 @@ fun ListScreen(
                         }
                     },
                     actions = {
+                        ImmediateVisibility(visible = auditMode) {
+                            IconButton(onClick = { navigator.push(Route.SecurityAuditHistory) }) {
+                                Icon(Icons.Rounded.History, "安全测试历史", tint = colorScheme.onSurface)
+                            }
+                        }
                         ImmediateVisibility(
                             visible = selectedSource == WifiMode.NORMAL,
                         ) {
@@ -244,10 +253,18 @@ fun ListScreen(
                                                 viewModel.wifiList.setWifiListDataSource(WifiListDataSource.UNDERLYING)
                                                 showMore.value = false
                                             })
+                                        HorizontalDivider()
+                                        listOf("扫描模式", "安全测试模式").forEachIndexed { index, label ->
+                                            DropdownImpl(text = label, isSelected = submode.ordinal == index,
+                                                optionSize = 2, index = index, onSelectedIndexChange = {
+                                                    viewModel.securityAudit.selectSubmode(NormalWifiSubmode.entries[index])
+                                                    showMore.value = false
+                                                })
+                                        }
                                     }
                                 }
                                 IconButton(onClick = { showMore.value = true }) {
-                                    Icon(Icons.Rounded.Route, "Wi-Fi 列表数据源", tint = colorScheme.onSurface)
+                                    Icon(Icons.Rounded.MoreVert, "扫描来源与子模式", tint = colorScheme.onSurface)
                                 }
                             }
                         }
@@ -314,7 +331,7 @@ fun ListScreen(
                         top = innerPadding.calculateTopPadding() + 14.dp,
                         start = innerPadding.calculateStartPadding(layoutDirection) + 12.dp,
                         end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
-                        bottom = bottomInnerPadding + if (selectedSource == WifiMode.MONITOR) 84.dp else 8.dp,
+                        bottom = bottomInnerPadding + if (selectedSource == WifiMode.MONITOR || auditMode) 84.dp else 8.dp,
                     ),
                 )
                 ImmediateVisibility(
@@ -332,6 +349,12 @@ fun ListScreen(
                             if (modeState?.capturing == true) "停止持续抓取" else "持续抓取",
                             tint = colorScheme.onPrimary,
                         )
+                    }
+                }
+                ImmediateVisibility(visible = auditMode,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = bottomInnerPadding + 16.dp)) {
+                    FloatingActionButton(onClick = viewModel.securityAudit::configure) {
+                        Icon(Icons.Rounded.Tune, "编辑安全测试运行行为", tint = colorScheme.onPrimary)
                     }
                 }
             }
@@ -409,6 +432,9 @@ private fun DisplayedTaskSheet(
             onDismiss = viewModel::closeDisplayedTask,
         )
         TaskRequestPayload.UsbMonitor -> Unit
+        is TaskRequestPayload.SecurityAudit -> SecurityAuditTaskSheet(task,
+            onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
+            onInspect = viewModel.securityAudit::inspect)
     }
 }
 

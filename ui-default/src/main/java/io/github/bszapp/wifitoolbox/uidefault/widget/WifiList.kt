@@ -97,6 +97,10 @@ fun WifiList(
     val handshakeTest by vm.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
     val capturedAccessPoints = modeState?.monitorStatistics?.accessPoints.orEmpty()
     val currentTask by vm.currentTask.collectAsStateWithLifecycle()
+    val submode by vm.securityAudit.submode.collectAsStateWithLifecycle()
+    val auditBatch by vm.securityAudit.batch.collectAsStateWithLifecycle()
+    val auditHistory by vm.securityAudit.history.collectAsStateWithLifecycle()
+    val auditMode = modeState?.mode == WifiMode.NORMAL && submode == io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode.SECURITY_AUDIT
     val displayedTask by vm.displayedTask.collectAsStateWithLifecycle()
     val connectWifiSheetCloseRequest by
         vm.connectWifiSheetCloseRequest.collectAsStateWithLifecycle()
@@ -132,13 +136,25 @@ fun WifiList(
     val capturedMetadata = remember(capturedAccessPoints) {
         capturedAccessPoints.map { it.copy(devices = emptyList()) }
     }
-    val groups = remember(scanResults, savedNetworks, connection, capturedMetadata, modeState?.mode) {
-        MergedWifiGroup.buildFrom(
+    val runningAuditNetworks = auditBatch?.auditNetworks.orEmpty().filter { it.active }
+    val groups = remember(scanResults, savedNetworks, connection, capturedMetadata, modeState?.mode, auditMode, runningAuditNetworks) {
+        val scanned = MergedWifiGroup.buildFrom(
             results = scanResults,
             savedWifiList = savedNetworks,
             connection = connection,
             capturedAccessPoints = if (modeState?.mode == WifiMode.MONITOR) capturedMetadata else emptyList(),
         )
+        if (!auditMode) scanned else {
+            val missing = runningAuditNetworks.filter { entry -> scanned.none { it.ssid == entry.input.ssid } }.map { entry ->
+                MergedWifiGroup(entry.input.ssid, emptyList(), savedNetworks.filter { it.SSID?.removeSurrounding("\"") == entry.input.ssid }, null, null)
+            }
+            val all = scanned + missing
+            runningAuditNetworks.mapNotNull { entry -> all.firstOrNull { it.ssid == entry.input.ssid } } +
+                scanned.filter { group -> runningAuditNetworks.none { it.input.ssid == group.ssid } }
+        }
+    }
+    LaunchedEffect(auditMode, runningAuditNetworks.size) {
+        if (auditMode && runningAuditNetworks.isNotEmpty()) listState.animateScrollToItem(0)
     }
     val handshakeDevicesBySsid = remember(capturedAccessPoints, modeState?.mode) {
         if (modeState?.mode != WifiMode.MONITOR) {
@@ -185,11 +201,11 @@ fun WifiList(
 
     Column(modifier = modifier.fillMaxSize()) {
         when {
-            (wifiState as? WifiState.System)?.data is SystemScanData.Disabled -> WifiDisabledContent(
+            !auditMode && (wifiState as? WifiState.System)?.data is SystemScanData.Disabled -> WifiDisabledContent(
                 onEnableWifi = { vm.wifiList.setWifiEnabled(true) },
             )
 
-            wifiState.hasData -> LazyColumn(
+            wifiState.hasData || auditMode -> LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = contentPadding,
@@ -204,12 +220,19 @@ fun WifiList(
                                 is TaskProgress.WpsPbc ->
                                     "WPS-PBC · 已获取 ${progress.networkCount} 个网络"
                                 is TaskProgress.UsbMonitor -> "电脑控制"
+                                is TaskProgress.SecurityAudit -> "网络安全测试 · ${progress.networkCount} 个网络"
                                 null -> "加载中"
                             },
                             onClick = {
                                 vm.displayTask(task.taskId)
                             },
                         )
+                    }
+                }
+                if (auditMode && connection != null) item(key = "audit-current-connection") {
+                    Card(Modifier.fillMaxWidth()) {
+                        top.yukonga.miuix.kmp.basic.BasicComponent(title = "当前已连接：${connection.ssid.removeSurrounding("\"")}",
+                            endActions = { TextButton("断开", { vm.wifiList.disconnectCurrentNetwork(connection.networkId) }) })
                     }
                 }
                 item(key = "wifi-empty") {
@@ -222,18 +245,26 @@ fun WifiList(
                 }
                 groups.forEach { group ->
                     item(key = group.ssid) {
+                        val auditRecord = auditBatch?.auditNetworks?.lastOrNull { it.input.ssid == group.ssid }
+                        Column(Modifier.animateItem()) {
                         WifiGroupCard(
                                 vm = vm,
                                 group = group,
                                 handshakeDeviceCount = handshakeDevicesBySsid[group.ssid] ?: 0,
                                 discoveredHiddenNameCount =
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
-                                modifier = Modifier.animateItem(),
+                                auditMode = auditMode,
+                                auditRunning = auditRecord?.active == true,
                                 onClick = {
                                     selectedSsid = group.ssid
                                     showWifiDetailSheet = true
                                 },
                                 onConnect = {
+                                    if (auditMode) {
+                                        if (auditRecord?.active == true) vm.securityAudit.stopNetwork(group.ssid)
+                                        else vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
+                                        return@WifiGroupCard
+                                    }
                                     dismissConnectSheet = false
                                     connectSheetContent = ConnectWifiSheetContent.Network(
                                         ssid = group.ssid,
@@ -249,7 +280,21 @@ fun WifiList(
                                     )
                                 },
                         )
+                        if (auditMode) {
+                            val previous = auditHistory.firstOrNull { it.input.ssid == group.ssid }
+                            if (previous != null) Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                TagItem("有历史", style = TagStyle.Secondary)
+                                if (auditRecord?.active != true && !previous.active) Text(previous.message, style = MiuixTheme.textStyles.footnote1)
+                            }
+                            io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(auditRecord?.takeIf { it.active }) {
+                                vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
+                            }
+                        }
+                        }
                     }
+                }
+                if (auditMode) item(key = "audit-manual-ssid") {
+                    TextButton("手动输入网络名称", vm.securityAudit::manualNetwork, Modifier.fillMaxWidth())
                 }
             }
             else -> Box(modifier = Modifier.fillMaxSize())
@@ -562,6 +607,8 @@ private fun WifiGroupCard(
     group: MergedWifiGroup,
     handshakeDeviceCount: Int,
     discoveredHiddenNameCount: Int,
+    auditMode: Boolean = false,
+    auditRunning: Boolean = false,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onConnect: () -> Unit,
@@ -687,6 +734,8 @@ private fun WifiGroupCard(
             WifiGroupCardActions(
                 group = group,
                 isConnected = isConnected,
+                auditMode = auditMode,
+                auditRunning = auditRunning,
                 buttonContainerColor = MiuixTheme.colorScheme.primary.takeIf { isConnected },
                 buttonContentColor = MiuixTheme.colorScheme.onPrimary.takeIf { isConnected },
                 onConnect = onConnect,

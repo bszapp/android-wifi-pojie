@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.contract.log
 
 import android.os.ParcelFileDescriptor
+import io.github.bszapp.wifitoolbox.contract.PipeTransport
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -17,32 +18,20 @@ object ServiceLogTransport {
             "Service 日志条数过多：${batch.entries.size}"
         }
 
-        val pipe = ParcelFileDescriptor.createReliablePipe()
-        val readSide = pipe[0]
-        val writeSide = pipe[1]
-
-        writerExecutor.execute {
-            try {
-                DataOutputStream(
-                    BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(writeSide)),
-                ).use { output ->
-                    output.writeInt(MAGIC)
-                    output.writeLong(batch.oldestAvailableId)
-                    output.writeLong(batch.latestId)
-                    output.writeInt(batch.entries.size)
-                    batch.entries.forEach { entry ->
-                        output.writeLong(entry.id)
-                        output.writeText(entry.tag)
-                        output.writeText(entry.rawLine)
-                    }
-                    output.flush()
+        return PipeTransport.open(writerExecutor, "Service 日志") { stream ->
+            DataOutputStream(BufferedOutputStream(stream)).use { output ->
+                output.writeInt(MAGIC)
+                output.writeLong(batch.oldestAvailableId)
+                output.writeLong(batch.latestId)
+                output.writeInt(batch.entries.size)
+                batch.entries.forEach { entry ->
+                    output.writeLong(entry.id)
+                    output.writeText(entry.tag)
+                    output.writeText(entry.rawLine)
                 }
-            } catch (_: Throwable) {
-                runCatching { writeSide.close() }
+                output.flush()
             }
         }
-
-        return readSide
     }
 
     fun decode(descriptor: ParcelFileDescriptor): ServiceLogBatch =
@@ -65,6 +54,7 @@ object ServiceLogTransport {
                     rawLine = input.readText(),
                 )
             }
+            require(input.read() == -1) { "Service 日志包含多余数据" }
 
             ServiceLogBatch(
                 oldestAvailableId = oldestAvailableId,

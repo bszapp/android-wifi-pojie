@@ -1,7 +1,6 @@
 package io.github.bszapp.wifitoolbox.service.wifilog
 
-import io.github.bszapp.wifitoolbox.contract.log.ParsedServiceLogLine
-import io.github.bszapp.wifitoolbox.contract.log.ServiceLogEntry
+import io.github.bszapp.wifitoolbox.service.CapturedLogEntry
 import io.github.bszapp.wifitoolbox.service.LogcatRecorder
 import java.io.ByteArrayOutputStream
 
@@ -139,12 +138,13 @@ internal sealed interface WifiLogEvent {
  * 的会话彼此隔离；订阅者收到的事件已经带有该 pid 当前正在处理的 SSID。
  */
 internal class WifiLogAnalyzer(
-    recorder: LogcatRecorder,
+    private val recorder: LogcatRecorder,
 ) : AutoCloseable {
     private val lock = Any()
-    private val sessions = mutableMapOf<Long, String>()
+    private val sessions = mutableMapOf<Long, Session>()
     private val listeners = linkedSetOf<(WifiLogEvent) -> Unit>()
-    private val recorderSubscription = recorder.subscribeEntries(::onLogEntry)
+    private val attemptListeners = linkedSetOf<(WifiLogObservation) -> Unit>()
+    private val recorderSubscription = recorder.subscribeCapturedEntries(::onLogEntry)
 
     fun subscribe(listener: (WifiLogEvent) -> Unit): AutoCloseable {
         synchronized(lock) { listeners += listener }
@@ -153,44 +153,42 @@ internal class WifiLogAnalyzer(
         }
     }
 
+    fun subscribeAttempt(listener: (WifiLogObservation) -> Unit): AutoCloseable {
+        synchronized(lock) { attemptListeners += listener }
+        return AutoCloseable { synchronized(lock) { attemptListeners -= listener } }
+    }
+
+    fun latestId(): Long = recorder.latestId()
+
     override fun close() {
         recorderSubscription.close()
         synchronized(lock) {
             sessions.clear()
             listeners.clear()
+            attemptListeners.clear()
         }
     }
 
-    private fun onLogEntry(entry: ServiceLogEntry) {
-        if (entry.tag != WPA_TAG) return
-        val parsed = ParsedServiceLogLine.parse(entry.rawLine) ?: return
-        if (parsed.tag != WPA_TAG) return
-        val message = parsed.message
-
+    private fun onLogEntry(record: CapturedLogEntry) {
+        if (record.tag != WPA_TAG) return
+        val entry = record.entry
+        val message = record.message
         val starting = ASSOCIATION_STARTED_PATTERN.find(message)
-        if (starting != null) {
-            val ssid = decodeHexSsid(starting.groupValues[1])
-            val event = WifiLogEvent.AssociationStarted(
-                ssid = ssid,
-                rawLine = entry.rawLine,
-            )
-            val targets = synchronized(lock) {
-                sessions[parsed.pid] = ssid
-                listeners.toList()
+        val session = synchronized(lock) {
+            if (starting != null) {
+                Session(decodeHexSsid(starting.groupValues[1]), entry.id, record.timestampMillis)
+                    .also { sessions[record.pid] = it }
+            } else {
+                sessions[record.pid]
             }
-            targets.forEach { listener -> runCatching { listener(event) } }
-            return
-        }
-
-        val ssid = synchronized(lock) { sessions[parsed.pid] } ?: return
-
-        val event = recognize(
-            ssid = ssid,
-            rawLine = entry.rawLine,
-            message = message,
-        ) ?: return
-        val targets = synchronized(lock) { listeners.toList() }
-        targets.forEach { listener -> runCatching { listener(event) } }
+        } ?: return
+        val event = if (starting != null) WifiLogEvent.AssociationStarted(session.ssid, entry.rawLine)
+            else recognize(session.ssid, entry.rawLine, message) ?: return
+        val observation = WifiLogObservation(event, entry.id, record.timestampMillis,
+            record.receivedAtElapsed, session.startId, session.startedAtMillis)
+        val targets = synchronized(lock) { attemptListeners.toList() to listeners.toList() }
+        targets.first.forEach { listener -> runCatching { listener(observation) } }
+        targets.second.forEach { listener -> runCatching { listener(event) } }
     }
 
     private fun recognize(
@@ -266,4 +264,16 @@ internal class WifiLogAnalyzer(
         val STATUS_CODE_PATTERN = Regex("status_code=([^\\s]+)")
 
     }
+
+    private data class Session(val ssid: String, val startId: Long, val startedAtMillis: Long)
 }
+
+/** 轮次过滤所需的内部边界；PID 只保留在分析器的会话表中。 */
+internal data class WifiLogObservation(
+    val event: WifiLogEvent,
+    val logId: Long,
+    val timestampMillis: Long,
+    val receivedAtElapsed: Long,
+    val associationStartId: Long,
+    val associationStartedAtMillis: Long,
+)

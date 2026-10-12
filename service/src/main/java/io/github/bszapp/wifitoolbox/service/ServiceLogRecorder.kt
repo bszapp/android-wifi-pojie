@@ -2,6 +2,7 @@ package io.github.bszapp.wifitoolbox.service
 
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogBatch
 import io.github.bszapp.wifitoolbox.contract.log.ServiceLogEntry
@@ -29,6 +30,7 @@ class LogcatRecorder(
     private val lock = Any()
     private val entries = ArrayList<ServiceLogEntry>()
     private val entryListeners = linkedSetOf<(ServiceLogEntry) -> Unit>()
+    private val capturedEntryListeners = linkedSetOf<(CapturedLogEntry) -> Unit>()
 
     private var nextId = 0L
     private var logcatProcess: java.lang.Process? = null
@@ -126,6 +128,12 @@ class LogcatRecorder(
         }
     }
 
+    /** 保留 logcat 原始时间和字段，避免内部判定再解析展示文本并丢失毫秒。 */
+    internal fun subscribeCapturedEntries(listener: (CapturedLogEntry) -> Unit): AutoCloseable {
+        synchronized(lock) { capturedEntryListeners += listener }
+        return AutoCloseable { synchronized(lock) { capturedEntryListeners -= listener } }
+    }
+
     fun latestId(): Long = synchronized(lock) { nextId - 1L }
 
     fun visibleRange(): Pair<Long, Long> = synchronized(lock) { visibleRangeLocked() }
@@ -162,6 +170,7 @@ class LogcatRecorder(
             stopping = true
             onVisibleRangeChanged = null
             entryListeners.clear()
+            capturedEntryListeners.clear()
             logcatProcess.also { logcatProcess = null }
         }
 
@@ -267,6 +276,10 @@ class LogcatRecorder(
                 if (header != null) {
                     commitPending()
                     pendingHeader = header
+                } else if (line.isEmpty()) {
+                    // long 格式以空行结束当前记录，立即发布，避免等待下一条日志。
+                    commitPending()
+                    pendingHeader = null
                 } else if (!line.startsWith(LOGCAT_BUFFER_MARKER_PREFIX)) {
                     pendingHeader?.let { pendingLines += line }
                 }
@@ -446,6 +459,7 @@ class LogcatRecorder(
     }
 
     private fun append(record: LogcatRecord) {
+        val receivedAt = SystemClock.elapsedRealtime()
         val rawLine = formatThreadtimeRecord(record)
         val expanded = expandElidedStackFrames(rawLine.lineSequence().toList())
         val notification = synchronized(lock) {
@@ -454,12 +468,18 @@ class LogcatRecorder(
                 entry = entry,
                 listeners = entryListeners.toList(),
                 visibleRange = visibleRangeNotificationLocked(),
+                captured = CapturedLogEntry(entry, record.timestampMillis, receivedAt,
+                    record.pid, record.tag, record.message),
+                capturedListeners = capturedEntryListeners.toList(),
             )
         }
         notifyEntry(notification)
     }
 
     private fun notifyEntry(notification: EntryNotification) {
+        notification.captured?.let { captured ->
+            notification.capturedListeners.forEach { listener -> runCatching { listener(captured) } }
+        }
         notification.listeners.forEach { listener ->
             runCatching { listener(notification.entry) }
         }
@@ -762,6 +782,8 @@ class LogcatRecorder(
             Long,
             Long,
         >,
+        val captured: CapturedLogEntry? = null,
+        val capturedListeners: List<(CapturedLogEntry) -> Unit> = emptyList(),
     )
 
     private data class StackTraceContext(
@@ -836,6 +858,16 @@ class LogcatRecorder(
         const val PROTO_MESSAGE_FIELD = 8
     }
 }
+
+/** 仅在日志采集与分析之间传递；不进入 Binder 日志数据结构。 */
+internal data class CapturedLogEntry(
+    val entry: ServiceLogEntry,
+    val timestampMillis: Long,
+    val receivedAtElapsed: Long,
+    val pid: Long,
+    val tag: String,
+    val message: String,
+)
 
 /** 两种服务侧日志来源共用同一组进程级实例，入口和 Binder 服务均可幂等启动。 */
 internal object ServiceLogRecorders {

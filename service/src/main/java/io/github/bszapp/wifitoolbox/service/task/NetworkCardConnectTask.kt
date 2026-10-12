@@ -17,6 +17,8 @@ internal class NetworkCardConnectTask(
     private val terminalManager: TerminalManager,
     private val deviceName: String,
 ) : ServiceTask {
+    var attemptResult: ConnectionAttemptResult = ConnectionAttemptResult.ERROR
+        private set
     override fun run(context: TaskContext) {
         val events = LinkedBlockingQueue<Event>()
         val id = terminalManager.createChrootTerminal(
@@ -66,6 +68,9 @@ internal class NetworkCardConnectTask(
                     is Event.Exit -> {
                         exited = true
                         context.log("网卡脚本已退出：exitCode=${event.code}")
+                        if (event.code != 0 && attemptResult == ConnectionAttemptResult.SUCCESS) {
+                            attemptResult = ConnectionAttemptResult.ERROR
+                        }
                         return
                     }
                     is Event.Line -> logLine(context, event.text)
@@ -104,6 +109,25 @@ internal class NetworkCardConnectTask(
     private fun logLine(context: TaskContext, line: String) {
         // 第一条准备提示可能紧接 shell 提示；其他脚本行按日志级别筛选。
         val text = if (line.endsWith(SCRIPT_READY)) SCRIPT_READY else line.trimStart()
+        when {
+            text == "[+] Diagnostic finished: success=true, cleanup completed=true" ->
+                attemptResult = ConnectionAttemptResult.SUCCESS
+            text.startsWith("[-] Association rejected") -> attemptResult = ConnectionAttemptResult.REJECTED
+            text.startsWith("[-] Cleanup failed") -> attemptResult = ConnectionAttemptResult.ERROR
+            text.startsWith("[-] Connectivity test failed:") -> {
+                attemptResult = when {
+                    text.contains("Password error") -> ConnectionAttemptResult.FAILED
+                    text.contains("Handshake timeout measured from the first M1") -> ConnectionAttemptResult.FAILED
+                    text.contains("TimeoutError") -> ConnectionAttemptResult.TIMEOUT
+                    text.contains("Handshake attempt limit exceeded") || text.contains("Password lines exhausted") -> ConnectionAttemptResult.FAILED
+                    text.contains("rejected access") || text.contains("AP rejected association") -> ConnectionAttemptResult.REJECTED
+                    text.contains("Driver reported association timeout") -> ConnectionAttemptResult.TIMEOUT
+                    text.contains("Association terminated") -> ConnectionAttemptResult.REJECTED
+                    attemptResult == ConnectionAttemptResult.REJECTED -> ConnectionAttemptResult.REJECTED
+                    else -> ConnectionAttemptResult.ERROR
+                }
+            }
+        }
         if (TASK_LOG_PREFIXES.none { text.startsWith(it) }) return
         context.log(text)
         val stage = when (text.trimEnd()) {

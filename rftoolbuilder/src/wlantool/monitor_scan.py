@@ -132,6 +132,19 @@ def set_frequency(scanner, frequency, channel_state, capture=False):
                    centerFreq0=center0, centerFreq1=center1)
 
 
+def try_hopping_frequency(scanner, frequency, channel_state):
+    try:
+        set_frequency(scanner, frequency, channel_state, capture=True)
+        return True
+    except Exception as error:
+        # 单次调频失败只跳过本信道，保留录制和调频连接供后续信道使用。
+        diagnostic("captureChannelRejected", frequencyMhz=frequency,
+                   lastAcknowledgedFrequencyMhz=channel_state.frequency_mhz,
+                   errorType=type(error).__name__, errno=getattr(error, "errno", None),
+                   error=str(error))
+        return False
+
+
 def run(interface, duration, channel_state, request_id=None):
     frequencies, reported_frequency = supported_frequencies(interface)
     # 现场频率和最后一次 ACK 仅用于诊断。恢复目标由服务在采集结束后下发。
@@ -306,11 +319,15 @@ if __name__ == "__main__":
                                     hop_dwells = updated_dwells
                                     if hop_scanner is None:
                                         hop_scanner = managed.Nl80211Scanner(args.interface)
-                                    # 第一次跳频成功后才确认恢复，后续继续同一个循环。
-                                    frequency = frequencies[hop_index]
-                                    set_frequency(hop_scanner, frequency, channel_state, capture=True)
-                                    hop_index = (hop_index + 1) % len(frequencies)
-                                    next_hop = time.monotonic() + hop_dwells[frequency]
+                                    # 某个信道成功后才确认恢复，单个失败信道继续跳过。
+                                    for _ in frequencies:
+                                        frequency = frequencies[hop_index]
+                                        hop_index = (hop_index + 1) % len(frequencies)
+                                        if try_hopping_frequency(hop_scanner, frequency, channel_state):
+                                            next_hop = time.monotonic() + hop_dwells[frequency]
+                                            break
+                                    else:
+                                        raise RuntimeError("驱动拒绝所有跳频录制信道")
                                     hopping = True
                                 awaiting_resume = False
                                 diagnostic("resumeAck", requestId=request_id, capturePlan=plan,
@@ -330,16 +347,10 @@ if __name__ == "__main__":
                                 if scanner is not None:
                                     scanner.close()
                 if hopping and time.monotonic() >= next_hop:
-                    try:
-                        frequency = frequencies[hop_index]
-                        set_frequency(hop_scanner, frequency, channel_state, capture=True)
-                        hop_index = (hop_index + 1) % len(frequencies)
-                        next_hop = time.monotonic() + hop_dwells[frequency]
-                    except Exception as error:
-                        hopping = False
-                        hop_scanner.close()
-                        hop_scanner = None
-                        emit({"action": "hopping_failed", "message": str(error)})
+                    frequency = frequencies[hop_index]
+                    try_hopping_frequency(hop_scanner, frequency, channel_state)
+                    hop_index = (hop_index + 1) % len(frequencies)
+                    next_hop = time.monotonic() + hop_dwells[frequency]
         finally:
             if hop_scanner is not None:
                 hop_scanner.close()

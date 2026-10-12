@@ -116,4 +116,8 @@ interface IMainService {
 
     // 追加在末尾，保持已有事务编号；仅在确认服务版本不旧后调用。
     long getContainerVersionCode();
+    // 字典只走流，事务编号追加；网络快照按最多 100 项分页。
+    long runSecurityAudit(in TaskStartRequest request, in ParcelFileDescriptor dictionary);
+    ParcelFileDescriptor getSecurityAuditNetworks(long taskId, int fromIndex);
+    long[] getSecurityAuditTaskIds(int offset);
 }

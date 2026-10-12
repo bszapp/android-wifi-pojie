@@ -5,6 +5,7 @@ package io.github.bszapp.wifitoolbox.contract.wifilist
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.Parcelable
+import io.github.bszapp.wifitoolbox.contract.PipeTransport
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -16,7 +17,7 @@ import java.util.zip.CRC32
  * 使用稳定快照和固定上限分片运输 Wi-Fi 数据。
  *
  * Binder 回调只通知 generation、分片数和完整快照长度。App 随后按分片序号通过
- * reliable pipe 拉取正文，每次分片传输连同片头最多 [MAX_TRANSFER_BYTES] 字节。完整
+ * 普通管道拉取正文，每次分片传输连同片头最多 [MAX_TRANSFER_BYTES] 字节。完整
  * 快照在全部分片通过类型、generation、序号、长度和 CRC32 校验后才会反序列化并发布。
  */
 object WifiParcelTransport {
@@ -157,33 +158,21 @@ object WifiParcelTransport {
         val offset = chunkIndex * MAX_CHUNK_BYTES
         val length = minOf(MAX_CHUNK_BYTES, totalBytes - offset)
         val chunk = payload.copyOfRange(offset, offset + length)
-        val pipe = ParcelFileDescriptor.createReliablePipe()
-        val readSide = pipe[0]
-        val writeSide = pipe[1]
-
-        writerExecutor.execute {
-            try {
-                DataOutputStream(
-                    BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(writeSide)),
-                ).use { output ->
-                    output.writeInt(MAGIC)
-                    output.writeInt(VERSION)
-                    output.writeInt(type)
-                    output.writeLong(generation)
-                    output.writeInt(chunkIndex)
-                    output.writeInt(chunkCount)
-                    output.writeInt(totalBytes)
-                    output.writeInt(length)
-                    output.writeLong(crc32(chunk))
-                    output.write(chunk)
-                    output.flush()
-                }
-            } catch (_: Throwable) {
-                runCatching { writeSide.closeWithError("Wi-Fi IPC 分片写入失败") }
+        return PipeTransport.open(writerExecutor, "Wi-Fi 分片 generation=$generation index=$chunkIndex") { stream ->
+            DataOutputStream(BufferedOutputStream(stream)).use { output ->
+                output.writeInt(MAGIC)
+                output.writeInt(VERSION)
+                output.writeInt(type)
+                output.writeLong(generation)
+                output.writeInt(chunkIndex)
+                output.writeInt(chunkCount)
+                output.writeInt(totalBytes)
+                output.writeInt(length)
+                output.writeLong(crc32(chunk))
+                output.write(chunk)
+                output.flush()
             }
         }
-
-        return readSide
     }
 
     private fun decodeChunk(

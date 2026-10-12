@@ -147,6 +147,7 @@ open class MainService(
 
     private val serviceNotifications: ServiceNotificationManager = ServiceNotificationManager(
         hashcatTaskCountProvider = { hashcatManager.activeCount() },
+        auditTextProvider = taskManager::auditNotificationText,
         modeProvider = { wifiListController.getModeState().mode },
         taskProvider = {
             taskManager.currentTaskId().takeIf { it != TaskManager.NO_TASK_ID }
@@ -586,6 +587,16 @@ open class MainService(
     override fun startTask(request: TaskStartRequest): Long = communication.callFromApp {
         taskManager.start(request)
     }
+
+    override fun runSecurityAudit(request: TaskStartRequest, dictionary: ParcelFileDescriptor): Long =
+        communication.callFromApp { dictionary.use { taskManager.runSecurityAudit(request, it) } }
+
+    override fun getSecurityAuditNetworks(taskId: Long, fromIndex: Int): ParcelFileDescriptor =
+        communication.callFromApp {
+            io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(taskManager.auditNetworkPage(taskId, fromIndex))
+        }
+
+    override fun getSecurityAuditTaskIds(offset: Int): LongArray = communication.callFromApp { taskManager.auditTaskIds(offset) }
 
     override fun stopTask(taskId: Long): Boolean = communication.callFromApp {
         taskManager.stop(taskId)

@@ -319,7 +319,8 @@ def iter_dot11_elements(packet):
 def ssid_element(packet):
     for element_id, info in iter_dot11_elements(packet):
         if element_id == 0:
-            return info
+            # 超长 SSID 不进入名称、握手或解密；空 SSID 留给隐藏网络判断。
+            return info if len(info) <= 32 else None
     return None
 
 

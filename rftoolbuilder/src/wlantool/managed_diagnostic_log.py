@@ -39,7 +39,7 @@ HEADLINES = {
     'otherEapol': ('i', 'WPA: Received a non-key EAPOL packet'),
     'tryingPsk': ('*', "Trying PSK '{password}'…"),
     'txEapolSubmitted': ('*', 'WPA: Sending EAPOL-Key {step}/4 to {bssid}'),
-    'handshakeCount': ('i', 'M2 transmission count: {message}'),
+    'handshakeCount': ('*', 'M2 transmission count: {message}'),
     'm3Verified': ('+', 'WPA: Message 3 MIC verified using password line {passwordLine}'),
     'm3KeyDataDecrypted': ('+', 'WPA: Decrypted message 3 Key Data ({bytes} bytes)'),
     'm3Rsn': ('P', 'WPA: RSN information from message 3'),

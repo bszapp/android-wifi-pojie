@@ -44,10 +44,12 @@ def system_supplicants():
 
 
 def guard_main(request):
-    timeout = request['timeoutMillis'] / 1000
-    if timeout <= 0 or not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+    timeout_millis = request.get('timeoutMillis')
+    if timeout_millis is not None and timeout_millis <= 0:
+        raise ValueError('timeoutMillis must be positive or null for an owner-controlled session')
+    if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
         raise RuntimeError('pidfd support is required to safely pause and restore system wpa_supplicant')
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout_millis is None else time.monotonic() + timeout_millis / 1000
     stopping = False
     targets = {}
     input_buffer = b''
@@ -103,7 +105,9 @@ def guard_main(request):
                      message='The process was already paused; preserve its original state')
                 continue
             signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
-            pause_deadline = min(deadline, time.monotonic() + 1)
+            pause_deadline = time.monotonic() + 1
+            if deadline is not None:
+                pause_deadline = min(deadline, pause_deadline)
             while True:
                 if select.select([descriptor], [], [], 0)[0]:
                     emit('supplicantExited', pid=pid)
@@ -126,13 +130,14 @@ def guard_main(request):
         next_scan = time.monotonic() + .25
         while not stopping:
             now = time.monotonic()
-            if now >= deadline:
+            if deadline is not None and now >= deadline:
                 emit('supplicantGuardTimeout', message='Guard timed out; restoring system processes')
                 break
             if now >= next_scan:
                 pause_new_processes()
                 next_scan = time.monotonic() + .25
-            if not select.select([sys.stdin.buffer], [], [], min(.1, max(0, deadline-now)))[0]:
+            wait_timeout = .1 if deadline is None else min(.1, max(0, deadline-now))
+            if not select.select([sys.stdin.buffer], [], [], wait_timeout)[0]:
                 continue
             data = os.read(sys.stdin.fileno(), 4096)
             if not data:
@@ -216,6 +221,8 @@ class SupplicantPauseGuard:
                 raise RuntimeError('System supplicant pause guard could not start')
 
     def ensure_active(self):
+        if self.process:
+            self.receive(0)
         if self.process and self.ready and self.process.poll() is not None:
             self.receive(0)
             raise RuntimeError('System supplicant guard exited; aborting interface test')

@@ -222,21 +222,20 @@ internal class NormalWifiScanner(
         var requestId = 0L
         var acceptedAt: Long? = null
         var resultsReceived = false
-        var primaryStatus: Int? = null
         var snapshot = systemSnapshot.let {
             if (it is SystemScanData.Enabled) it.copy(isScanning = false) else it
         }
-        val monitor = eventMonitor(session)
         fun publish(next: SystemScanData?) {
             session.checkCurrent()
             snapshot = next
             systemSnapshot = next
             if (session.ready) session.publish(WifiState.System(next))
         }
-        fun readEnabled(scanning: Boolean) {
-            val previous = (snapshot as? SystemScanData.Enabled)?.connection
+        fun readEnabled(
+            scanning: Boolean,
+            connection: WifiInfo? = (snapshot as? SystemScanData.Enabled)?.connection,
+        ) {
             val results = api.getScanResults().filter { !it.BSSID.isNullOrBlank() }
-            val connection = readConnection(session, primaryStatus, previous)
             publish(SystemScanData.Enabled(results, scanning, connection))
             session.notifySavedNetworks()
         }
@@ -254,14 +253,16 @@ internal class NormalWifiScanner(
                 finishRequest()
                 publish(SystemScanData.Disabled)
                 session.notifySavedNetworks()
-            } else readEnabled(acceptedAt != null)
+            } else readEnabled(
+                acceptedAt != null,
+                readConnection(session, (snapshot as? SystemScanData.Enabled)?.connection),
+            )
         }
         val ticker = launch {
             while (true) { delay(250); session.send(Event.Tick) }
         }
         var nextSwitchRead = SystemClock.elapsedRealtime() + 1_000
         try {
-            monitor.start()
             val initialData = try { refresh(); snapshot }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Throwable) {
@@ -316,22 +317,19 @@ internal class NormalWifiScanner(
                             (snapshot as? SystemScanData.Enabled)?.let { publish(it.copy(isScanning = false)) }
                             throw event.error
                         }
-                        is Event.Network -> {
-                            if (event.role == 1) {
-                                primaryStatus = event.status
-                                (snapshot as? SystemScanData.Enabled)?.let {
-                                    publish(it.copy(connection = readConnection(session, primaryStatus, it.connection)))
-                                }
-                            }
-                        }
-                        Event.RefreshSwitch -> refresh()
                         Event.Tick -> {
                             val now = SystemClock.elapsedRealtime()
                             if (now >= nextSwitchRead) {
                                 nextSwitchRead = now + 1_000
                                 session.checkCurrent()
                                 val enabled = api.isWifiEnabled()
-                                if (snapshot == null || enabled != (snapshot is SystemScanData.Enabled)) refresh()
+                                if (snapshot == null || enabled != (snapshot is SystemScanData.Enabled)) {
+                                    refresh()
+                                } else {
+                                    (snapshot as? SystemScanData.Enabled)?.let {
+                                        publish(it.copy(connection = readConnection(session, it.connection)))
+                                    }
+                                }
                             }
                             if (acceptedAt != null) {
                                 readEnabled(true)
@@ -351,7 +349,6 @@ internal class NormalWifiScanner(
             withContext(NonCancellable) {
                 ticker.cancel(); ticker.join()
                 var failure: Throwable? = null
-                runCatching { monitor.stop() }.onFailure { failure = it }
                 runCatching { finishRequest() }.onFailure { error ->
                     if (failure == null) failure = error else failure!!.addSuppressed(error)
                 }
@@ -365,8 +362,6 @@ internal class NormalWifiScanner(
 
     private suspend fun runUnderlying(session: Session) = coroutineScope {
         var snapshot = underlyingSnapshot?.copy(isScanning = false)
-        var primaryStatus: Int? = null
-        val monitor = eventMonitor(session)
         fun publish(next: UnderlyingScanData?) {
             session.checkCurrent()
             snapshot = next
@@ -374,11 +369,13 @@ internal class NormalWifiScanner(
             session.publish(WifiState.Underlying(next))
         }
         hybridScanner.setUnexpectedExitHandler { code -> session.send(Event.Exited(code)) }
+        val ticker = launch {
+            while (true) { delay(1_000); session.send(Event.Tick) }
+        }
         try {
             try { withTimeout(20_000) { hybridScanner.start().awaitCompletion() } }
             catch (error: TimeoutCancellationException) { throw IOException("等待底层扫描终端就绪超时", error) }
             session.checkCurrent()
-            monitor.start()
             //TODO:这里需要给scan.py添加仅读取功能，我不希望首次扫描。
             try { withTimeout(10_000) {
                 hybridScanner.readPreviousResults { session.send(Event.Payload(it)) }.awaitCompletion()
@@ -417,7 +414,7 @@ internal class NormalWifiScanner(
                         if (data.getString("type") == "enabled") {
                             publish(UnderlyingScanData(
                                 parseUnderlyingResults(data), data.optBoolean("scanning"),
-                                readConnection(session, primaryStatus, snapshot?.connection),
+                                snapshot?.connection,
                             ))
                             session.notifySavedNetworks()
                         } else {
@@ -432,9 +429,8 @@ internal class NormalWifiScanner(
                     }
                     is Event.Failed -> throw event.error
                     is Event.Exited -> throw IOException("底层扫描终端异常退出，退出码 ${event.code}")
-                    is Event.Network -> if (event.role == 1) {
-                        primaryStatus = event.status
-                        snapshot?.let { publish(it.copy(connection = readConnection(session, primaryStatus, it.connection))) }
+                    Event.Tick -> {
+                        snapshot?.let { publish(it.copy(connection = readConnection(session, it.connection))) }
                     }
                     else -> Unit
                 }
@@ -442,8 +438,8 @@ internal class NormalWifiScanner(
         } finally {
             session.ready = false
             withContext(NonCancellable) {
+                ticker.cancel(); ticker.join()
                 var failure: Throwable? = null
-                runCatching { monitor.stop() }.onFailure { failure = it }
                 hybridScanner.setUnexpectedExitHandler(null)
                 runCatching { hybridScanner.stop() }.onFailure { error ->
                     if (failure == null) failure = error else failure!!.addSuppressed(error)
@@ -456,21 +452,13 @@ internal class NormalWifiScanner(
         }
     }
 
-    private fun eventMonitor(session: Session) = ServiceWifiBroadcastLogger(
-        // 仅系统作用域会响应开关唤醒；底层作用域只接收既有的连接信息变化。
-        onWifiStateChanged = { if (session.selection.source == WifiListDataSource.SYSTEM) session.send(Event.RefreshSwitch) },
-        onWifiNetworkStateChanged = { role, status -> session.send(Event.Network(role, status)) },
-        onError = { operation, error -> if (session.isCurrent()) onError(operation, error) },
-    )
-
     private fun markCleanupFailed(error: Throwable) {
         cleanupFailed = true
         cleanupFailure.value = error
     }
 
-    private fun readConnection(session: Session, status: Int?, previous: WifiInfo?): WifiInfo? {
+    private fun readConnection(session: Session, previous: WifiInfo?): WifiInfo? {
         session.checkCurrent()
-        if (status != null && status != 6) return null
         return try {
             androidApi().getConnectionInfo().takeIf {
                 it.networkId >= 0 && it.supplicantState == SupplicantState.COMPLETED &&
@@ -530,13 +518,11 @@ internal class NormalWifiScanner(
         data class Accepted(val id: Long) : Event
         data class Results(val id: Long) : Event
         data class Rejected(val id: Long, val error: Throwable) : Event
-        data class Network(val role: Int, val status: Int) : Event
         data class Payload(val value: JSONObject) : Event
         data class Finished(val code: Int) : Event
         data class Exited(val code: Int) : Event
         data class Failed(val error: Throwable) : Event
         data object Tick : Event
-        data object RefreshSwitch : Event
     }
 }
 

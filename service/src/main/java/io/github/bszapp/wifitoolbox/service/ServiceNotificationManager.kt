@@ -29,12 +29,13 @@ import java.util.concurrent.TimeUnit
 internal class ServiceNotificationManager(
     private val modeProvider: () -> WifiMode,
     private val taskProvider: () -> TaskSnapshot?,
+    private val auditTextProvider: () -> String? = { null },
     private val hashcatTaskCountProvider: () -> Int = { 0 },
     private val appUserIdProvider: () -> Int,
     private val onError: (String, Throwable) -> Unit,
 ) : AutoCloseable {
     private val lock = Any()
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
+    private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "service-notification").apply { isDaemon = true }
     }
     private var started = false
@@ -48,6 +49,7 @@ internal class ServiceNotificationManager(
         if (closed || started) return
         started = true
         refresh()
+        executor.scheduleWithFixedDelay({ refresh() }, 1, 1, TimeUnit.SECONDS)
     }
 
     /** 合并高频模式/任务进度回调，在独立线程调用 Binder，保持服务自身调用身份。 */
@@ -65,12 +67,14 @@ internal class ServiceNotificationManager(
                 } else null
                 val regularTaskText = taskProvider()
                     ?.takeIf { it.state == TaskExecutionState.RUNNING }
-                    ?.let { "正在运行${taskName(it)}任务" }
+                    ?.let { auditTextProvider() ?: "正在运行${taskName(it)}任务" }
                 val hashcatCount = hashcatTaskCountProvider()
                 val taskText = listOfNotNull(regularTaskText,
                     if (hashcatCount > 0) "正在运行${hashcatCount}个 WPA Hashcat 任务" else null,
                 ).takeIf { it.isNotEmpty() }?.joinToString("；")
-                val api = backend ?: NotificationBackend(appUserIdProvider()).also { backend = it }
+                val api = backend ?: NotificationBackend(appUserIdProvider(), {
+                    taskProvider()?.request?.payload is TaskRequestPayload.SecurityAudit
+                }).also { backend = it }
                 update(api, MODE_NOTIFICATION_ID, modeText)
                 update(api, TASK_NOTIFICATION_ID, taskText)
                 lastError = null
@@ -116,6 +120,7 @@ internal class ServiceNotificationManager(
     private fun taskName(task: TaskSnapshot): String = when (val payload = task.request.payload) {
         TaskRequestPayload.UsbMonitor -> "电脑控制"
         is TaskRequestPayload.WpsPbc -> "WPS-PBC"
+        is TaskRequestPayload.SecurityAudit -> "网络安全测试"
         is TaskRequestPayload.ConnectWifi -> {
             val input = payload.request.input
             when {
@@ -126,7 +131,7 @@ internal class ServiceNotificationManager(
         }
     }
 
-    private class NotificationBackend(private val appUserId: Int) {
+    private class NotificationBackend(private val appUserId: Int, private val isAudit: () -> Boolean) {
         private val uid = Process.myUid()
         private val userId = uid / PER_USER_RANGE
         private val shellUid = userId * PER_USER_RANGE + 2000
@@ -136,7 +141,6 @@ internal class ServiceNotificationManager(
         private var exemptionOp: Int? = null
         private var originalExemptionMode: Int? = null
         private var ready = false
-        private val contentIntent: PendingIntent by lazy { createOpenAppIntent() }
 
         fun post(id: Int, text: String) {
             prepare()
@@ -214,6 +218,7 @@ internal class ServiceNotificationManager(
                 .addCategory(Intent.CATEGORY_LAUNCHER)
                 .setComponent(ComponentName(APP_PACKAGE, "$APP_PACKAGE.MainActivity"))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                .putExtra("open_security_audit", isAudit())
             val api = if (Build.VERSION.SDK_INT >= 26) {
                 SystemApi("activity", "android.app.IActivityManager")
             } else {
@@ -263,7 +268,7 @@ internal class ServiceNotificationManager(
                 Notification.FLAG_ONLY_ALERT_ONCE
             // FLAG_NO_DISMISS 由 NMS 根据 AppOps 豁免附加，不自行伪造该标记。
             notification.category = Notification.CATEGORY_SERVICE
-            notification.contentIntent = contentIntent
+            notification.contentIntent = createOpenAppIntent()
             notification.extras = Bundle().apply {
                 putCharSequence(Notification.EXTRA_TITLE, TITLE)
                 putCharSequence(Notification.EXTRA_TEXT, text)

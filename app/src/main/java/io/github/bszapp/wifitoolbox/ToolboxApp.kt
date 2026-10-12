@@ -196,6 +196,7 @@ class ToolboxApp : Application(), IAppController {
         )
         taskController = TaskController(
             scope = appScope,
+            historyDirectory = File(filesDir, "security_audit_history"),
             reportError = ::publishError,
         )
         hashcatController = io.github.bszapp.wifitoolbox.hashcat.HashcatTaskController(this, appScope, ::publishError)

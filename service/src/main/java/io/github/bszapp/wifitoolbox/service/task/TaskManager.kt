@@ -24,6 +24,8 @@ import io.github.bszapp.wifitoolbox.contract.log.sliceLogRange
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import android.os.ParcelFileDescriptor
+import io.github.bszapp.wifitoolbox.contract.task.*
 
 internal class TaskManager(
     private val androidApiProvider: () -> AndroidApi?,
@@ -58,6 +60,11 @@ internal class TaskManager(
     private var closed = false
 
     fun start(request: TaskStartRequest): Long {
+        require(request.payload !is TaskRequestPayload.SecurityAudit) { "安全测试必须通过字典流接口启动" }
+        return createTask(request)
+    }
+
+    private fun createTask(request: TaskStartRequest, dictionary: Pair<String, List<String>>? = null): Long {
         validate(request)
         val record = synchronized(lock) {
             check(!closed) { "任务管理器已关闭" }
@@ -72,6 +79,7 @@ internal class TaskManager(
                     progress = null,
                 ),
             ).also {
+                dictionary?.let { (key, passwords) -> it.auditDictionaries[key] = passwords }
                 records[taskId] = it
                 currentTaskId = taskId
             }
@@ -80,6 +88,64 @@ internal class TaskManager(
         appendLog(record.snapshot.taskId, "任务已创建：type=${request.payload.javaClass.simpleName}")
         taskExecutor.execute { execute(record.snapshot.taskId) }
         return record.snapshot.taskId
+    }
+
+    /** 字典流读完并校验后，按服务当前任务原子选择新建/追加。 */
+    fun runSecurityAudit(request: TaskStartRequest, fd: ParcelFileDescriptor): Long {
+        val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
+            ?: error("安全测试请求类型不正确")
+        validateAudit(input)
+        require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大" }
+        val passwords = SecurityAuditDictionaryTransport.read(fd)
+        require(passwords.isNotEmpty()) { "字典为空" }
+        return synchronized(lock) {
+            val running = currentTaskId?.let(records::get)
+            if (running != null) {
+                check(running.snapshot.request.payload is TaskRequestPayload.SecurityAudit) { "已有其他任务正在运行" }
+                val key = input.network.dictionaryId
+                running.auditDictionaries[key] = passwords
+                val update = TaskUpdateRequest(TaskUpdatePayload.SecurityAuditUpsert(input.network))
+                val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
+                if (!accepted) {
+                    running.auditDictionaries.remove(key)
+                    error("本批任务已结束，请重新点击运行")
+                }
+                running.snapshot.taskId
+            } else {
+                // start 在同一把可重入锁内分配任务；执行器读取字典前会等待该锁释放。
+                createTask(request, input.network.dictionaryId to passwords)
+            }
+        }
+    }
+
+    fun auditTaskIds(offset: Int): LongArray = synchronized(lock) {
+        require(offset >= 0)
+        records.values.asSequence().filter { it.snapshot.request.payload is TaskRequestPayload.SecurityAudit }
+            .drop(offset).take(100).map { it.snapshot.taskId }.toList().toLongArray()
+    }
+
+    fun auditNetworkPage(taskId: Long, fromIndex: Int): SecurityAuditNetworkPage = synchronized(lock) {
+        val record = records[taskId] ?: error("任务 $taskId 不存在")
+        val networks = record.auditNetworks
+        require(fromIndex in 0..networks.size)
+        var end = minOf(fromIndex + 100, networks.size)
+        while (true) {
+            val page = SecurityAuditNetworkPage(record.auditRevision, fromIndex, networks.size, networks.subList(fromIndex, end).toList())
+            if (PagedDataTransport.bytes(page).size <= PagedDataTransport.MAX_PAGE_BYTES) return@synchronized page
+            check(end > fromIndex + 1) { "单条安全测试记录超过传输预算" }
+            end--
+        }
+        @Suppress("UNREACHABLE_CODE") error("不可达")
+    }
+
+    internal fun updateAuditNetworks(taskId: Long, config: SecurityAuditConfig, networks: List<SecurityAuditNetworkRecord>) {
+        synchronized(lock) {
+            val record = records[taskId] ?: return
+            if (record.auditNetworks == networks && (record.snapshot.progress as? TaskProgress.SecurityAudit)?.config == config) return
+            record.auditNetworks = networks
+            record.auditRevision++
+            updateProgress(taskId, TaskProgress.SecurityAudit(record.auditRevision, networks.count { it.active }, config))
+        }
     }
 
     fun stop(taskId: Long): Boolean {
@@ -247,6 +313,19 @@ internal class TaskManager(
         records[taskId]?.stopRequested != false
     }
 
+    internal fun auditNotificationText(): String? = synchronized(lock) {
+        val record = currentTaskId?.let(records::get) ?: return@synchronized null
+        if (record.snapshot.request.payload !is TaskRequestPayload.SecurityAudit) return@synchronized null
+        val active = record.auditNetworks.filter { it.active }
+        val current = active.firstOrNull { it.state == SecurityAuditNetworkState.CONNECTING }
+        val estimates = active.map { it.averageAttemptMillis?.times(it.total - it.completed) }
+        val remaining = if (estimates.any { it == null } || estimates.isEmpty()) "剩余时间计算中"
+            else "预计剩余 ${estimates.filterNotNull().sum() / 1000} 秒"
+        if (current != null) "网络安全测试：${current.input.ssid} · ${current.message}；$remaining"
+        else if (active.isNotEmpty()) "网络安全测试：等待冷却；$remaining"
+        else "网络安全测试：准备中"
+    }
+
     override fun close() {
         val active = synchronized(lock) {
             if (closed) return
@@ -269,37 +348,14 @@ internal class TaskManager(
             val androidApi = androidApiProvider()
                 ?: throw IllegalStateException("AndroidApi 尚未初始化")
             val task = when (val payload = request.payload) {
+                is TaskRequestPayload.SecurityAudit -> SecurityAuditTask(payload.input,
+                    dictionary = { key -> synchronized(lock) {
+                        records.getValue(taskId).auditDictionaries.remove(key) ?: error("运行字典不存在：$key")
+                    } },
+                    worker = SecurityAuditConnectWorker(androidApi, wifiLogAnalyzer, terminalManager))
                 TaskRequestPayload.UsbMonitor -> UsbMonitorTask(terminalManager, acquireUsbMonitor)
                 is TaskRequestPayload.ConnectWifi -> {
-                    val connectRequest = payload.request
-                    val cardTarget = connectRequest.input.target as? ConnectWifiTarget.NetworkCard
-                    if (cardTarget != null) {
-                        NetworkCardConnectTask(
-                            target = cardTarget,
-                            config = connectRequest.config,
-                            terminalManager = terminalManager,
-                            deviceName = cardTarget.name ?: androidApi.getDeviceName(),
-                        )
-                    } else {
-                    val expectedSsid = when (val target = connectRequest.input.target) {
-                        is ConnectWifiTarget.SavedNetwork -> androidApi.getSavedWifiList()
-                            .firstOrNull { it.networkId == target.networkId }
-                            ?.SSID
-                            ?.removeSurrounding("\"")
-                            ?.let(::decodeHexSsid)
-                            ?: throw IllegalArgumentException(
-                                "找不到 networkId=${target.networkId} 的已保存 Wi-Fi 配置",
-                            )
-                        is ConnectWifiTarget.TemporaryNetwork -> target.ssid
-                        is ConnectWifiTarget.NetworkCard -> error("网卡目标由独立执行器处理")
-                    }
-                    ConnectWifiTask(
-                        request = connectRequest,
-                        expectedSsid = expectedSsid,
-                        androidApi = androidApi,
-                        wifiLogAnalyzer = wifiLogAnalyzer,
-                    )
-                    }
+                    createConnectionTask(payload.request, androidApi)
                 }
                 is TaskRequestPayload.WpsPbc -> WpsPbcTask(
                     input = payload.input,
@@ -347,6 +403,7 @@ internal class TaskManager(
             if (currentTaskId == taskId) currentTaskId = null
             record.activeTask = null
             record.pendingUpdates.clear()
+            record.auditDictionaries.clear()
             record.snapshot
         }
         broadcastManagerChanged(snapshot)
@@ -354,6 +411,7 @@ internal class TaskManager(
 
     private fun validate(request: TaskStartRequest) {
         when (val payload = request.payload) {
+            is TaskRequestPayload.SecurityAudit -> validateAudit(payload.input)
             TaskRequestPayload.UsbMonitor -> {
                 require(android.os.Process.myUid() == 0) { "电脑控制需要 Root 工作模式" }
                 check(usbMonitorTaskReadyProvider()) { "电脑控制只能在监听模式运行" }
@@ -372,7 +430,7 @@ internal class TaskManager(
                         require(target.ssid.isNotBlank()) { "临时连接的 SSID 不能为空" }
                     }
                     is ConnectWifiTarget.NetworkCard -> {
-                        require(android.os.Process.myUid() == 0) { "网卡测试需要 Root 工作模式" }
+                        validateNetworkCardEnvironment()
                         require(target.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
                         require(target.passwords.isNotEmpty() && target.passwords.all {
                             it.toByteArray(Charsets.UTF_8).size in 8..63
@@ -382,13 +440,6 @@ internal class TaskManager(
                             require((mac.substringBefore(':').toInt(16) and 1) == 0 &&
                                 mac != "00:00:00:00:00:00") { "MAC 必须为有效单播地址" }
                         }
-                        check(normalModeTaskReadyProvider()) {
-                            "网卡测试只能在普通模式且容器环境已配置时运行"
-                        }
-                        require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
-                        require(terminalManager.hasRootfsFile("wlantool/managed_connect.py")) {
-                            "容器缺少 managed_connect.py，请更新容器系统"
-                        }
                     }
                 }
                 if (connect.input.type == ConnectWifiTaskType.USE_SAVED_NETWORK) {
@@ -396,13 +447,7 @@ internal class TaskManager(
                         "使用已保存的网络连接必须提供 networkId"
                     }
                 }
-                require(connect.config.timeoutMillis > 0L) { "任务超时时间必须大于 0" }
-                connect.config.failureFlags.handshakeAttemptsExceeded?.let {
-                    require(it.maxHandshakeAttempts > 0) { "最大握手次数必须大于 0" }
-                }
-                connect.config.failureFlags.handshakeTimeout?.let {
-                    require(it.handshakeStepTimeoutMillis > 0L) { "握手超时时间必须大于 0" }
-                }
+                validateConnectionConfig(connect.config)
             }
             is TaskRequestPayload.WpsPbc -> {
                 payload.input.targetMac?.let { mac ->
@@ -416,6 +461,15 @@ internal class TaskManager(
     }
 
     private fun validateUpdate(request: TaskStartRequest, update: TaskUpdateRequest) {
+        if (request.payload is TaskRequestPayload.SecurityAudit) {
+            when (val payload = update.payload) {
+                is TaskUpdatePayload.SecurityAuditConfigure -> validateAuditConfig(payload.config)
+                is TaskUpdatePayload.SecurityAuditRemove -> require(payload.ssid.toByteArray().size in 1..32)
+                is TaskUpdatePayload.SecurityAuditUpsert -> error("字典更新需要使用字典流接口")
+                else -> error("安全测试不支持此更新")
+            }
+            return
+        }
         require(request.payload is TaskRequestPayload.WpsPbc) { "当前任务不支持运行时更新" }
         when (update.payload) {
             is TaskUpdatePayload.WpsPbcContinuousCapture,
@@ -423,7 +477,57 @@ internal class TaskManager(
             is TaskUpdatePayload.WpsPbcUseIncompleteProtocol,
             is TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices,
             -> Unit
+            else -> error("WPS-PBC 不支持此更新")
         }
+    }
+
+    private fun validateAudit(input: SecurityAuditTaskInput) {
+        require(input.network.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
+        java.util.UUID.fromString(input.network.dictionaryId)
+        require(input.network.dictionaryNames.isNotEmpty()) { "未选择字典" }
+        require(input.network.startIndex >= 0) { "字典起始位置非法" }
+        validateAuditConfig(input.config)
+    }
+
+    private fun validateAuditConfig(config: SecurityAuditConfig) {
+        check(normalModeTaskReadyProvider()) { "安全测试只能在普通网卡模式运行" }
+        require(config.retryCount in 0..6 && config.cooldownBaseMillis in 0..8000) { "重试/冷却配置非法" }
+        validateConnectionConfig(config.connection)
+        if (config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) validateNetworkCardEnvironment()
+    }
+
+    private fun validateConnectionConfig(config: ConnectWifiTaskConfig) {
+        require(config.timeoutMillis > 0L) { "任务超时时间必须大于 0" }
+        config.failureFlags.handshakeAttemptsExceeded?.let {
+            require(it.maxHandshakeAttempts > 0) { "最大握手次数必须大于 0" }
+        }
+        config.failureFlags.handshakeTimeout?.let {
+            require(it.handshakeStepTimeoutMillis > 0L) { "握手超时时间必须大于 0" }
+        }
+    }
+
+    private fun validateNetworkCardEnvironment() {
+        require(android.os.Process.myUid() == 0) { "网卡测试需要 Root 工作模式" }
+        check(normalModeTaskReadyProvider()) { "网卡测试只能在普通模式且容器环境已配置时运行" }
+        require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
+        require(terminalManager.hasRootfsFile("wlantool/managed_connect.py")) {
+            "容器缺少 managed_connect.py，请更新容器系统"
+        }
+    }
+
+    private fun createConnectionTask(request: io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskRequest,
+        androidApi: AndroidApi): ServiceTask {
+        val card = request.input.target as? ConnectWifiTarget.NetworkCard
+        if (card != null) return NetworkCardConnectTask(card, request.config, terminalManager,
+            card.name ?: androidApi.getDeviceName())
+        val ssid = when (val target = request.input.target) {
+            is ConnectWifiTarget.SavedNetwork -> androidApi.getSavedWifiList().firstOrNull { it.networkId == target.networkId }
+                ?.SSID?.removeSurrounding("\"")?.let(::decodeHexSsid)
+                ?: error("找不到 networkId=${target.networkId} 的已保存 Wi-Fi 配置")
+            is ConnectWifiTarget.TemporaryNetwork -> target.ssid
+            is ConnectWifiTarget.NetworkCard -> error("不可达")
+        }
+        return ConnectWifiTask(request, ssid, androidApi, wifiLogAnalyzer)
     }
 
     private fun TaskRecord.rangeLocked(): TaskLogRangeSnapshot = TaskLogRangeSnapshot(
@@ -552,6 +656,9 @@ internal class TaskManager(
         var snapshot: TaskSnapshot,
         val logs: ArrayList<TaskLogEntry> = ArrayList(),
         val capturedNetworks: ArrayList<WpsCapturedNetwork> = ArrayList(),
+        val auditDictionaries: MutableMap<String, List<String>> = mutableMapOf(),
+        var auditNetworks: List<SecurityAuditNetworkRecord> = emptyList(),
+        var auditRevision: Long = 0,
         var nextLogId: Long = 0L,
         var logGeneration: Long = 0L,
         var runnerThread: Thread? = null,

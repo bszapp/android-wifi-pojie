@@ -31,6 +31,9 @@ sealed interface Route : NavKey, Parcelable {
     data object WpaHashcat : Route
 
     @Parcelize
+    data object SecurityAuditHistory : Route
+
+    @Parcelize
     data class HashcatRun(val handshake: String) : Route
 
     @Parcelize

@@ -34,6 +34,7 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     val appLogs = controller.appLogs
     val terminals = controller.terminals
     val tasks = controller.tasks
+    val securityAudit = SecurityAuditUiState(app, controller, viewModelScope)
     val containerState = controller.containers.state
 
     val startup = StartupUiState(controller, viewModelScope) { exit, error ->

@@ -3,6 +3,7 @@ package io.github.bszapp.wifitoolbox
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.text.SpannableString
@@ -30,6 +31,8 @@ import androidx.lifecycle.HasDefaultViewModelProviderFactory
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import io.github.bszapp.wifitoolbox.contract.AppControllerProvider
 import io.github.bszapp.wifitoolbox.error.ErrorReport
@@ -51,6 +54,7 @@ class MainActivity : ComponentActivity() {
     private val controller by lazy { AppControllerProvider.get() }
     private var errorReportFile: File? = null
     private var errorReportLogFile: File? = null
+    private var openSecurityAudit by mutableStateOf(false)
     private val exportErrorReport = registerForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri ->
@@ -89,6 +93,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         app.startNormalRuntime()
+        openSecurityAudit = intent.getBooleanExtra("open_security_audit", false)
         enableEdgeToEdge()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
@@ -117,7 +122,11 @@ class MainActivity : ComponentActivity() {
                 if (isRunning && running && sessionOwner != null) {
                     CompositionLocalProvider(LocalViewModelStoreOwner provides sessionOwner) {
                         key(state.connectionId) {
-                            DefaultUI(dictionaryViewModel = dictionaryViewModel)
+                            DefaultUI(dictionaryViewModel = dictionaryViewModel,
+                                openSecurityAudit = openSecurityAudit, onSecurityAuditOpened = {
+                                    openSecurityAudit = false
+                                    intent.removeExtra("open_security_audit")
+                                })
                         }
                     }
                 } else if (!isRunning) {
@@ -131,6 +140,12 @@ class MainActivity : ComponentActivity() {
             }
             DebugWatermark()
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (errorReportFile == null) openSecurityAudit = intent.getBooleanExtra("open_security_audit", false)
     }
 
     /** This branch creates framework Views only; no Compose or UI ViewModel is loaded. */

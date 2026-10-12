@@ -20,20 +20,21 @@ internal class ConnectWifiTask(
     private val androidApi: AndroidApi,
     private val wifiLogAnalyzer: WifiLogAnalyzer,
 ) : ServiceTask {
+    var attemptResult: ConnectionAttemptResult = ConnectionAttemptResult.ERROR
+        private set
+
     override fun run(context: TaskContext) {
         val config = request.config
-        val handshakeAttempts = config.failureFlags.handshakeAttemptsExceeded
-        val handshakeTimeout = config.failureFlags.handshakeTimeout
         val signals = LinkedBlockingQueue<ConnectSignal>()
-        val overallDeadline = SystemClock.elapsedRealtime() + config.timeoutMillis
+        val attemptStarted = SystemClock.elapsedRealtime()
+        val overallDeadline = attemptStarted + config.timeoutMillis
         context.log("任务类型：${request.input.type.displayName}")
         context.log("进入阶段：与路由器建立通信")
         context.updateProgress(TaskProgress.ConnectWifi(ConnectWifiStage.ROUTER_COMMUNICATION))
         context.ensureRunning()
 
-        val subscription = wifiLogAnalyzer.subscribe { event ->
-            signals.offer(ConnectSignal(event))
-        }
+        val listener: (WifiLogEvent) -> Unit = { event -> signals.offer(ConnectSignal(event, SystemClock.elapsedRealtime())) }
+        val subscription = wifiLogAnalyzer.subscribe(listener)
         var temporaryRequest: TemporaryWifiNetworkRequest? = null
         try {
             when (val target = request.input.target) {
@@ -64,17 +65,21 @@ internal class ConnectWifiTask(
                 is ConnectWifiTarget.NetworkCard -> error("网卡测试应使用 NetworkCardConnectTask")
             }
 
-            var handshakeDeadline: Long? = null
+            var handshakeStarted: Long? = null
             var handshakeCount = 0
 
             while (true) {
                 context.ensureRunning()
+                val flags = config.failureFlags
+                val handshakeAttempts = flags.handshakeAttemptsExceeded
+                val handshakeTimeout = flags.handshakeTimeout
                 val now = SystemClock.elapsedRealtime()
                 if (now >= overallDeadline) {
                     context.log("连接失败：任务总超时 ${config.timeoutMillis}ms")
+                    attemptResult = ConnectionAttemptResult.TIMEOUT
                     return
                 }
-                val activeHandshakeDeadline = handshakeDeadline
+                val activeHandshakeDeadline = handshakeStarted?.let { it + (handshakeTimeout?.handshakeStepTimeoutMillis ?: 0) }
                 if (
                     handshakeTimeout != null &&
                     activeHandshakeDeadline != null &&
@@ -84,6 +89,7 @@ internal class ConnectWifiTask(
                         "连接失败：WPA 握手超时 " +
                             "${handshakeTimeout.handshakeStepTimeoutMillis}ms",
                     )
+                    attemptResult = ConnectionAttemptResult.FAILED
                     return
                 }
 
@@ -96,22 +102,21 @@ internal class ConnectWifiTask(
                     overallDeadline
                 }
                 val signal = signals.poll(
-                    (nextDeadline - now).coerceAtLeast(1L),
+                    (nextDeadline - now).coerceIn(1L, 100L),
                     TimeUnit.MILLISECONDS,
                 ) ?: continue
                 val event = signal.event
 
-                context.log("WPA 原文：${event.rawLine}")
                 if (event.ssid != expectedSsid) {
-                    context.log(
-                        "连接失败：收到其他 Wi-Fi 的分析事件，" +
-                            "目标=$expectedSsid，实际=${event.ssid}",
-                    )
+                    if (request.input.target is ConnectWifiTarget.TemporaryNetwork) continue
+                    context.log("WPA 原文：${event.rawLine}")
+                    context.log("连接失败：收到其他 Wi-Fi 的分析事件，目标=$expectedSsid，实际=${event.ssid}")
                     return
                 }
+                context.log("WPA 原文：${event.rawLine}")
 
                 when (event) {
-                    is WifiLogEvent.AssociationStarted -> {}
+                    is WifiLogEvent.AssociationStarted -> Unit
 
                     is WifiLogEvent.RouterAssociated -> {
                         context.log("已与路由器建立连接，MAC=${event.bssid}")
@@ -122,10 +127,7 @@ internal class ConnectWifiTask(
                             TaskProgress.ConnectWifi(ConnectWifiStage.WPA_HANDSHAKE_1_OF_4),
                         )
                         context.log("进入阶段：WPA 握手 1/4")
-                        if (handshakeTimeout != null && handshakeDeadline == null) {
-                            handshakeDeadline = SystemClock.elapsedRealtime() +
-                                handshakeTimeout.handshakeStepTimeoutMillis
-                        }
+                        if (handshakeStarted == null) handshakeStarted = signal.receivedAt
                     }
 
                     is WifiLogEvent.Handshake2Of4 -> {
@@ -138,6 +140,7 @@ internal class ConnectWifiTask(
                         context.log("握手次数：$handshakeCount/${limit ?: "null"}")
                         if (limit != null && handshakeCount > limit) {
                             context.log("连接失败：WPA 握手次数超过最大次数 $limit")
+                            attemptResult = ConnectionAttemptResult.FAILED
                             return
                         }
                     }
@@ -164,12 +167,14 @@ internal class ConnectWifiTask(
                         if (temporaryRequest != null) {
                             context.log("测试连通性成功，立即断开临时网络")
                         }
+                        attemptResult = ConnectionAttemptResult.SUCCESS
                         return
                     }
 
                     is WifiLogEvent.PasswordError -> {
-                        if (config.failureFlags.passwordError) {
+                        if (flags.passwordError) {
                             context.log("连接失败：密码错误")
+                            attemptResult = ConnectionAttemptResult.FAILED
                             return
                         }
                         context.log("检测到密码错误，当前配置未将其设为终止条件")
@@ -177,6 +182,7 @@ internal class ConnectWifiTask(
 
                     is WifiLogEvent.HandshakeFailed -> {
                         context.log("连接失败：WPA 四次握手失败")
+                        attemptResult = ConnectionAttemptResult.FAILED
                         return
                     }
 
@@ -185,6 +191,7 @@ internal class ConnectWifiTask(
                             "连接失败：路由器拒绝接入" +
                                 (event.reason?.let { "，原因=$it" } ?: ""),
                         )
+                        attemptResult = ConnectionAttemptResult.REJECTED
                         return
                     }
 
@@ -205,6 +212,7 @@ internal class ConnectWifiTask(
                         context.log("已断开测试连接并删除测试配置")
                     }
                     .onFailure { error ->
+                        attemptResult = ConnectionAttemptResult.ERROR
                         context.log(
                             "清理测试连接配置失败：${error.message ?: error.javaClass.name}",
                         )
@@ -219,5 +227,5 @@ internal class ConnectWifiTask(
             ConnectWifiTaskType.CONNECT_TO_NETWORK -> "连接到网络"
         }
 
-    private data class ConnectSignal(val event: WifiLogEvent)
+    private data class ConnectSignal(val event: WifiLogEvent, val receivedAt: Long)
 }

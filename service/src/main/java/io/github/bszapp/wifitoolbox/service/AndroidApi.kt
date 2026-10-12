@@ -7,6 +7,7 @@ import android.content.AttributionSource
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.net.wifi.ScanResult
+import android.net.wifi.SupplicantState
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
@@ -441,14 +442,7 @@ class AndroidApi(
         requireBooleanSuccess(apiName, result)
     }
 
-    fun isWifiEnabled(): Boolean = androidBusinessCall(
-        operation = "查询 Wi-Fi 开关状态",
-        successMessage = { enabled ->
-            "查询 Wi-Fi 开关状态成功：enabled=$enabled"
-        },
-    ) {
-        isWifiEnabledInternal()
-    }
+    fun isWifiEnabled(): Boolean = isWifiEnabledInternal()
 
     private fun isWifiEnabledInternal(): Boolean {
         val wifiService = getWifiService()
@@ -585,6 +579,123 @@ class AndroidApi(
                 }
                 throw error
             }
+        }
+    }
+
+    /** 安全测试沿用旧版配置更新流程；每轮不删除配置，也不备份、还原密码。 */
+    internal fun connectSecurityAuditNetwork(
+        ssid: String,
+        password: String,
+        onSubmitting: (networkId: Int) -> Unit,
+    ): SecurityAuditConnectionSubmission = androidBusinessCall(
+        operation = "连接安全测试网络",
+        details = "ssid=$ssid",
+        successMessage = { "连接安全测试网络提交返回：ssid=$ssid networkId=${it.networkId} accepted=${it.accepted}" },
+    ) {
+        val networkId = if (password.isEmpty()) {
+            getSavedWifiListInternal().firstOrNull {
+                it.SSID == "\"$ssid\"" || it.SSID == ssid
+            }?.networkId ?: error("找不到 $ssid 的已保存网络")
+        } else {
+            val config = WifiConfiguration().apply {
+                SSID = "\"$ssid\""
+                preSharedKey = "\"$password\""
+                allowedKeyManagement = java.util.BitSet().apply { set(WifiConfiguration.KeyMgmt.WPA_PSK) }
+            }
+            addOrUpdateWifiNetworkInternal(config)
+        }
+        // 配置准备完毕后才标记本轮提交边界，配置写入期间的旧日志不能属于新一轮。
+        val service = getWifiService()
+        onSubmitting(networkId)
+        val accepted = systemApi("enableNetwork") {
+            if (sdk >= 28) service.javaClass.getMethod(
+                "enableNetwork", Int::class.java, Boolean::class.java, String::class.java,
+            ).invoke(service, networkId, true, callerPackage)
+            else service.javaClass.getMethod(
+                "enableNetwork", Int::class.java, Boolean::class.java,
+            ).invoke(service, networkId, true)
+        } as? Boolean ?: error("enableNetwork 返回类型不是 Boolean")
+        SecurityAuditConnectionSubmission(networkId, accepted)
+    }
+
+    /** 对齐旧版高权限断开：先关闭当前配置自动加入，随后断开并保留配置。 */
+    internal fun disconnectSecurityAuditNetwork() = androidBusinessCall(
+        operation = "断开安全测试网络并保留配置",
+        successMessage = { "安全测试断开请求已接受，配置保留；等待实际断开确认" },
+    ) {
+        val service = getWifiService()
+        val info = systemApi("getConnectionInfo") {
+            when {
+                sdk >= 30 -> service.javaClass.getMethod(
+                    "getConnectionInfo", String::class.java, String::class.java,
+                ).invoke(service, callerPackage, null)
+                sdk >= 26 -> service.javaClass.getMethod("getConnectionInfo", String::class.java)
+                    .invoke(service, callerPackage)
+                else -> service.javaClass.getMethod("getConnectionInfo").invoke(service)
+            }
+        } as? WifiInfo
+        val networkId = info?.networkId ?: -1
+        if (networkId != -1) {
+            fun disableNetwork() {
+                val disabled = systemApi("disableNetwork") {
+                    if (sdk >= 28) service.javaClass.getMethod(
+                        "disableNetwork", Int::class.java, String::class.java,
+                    ).invoke(service, networkId, callerPackage)
+                    else service.javaClass.getMethod("disableNetwork", Int::class.java)
+                        .invoke(service, networkId)
+                }
+                requireBooleanSuccess("disableNetwork", disabled)
+            }
+            val allowAutojoin = try {
+                service.javaClass.getMethod("allowAutojoin", Int::class.java, Boolean::class.java)
+            } catch (_: NoSuchMethodException) { null }
+            if (allowAutojoin == null) {
+                disableNetwork()
+            } else {
+                try {
+                    systemApi("allowAutojoin") { allowAutojoin.invoke(service, networkId, false) }
+                } catch (_: Exception) {
+                    // 对齐旧版：高权限服务路径回退禁用；Shell 路径忽略自动加入调用异常。
+                    if (Process.myUid() == 0 || Process.myUid() == 1000) disableNetwork()
+                }
+            }
+        }
+        val disconnected = systemApi("disconnect") {
+            if (sdk >= 28) service.javaClass.getMethod("disconnect", String::class.java)
+                .invoke(service, callerPackage)
+            else service.javaClass.getMethod("disconnect").invoke(service)
+        }
+        requireBooleanSuccess("disconnect", disconnected)
+        Unit
+    }
+
+    /** 清理确认只读取真实状态，不产生每次轮询的业务日志。 */
+    internal fun readSecurityAuditConnectionState(): SupplicantState =
+        getConnectionInfoInternal().supplicantState
+
+    /** 仅在安全测试网络移出队列时调用；成功的网络配置由调度器保留。 */
+    internal fun forgetSecurityAuditNetwork(ssid: String): Boolean = androidBusinessCall(
+        operation = "遗忘安全测试网络",
+        details = "ssid=$ssid",
+        successMessage = { "遗忘安全测试网络已提交：ssid=$ssid found=$it" },
+    ) {
+        val networkId = getSavedWifiListInternal().firstOrNull {
+            it.SSID?.removeSurrounding("\"") == ssid
+        }?.networkId ?: return@androidBusinessCall false
+        if (sdk <= 29) {
+            removeWifiNetworkInternal(networkId)
+            true
+        } else {
+            val service = getWifiService()
+            systemApi("forget") {
+                val listener = Class.forName("android.net.wifi.IActionListener")
+                if (sdk == 30) service.javaClass.getMethod(
+                    "forget", Int::class.java, IBinder::class.java, listener, Int::class.java,
+                ).invoke(service, networkId, null, null, 0)
+                else service.javaClass.getMethod("forget", Int::class.java, listener)
+                    .invoke(service, networkId, null)
+            }
+            true
         }
     }
 
@@ -902,3 +1013,6 @@ class AndroidApi(
         }
     }
 }
+
+/** 连接请求回执，不代表已经与路由器连接成功。 */
+internal data class SecurityAuditConnectionSubmission(val networkId: Int, val accepted: Boolean)

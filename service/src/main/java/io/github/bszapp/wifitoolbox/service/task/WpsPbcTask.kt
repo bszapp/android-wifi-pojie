@@ -88,6 +88,7 @@ internal class WpsPbcTask(
                         scriptSettingsRevision++
                     }
                 }
+                else -> return false
             }
             progressContext = context
         }
@@ -102,6 +103,7 @@ internal class WpsPbcTask(
                         "不使用完整协议已更新为 ${payload.enabled}"
                     is TaskUpdatePayload.WpsPbcIgnoreRepeatedDevices ->
                         "忽略重复握手设备已更新为 ${payload.enabled}"
+                    else -> error("不支持的 WPS-PBC 更新")
                 },
             )
             publishProgress(it)

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""One managed WPA2-PSK/CCMP diagnostic; a password per valid M1.
+"""Managed WPA2-PSK/CCMP diagnostic; one submitted password per valid M1.
 
-JSON Lines stdin: one configuration, followed by optional {"type":"stop"}.
+Supports a legacy one-shot JSON-lines stdin protocol and a persistent FIFO session.
 Uses nl80211/EAPOL/DHCP directly; never changes Android saved configurations.
-No automatic reassociation or password cycling. Detailed English text logs stdout.
+Detailed English text logs remain on stdout in both modes.
 """
 import ctypes
+import argparse
 import errno
 import fcntl
 import hashlib
@@ -20,6 +21,7 @@ import sys
 import time
 import traceback
 import threading
+import queue
 from types import SimpleNamespace
 
 sys.path.insert(0, '/wlantool')
@@ -218,6 +220,9 @@ overall_deadline = None
 handshake_deadline = None
 stop_requested = threading.Event()
 supplicant_guard = None
+fifo_log_sink = None
+# Selected BSS metadata belongs to this script session, not to a password attempt.
+target_cache = {}
 
 # IEEE 802.11 status/reason values used by wpa_supplicant's ieee802_11_defs.h.
 STATUS_NAMES = {1: 'Unspecified rejection', 13: 'Unsupported authentication algorithm', 15: 'Authentication challenge failed',
@@ -238,6 +243,9 @@ def ensure_running():
     if stop_requested.is_set():
         raise InterruptedError('Stop requested')
     now = time.monotonic()
+    if (handshake_deadline is not None and now >= handshake_deadline
+            and (overall_deadline is None or handshake_deadline <= overall_deadline)):
+        raise TimeoutError('Handshake timeout measured from the first M1')
     if overall_deadline is not None and now >= overall_deadline:
         raise TimeoutError('Overall task timeout; no explicit failure frame was received to establish an incorrect password')
     if handshake_deadline is not None and now >= handshake_deadline:
@@ -256,9 +264,24 @@ class HandshakeRestart(Exception):
         self.packet = packet
 
 
+class AssociationTerminated(RuntimeError):
+    def __init__(self, command, reason, by_ap):
+        super().__init__('Association terminated; command=%s reason=%s' % (command, reason))
+        self.reason = reason
+        self.by_ap = by_ap
+
+
 def report(event, **fields):
+    global fifo_log_sink
     for line in format_event(event, fields):
         print(line, flush=True)
+        if fifo_log_sink is not None:
+            try:
+                fifo_log_sink(event, fields, line)
+            except OSError:
+                # Keep interface cleanup possible even after losing the consumer.
+                fifo_log_sink = None
+                stop_requested.set()
         if log_file:
             log_file.write(line + '\n')
     if log_file:
@@ -332,15 +355,15 @@ def check_events(nl, events):
             report('connectionTerminated', command=command, reasonCode=code,
                    description=REASON_NAMES.get(code, 'Unmapped reason code'),
                    disconnectedByAp=71 in attrs, frame=frame.hex() if frame else None)
-            raise RuntimeError('Association terminated; command=%s reason=%s' %
-                               (command, code))
+            raise AssociationTerminated(command, code, 71 in attrs)
 
 
 def wait_eapol(nl, events, eth, ap, own, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         ensure_running()
-        readable, _, _ = select.select([events, eth], [], [], min(.25, max(0, deadline-time.monotonic())))
+        wait_until = min([deadline] + [value for value in (overall_deadline, handshake_deadline) if value is not None])
+        readable, _, _ = select.select([events, eth], [], [], min(.25, max(0, wait_until-time.monotonic())))
         if events in readable:
             check_events(nl, events)
         if eth not in readable:
@@ -376,6 +399,7 @@ def wait_eapol(nl, events, eth, ap, own, timeout):
                micPresent=bool(info & 0x100), secure=bool(info & 0x200),
                encrypted=bool(info & 0x1000), keyData=key[99:].hex())
         return key, info, stage
+    ensure_running()
     raise TimeoutError('Timed out waiting for EAPOL from the target AP')
 
 
@@ -636,9 +660,12 @@ def compatible_rsn(data):
         return False
 
 
-def run(args):
+def run(args, session_guard=None):
     global log_file, pcap_file, SSID, overall_deadline, handshake_deadline
     global supplicant_guard
+    owns_supplicant_guard = session_guard is None
+    if session_guard is not None:
+        supplicant_guard = session_guard
     SSID = args.ssid.encode('utf-8')
     if not 1 <= len(SSID) <= 32:
         raise ValueError('SSID must be 1-32 bytes')
@@ -652,6 +679,10 @@ def run(args):
         raise ValueError('Test MAC must be a valid six-byte unicast address')
     if args.timeout_millis <= 0:
         raise ValueError('Overall timeout must be greater than zero')
+    if args.max_attempts is not None and args.max_attempts <= 0:
+        raise ValueError('Maximum handshake attempts must be greater than zero')
+    if args.handshake_timeout is not None and args.handshake_timeout <= 0:
+        raise ValueError('Handshake timeout must be greater than zero')
     if args.output:
         os.makedirs(args.output, exist_ok=True)
         os.umask(0o077)
@@ -666,6 +697,8 @@ def run(args):
     connecting = success = restore_mac = False
     added_address = None
     cleanup_failed = False
+    attempts = 0
+    handshake_completed = False
 
     def interrupted(signum, frame):
         raise InterruptedError('Received termination signal %s' % signum)
@@ -686,8 +719,9 @@ def run(args):
             raise RuntimeError('Interface is not managed: iftype=%s' % mode)
         # Pause Android's controller before changing the interface or associating.
         # Its independent recovery process survives termination of this terminal.
-        supplicant_guard = SupplicantPauseGuard(args.timeout_millis + 15000, report)
-        supplicant_guard.start(ensure_running)
+        if owns_supplicant_guard:
+            supplicant_guard = SupplicantPauseGuard(args.timeout_millis + 15000, report)
+            supplicant_guard.start(ensure_running)
         info = nl.command(5, name='read interface after pausing system supplicant', reply=True)[0]
         mode = struct.unpack('=I', scan.first_attr(info, 5))[0]
         if mode != 2:
@@ -724,43 +758,50 @@ def run(args):
         if read_mac(nl) != own:
             raise RuntimeError('MAC changed after bringing the interface up')
         ensure_running()
-        report('scanStarted', scope='scan only; association limited to submitted SSID')
-        try:
-            nl._trigger_scan()
-        except OSError as error:
-            if error.errno != errno.EBUSY:
-                raise
-            report('scanBusy', message='Waiting for the existing scan and reading cached results')
-        scan_deadline = min(overall_deadline, time.monotonic()+3)
-        while time.monotonic() < scan_deadline:
-            ensure_running()
-            if select.select([events], [], [], .1)[0]:
-                if any(cmd in (34, 35) for cmd, _ in read_events(nl, events)):
-                    break
-        candidates = []
-        target_seen = False
-        for entry in nl.read_results():
-            bss = scan.parse_attrs(entry)
-            ies = scan.first_attr(bss, 6) or scan.first_attr(bss, 11) or b''
-            elements = scan.parse_information_elements(ies)
-            if not any(eid == 0 and data == SSID for eid, data in elements):
-                continue
-            target_seen = True
-            target_rsn = next((data for eid, data in elements if eid == 48), None)
-            if target_rsn is None or not compatible_rsn(target_rsn):
-                report('unsupportedBss', bssid=scan.first_attr(bss, 1).hex(':'), rsn=target_rsn.hex() if target_rsn else None)
-                continue
-            signal_value = scan.first_attr(bss, 7)
-            strength = struct.unpack('=i', signal_value)[0] if signal_value else -10000
-            candidates.append((strength, bss, target_rsn))
-        if not candidates:
-            raise RuntimeError('Target does not support this WPA2-PSK/CCMP test without mandatory PMF' if target_seen else 'Target network was not found in scan results')
-        _, bss, target_rsn = max(candidates, key=lambda item: item[0])
-        ap = scan.first_attr(bss, 1)
-        frequency = struct.unpack('=I', scan.first_attr(bss, 2))[0]
+        target_key = (args.interface, SSID)
+        cached_target = target_cache.get(target_key)
+        if cached_target is None:
+            report('scanStarted', scope='scan only; association limited to submitted SSID')
+            try:
+                nl._trigger_scan()
+            except OSError as error:
+                if error.errno != errno.EBUSY:
+                    raise
+                report('scanBusy', message='Waiting for the existing scan and reading cached results')
+            scan_deadline = min(overall_deadline, time.monotonic()+3)
+            while time.monotonic() < scan_deadline:
+                ensure_running()
+                if select.select([events], [], [], .1)[0]:
+                    if any(cmd in (34, 35) for cmd, _ in read_events(nl, events)):
+                        break
+            candidates = []
+            target_seen = False
+            for entry in nl.read_results():
+                bss = scan.parse_attrs(entry)
+                ies = scan.first_attr(bss, 6) or scan.first_attr(bss, 11) or b''
+                elements = scan.parse_information_elements(ies)
+                if not any(eid == 0 and data == SSID for eid, data in elements):
+                    continue
+                target_seen = True
+                target_rsn = next((data for eid, data in elements if eid == 48), None)
+                if target_rsn is None or not compatible_rsn(target_rsn):
+                    report('unsupportedBss', bssid=scan.first_attr(bss, 1).hex(':'), rsn=target_rsn.hex() if target_rsn else None)
+                    continue
+                signal_value = scan.first_attr(bss, 7)
+                strength = struct.unpack('=i', signal_value)[0] if signal_value else -10000
+                candidates.append((strength, bss, target_rsn))
+            if not candidates:
+                raise RuntimeError('Target does not support this WPA2-PSK/CCMP test without mandatory PMF' if target_seen else 'Target network was not found in scan results')
+            strength, bss, target_rsn = max(candidates, key=lambda item: item[0])
+            ap = scan.first_attr(bss, 1)
+            frequency = struct.unpack('=I', scan.first_attr(bss, 2))[0]
+            target_cache[target_key] = (ap, frequency, strength, target_rsn)
+        else:
+            ap, frequency, strength, target_rsn = cached_target
         report('target', bssid=ap.hex(':'), frequency=frequency,
                signalDbm=strength / 100,
-               advertisedRsn=target_rsn.hex(), associationRsn=RSN.hex())
+               advertisedRsn=target_rsn.hex(), associationRsn=RSN.hex(),
+               selectionSource='cache' if cached_target is not None else 'scan')
         pmks = []
         for password in args.passwords:
             ensure_running()
@@ -775,9 +816,13 @@ def run(args):
         attrs += scan.pack_u32_attr(74, CCMP) + scan.pack_u32_attr(75, 2)
         attrs += scan.pack_u32_attr(76, PSK)
         ensure_running()
+        # Interface MAC/UP changes may enqueue events for the previous link.
+        # Only events produced after submitting this CONNECT belong to this attempt.
+        while select.select([events], [], [], 0)[0]:
+            ensure_running()
+            read_events(nl, events)
         connecting = True
         nl.command(46, attrs, 'CONNECT WPA2-PSK without handshake offload')
-        attempts = 0
         last_m1_replay = None
         ptk = anonce = None
         snonce = os.urandom(32)
@@ -800,21 +845,24 @@ def run(args):
                 stage('WPA_HANDSHAKE_1_OF_4', 'WPA handshake M1 (1/4)')
                 if args.handshake_timeout is not None and handshake_deadline is None:
                     handshake_deadline = time.monotonic()+args.handshake_timeout/1000
-                if attempts >= len(pmks):
+                if args.max_attempts is not None and attempts >= args.max_attempts:
+                    raise RuntimeError('Handshake attempt limit exceeded: %s/%s; aborting immediately' %
+                                       (attempts+1, args.max_attempts))
+                if attempts >= len(pmks) and len(pmks) != 1:
                     raise RuntimeError('Password lines exhausted: received valid M1 #%s with only %s password lines configured; aborting immediately' %
                                        (attempts+1, len(pmks)))
-                if args.max_attempts is not None and attempts+1 > args.max_attempts:
-                    raise RuntimeError('Handshake attempt limit exceeded: %s/%s; aborting immediately' % (attempts+1, args.max_attempts))
+                password_index = 0 if len(pmks) == 1 else attempts
+                handshake_completed = False
                 anonce = key[17:49]
-                ptk = derive(pmks[attempts], ap, own, anonce, snonce)
+                ptk = derive(pmks[password_index], ap, own, anonce, snonce)
                 last_m1_replay = replay
                 attempts += 1
                 stage('WPA_HANDSHAKE_2_OF_4', 'WPA handshake M2 (2/4)')
                 report('handshakeCount', count=attempts, maximum=args.max_attempts,
                        message='%s/%s' % (attempts, args.max_attempts if args.max_attempts is not None else 'null'))
-                report('tryingPsk', password=args.passwords[attempts-1])
+                report('tryingPsk', password=args.passwords[password_index])
                 send_eapol(eth, ap, own, response(key, 0x010a, snonce, ASSOC_IE, ptk[:16]),
-                           'M2', passwordLine=attempts)
+                           'M2', passwordLine=password_index+1)
                 continue
             if message != 'M3' or ptk is None:
                 report('eapolDropped', reason='No matching M2 exists, or message type does not match')
@@ -827,7 +875,7 @@ def run(args):
                 report('eapolDropped', reason='WPA: Invalid EAPOL-Key MIC - dropping packet')
                 continue
             stage('WPA_HANDSHAKE_3_OF_4', 'WPA handshake M3 (3/4)')
-            report('m3Verified', passwordLine=attempts, install=bool(info & 0x40), secure=bool(info & 0x200))
+            report('m3Verified', passwordLine=password_index+1, install=bool(info & 0x40), secure=bool(info & 0x200))
             index, gtk = gtk_from_m3(key, ptk)
             if not info & 0x40 or not info & 0x200:
                 raise RuntimeError('M3 is missing INSTALL/SECURE flags')
@@ -843,6 +891,7 @@ def run(args):
                 raise RuntimeError('Kernel does not report association with the target after key installation')
             report('handshakeCompletedLocally', associationRetained=True, m3MicVerified=True,
                    ptkInstalled=True, gtkInstalled=True, controlledPortAuthorized=True)
+            handshake_completed = True
             handshake_deadline = None
             if read_mac(nl) != own:
                 raise RuntimeError('MAC changed after handshake completion')
@@ -900,7 +949,11 @@ def run(args):
             success = True
             break
     except Exception as error:
-        report('failed', error=repr(error), trace=traceback.format_exc())
+        detail = repr(error)
+        if (args.password_error and attempts > 0 and not handshake_completed and isinstance(error, AssociationTerminated)
+                and error.by_ap and error.reason in (15, 23)):
+            detail = 'Password error: WPA four-way handshake failed; pre-shared key may be incorrect; reason=%s' % error.reason
+        report('failed', error=detail, trace=traceback.format_exc())
     finally:
         if added_address and nl:
             try:
@@ -940,7 +993,7 @@ def run(args):
                 report('cleanupError', operation='restore interface flags', error=repr(error))
         if nl:
             nl.close()
-        if supplicant_guard is not None:
+        if owns_supplicant_guard and supplicant_guard is not None:
             try:
                 if not supplicant_guard.release():
                     raise RuntimeError('System supplicant recovery was not confirmed; check guard logs')
@@ -968,7 +1021,201 @@ def read_control():
     stop_requested.set()
 
 
+def _arguments_from_request(request):
+    if not isinstance(request, dict):
+        raise ValueError('Configuration must be a JSON object')
+    return SimpleNamespace(
+        interface='wlan0', ssid=request['ssid'], passwords=request['passwords'],
+        mac=request.get('mac'), hostname=request['hostname'],
+        hostname_encoding=request.get('hostnameEncoding', 'gbk'),
+        timeout_millis=request['timeoutMillis'], handshake_timeout=request.get('handshakeTimeoutMillis'),
+        max_attempts=request.get('maxHandshakeAttempts'), password_error=request.get('passwordError', True),
+        output=None,
+    )
+
+
+def _write_fifo_event(writer, event, **fields):
+    writer.write(json.dumps(dict(type=event, **fields), ensure_ascii=False) + '\n')
+    writer.flush()
+
+
+def _close_fifo_session(requests, session_state):
+    with session_state['lock']:
+        first_close = not session_state['closing'].is_set()
+        session_state['closing'].set()
+        if session_state['active'].is_set():
+            stop_requested.set()
+    if first_close:
+        requests.put(('shutdown', None))
+
+
+def _read_fifo_commands(command_pipe, requests, session_state):
+    try:
+        with open(command_pipe, 'r', encoding='utf-8') as source:
+            for raw in source:
+                try:
+                    request = json.loads(raw)
+                    if not isinstance(request, dict):
+                        raise ValueError('Command must be a JSON object')
+                except (ValueError, TypeError) as error:
+                    requests.put(('invalid', str(error)))
+                    continue
+                if request.get('type') == 'shutdown':
+                    _close_fifo_session(requests, session_state)
+                    return
+                if request.get('type') == 'cancel':
+                    request_id = request.get('requestId')
+                    if not isinstance(request_id, str) or not request_id:
+                        requests.put(('invalid', 'Cancel command requires a non-empty requestId'))
+                        continue
+                    with session_state['lock']:
+                        if session_state['activeRequestId'] == request_id:
+                            stop_requested.set()
+                        elif request_id in session_state['pending']:
+                            session_state['cancelled'].add(request_id)
+                    continue
+                if request.get('type') != 'run':
+                    requests.put(('invalid', 'Command type must be run, cancel or shutdown'))
+                    continue
+                request_id = request.get('requestId')
+                if isinstance(request_id, str) and request_id:
+                    with session_state['lock']:
+                        session_state['pending'].add(request_id)
+                requests.put(('run', request))
+    except BaseException as error:
+        requests.put(('readerError', repr(error)))
+    finally:
+        # Closing the command channel is equivalent to ending the owned session.
+        _close_fifo_session(requests, session_state)
+
+
+def persistent_fifo_main(command_pipe, event_pipe):
+    global supplicant_guard, fifo_log_sink, overall_deadline, handshake_deadline
+    requests = queue.Queue()
+    session_state = dict(lock=threading.Lock(), active=threading.Event(), closing=threading.Event(),
+                         activeRequestId=None, cancelled=set(), pending=set())
+    reader = threading.Thread(
+        target=_read_fifo_commands, args=(command_pipe, requests, session_state),
+        name='managed-connect-command-fifo', daemon=True,
+    )
+    event_writer = None
+    supplicant_restored = supplicant_guard is None
+    request_id = None
+    cleanup_completed = True
+
+    def forward_log(event, fields, line):
+        nonlocal cleanup_completed
+        if event == 'begin':
+            cleanup_completed = False
+        if event == 'end':
+            cleanup_completed = fields.get('cleanupCompleted', False)
+        _write_fifo_event(event_writer, 'output', requestId=request_id, text=line)
+
+    try:
+        event_writer = open(event_pipe, 'w', encoding='utf-8', buffering=1)
+        fifo_log_sink = forward_log
+        reader.start()
+        report('ready', protocol=2)
+        # One guard owns the whole script session. Per-attempt runs reuse it.
+        supplicant_guard = SupplicantPauseGuard(None, report)
+        supplicant_guard.start(ensure_running)
+        _write_fifo_event(event_writer, 'ready', protocol=2)
+        while True:
+            try:
+                kind, payload = requests.get(timeout=.25)
+            except queue.Empty:
+                supplicant_guard.ensure_active()
+                continue
+            if kind == 'shutdown':
+                break
+            if kind == 'invalid':
+                report('controlRejected', message=payload)
+                _write_fifo_event(event_writer, 'error', message=payload)
+                continue
+            if kind == 'readerError':
+                report('controlRejected', message='Command FIFO read failed: %s' % payload)
+                _write_fifo_event(event_writer, 'error', message=payload)
+                break
+
+            request = payload
+            request_id = request.get('requestId')
+            if not isinstance(request_id, str) or not request_id:
+                report('controlRejected', message='Run command requires a non-empty requestId')
+                _write_fifo_event(event_writer, 'error', requestId=request_id, message='Invalid requestId')
+                continue
+            with session_state['lock']:
+                if session_state['closing'].is_set():
+                    break
+                stop_requested.clear()
+                session_state['active'].set()
+                session_state['activeRequestId'] = request_id
+                session_state['pending'].discard(request_id)
+                cancelled = request_id in session_state['cancelled']
+                session_state['cancelled'].discard(request_id)
+            cleanup_completed = True
+            try:
+                if cancelled:
+                    raise InterruptedError('Request cancelled before execution')
+                args = _arguments_from_request(request)
+                exit_code = run(args, session_guard=supplicant_guard)
+            except BaseException as error:
+                report('failed', error=repr(error), trace=traceback.format_exc())
+                exit_code = 1
+            finally:
+                with session_state['lock']:
+                    session_state['active'].clear()
+                    session_state['activeRequestId'] = None
+                overall_deadline = handshake_deadline = None
+            _write_fifo_event(event_writer, 'result', requestId=request_id, exitCode=exit_code,
+                              cleanupCompleted=cleanup_completed)
+            request_id = None
+            if not cleanup_completed:
+                break
+            if supplicant_guard is None or supplicant_guard.process.poll() is not None:
+                # A failed guard cannot safely own another attempt; end this session.
+                break
+    except BaseException as error:
+        report('failed', error=repr(error), trace=traceback.format_exc())
+        if event_writer is not None:
+            try:
+                _write_fifo_event(event_writer, 'error', message=repr(error))
+            except (BrokenPipeError, OSError):
+                pass
+        return 1
+    finally:
+        stop_requested.set()
+        if supplicant_guard is not None:
+            try:
+                if not supplicant_guard.release():
+                    raise RuntimeError('System supplicant recovery was not confirmed; check guard logs')
+                supplicant_restored = True
+            except Exception as error:
+                supplicant_restored = False
+                report('cleanupError', operation='resume system wpa_supplicant', error=repr(error))
+            finally:
+                supplicant_guard = None
+        if event_writer is not None:
+            try:
+                _write_fifo_event(event_writer, 'stopped', supplicantRestored=supplicant_restored)
+            except (BrokenPipeError, OSError):
+                pass
+            fifo_log_sink = None
+            event_writer.close()
+        if reader.is_alive():
+            reader.join(timeout=.5)
+    return 0
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--command-pipe')
+    parser.add_argument('--event-pipe')
+    options = parser.parse_args()
+    if bool(options.command_pipe) != bool(options.event_pipe):
+        raise ValueError('Both --command-pipe and --event-pipe are required for FIFO mode')
+    if options.command_pipe:
+        return persistent_fifo_main(options.command_pipe, options.event_pipe)
+
     report('ready', protocol=1)
     line = sys.stdin.readline()
     if not line:
@@ -979,14 +1226,7 @@ def main():
     if request.get('type') == 'stop':
         report('end', success=False, cleanupCompleted=True, message='Stopped during preparation')
         return 1
-    args = SimpleNamespace(
-        interface='wlan0', ssid=request['ssid'], passwords=request['passwords'],
-        mac=request.get('mac'), hostname=request['hostname'],
-        hostname_encoding=request.get('hostnameEncoding', 'gbk'),
-        timeout_millis=request['timeoutMillis'], handshake_timeout=request.get('handshakeTimeoutMillis'),
-        max_attempts=request.get('maxHandshakeAttempts'), password_error=request.get('passwordError', True),
-        output=None,
-    )
+    args = _arguments_from_request(request)
     threading.Thread(target=read_control, daemon=True).start()
     return run(args)
 

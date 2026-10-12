@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.contract.task
 
 import android.os.ParcelFileDescriptor
+import io.github.bszapp.wifitoolbox.contract.PipeTransport
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -16,35 +17,25 @@ object TaskLogTransport {
         require(batch.entries.size <= MAX_ENTRY_COUNT) {
             "任务日志条数过多：${batch.entries.size}"
         }
-        val pipe = ParcelFileDescriptor.createReliablePipe()
-        val readSide = pipe[0]
-        val writeSide = pipe[1]
-        writerExecutor.execute {
-            try {
-                DataOutputStream(
-                    BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(writeSide)),
-                ).use { output ->
-                    output.writeInt(MAGIC)
-                    output.writeLong(batch.scopeTaskId)
-                    output.writeLong(batch.generation)
-                    output.writeLong(batch.oldestAvailableId)
-                    output.writeLong(batch.latestId)
-                    output.writeInt(batch.lineCount)
-                    output.writeInt(batch.entries.size)
-                    batch.entries.forEach { entry ->
-                        output.writeLong(entry.taskId)
-                        output.writeLong(entry.taskLineId)
-                        output.writeLong(entry.globalLineId)
-                        output.writeLong(entry.timestampMillis)
-                        output.writeText(entry.text)
-                    }
-                    output.flush()
+        return PipeTransport.open(writerExecutor, "任务日志") { stream ->
+            DataOutputStream(BufferedOutputStream(stream)).use { output ->
+                output.writeInt(MAGIC)
+                output.writeLong(batch.scopeTaskId)
+                output.writeLong(batch.generation)
+                output.writeLong(batch.oldestAvailableId)
+                output.writeLong(batch.latestId)
+                output.writeInt(batch.lineCount)
+                output.writeInt(batch.entries.size)
+                batch.entries.forEach { entry ->
+                    output.writeLong(entry.taskId)
+                    output.writeLong(entry.taskLineId)
+                    output.writeLong(entry.globalLineId)
+                    output.writeLong(entry.timestampMillis)
+                    output.writeText(entry.text)
                 }
-            } catch (_: Throwable) {
-                runCatching { writeSide.close() }
+                output.flush()
             }
         }
-        return readSide
     }
 
     fun decode(descriptor: ParcelFileDescriptor): TaskLogBatch =
@@ -71,6 +62,7 @@ object TaskLogTransport {
                     text = input.readText(),
                 )
             }
+            require(input.read() == -1) { "任务日志包含多余数据" }
             TaskLogBatch(
                 scopeTaskId = scopeTaskId,
                 generation = generation,

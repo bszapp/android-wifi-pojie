@@ -69,6 +69,8 @@ private const val TAG = "DefaultUI"
 fun DefaultUI(
     dictionaryViewModel: DictionaryViewModel,
     viewModel: DefaultViewModel = viewModel(),
+    openSecurityAudit: Boolean = false,
+    onSecurityAuditOpened: () -> Unit = {},
 ) {
     val navigator = rememberNavigator(Route.Main)
     val dictionaryState = dictionaryViewModel.state
@@ -78,6 +80,13 @@ fun DefaultUI(
     val confirmationDialogs by
         viewModel.confirmationDialogs.collectAsStateWithLifecycle()
     val containerState by viewModel.containerState.collectAsStateWithLifecycle()
+    LaunchedEffect(openSecurityAudit) {
+        if (openSecurityAudit) {
+            navigator.backStack.clear()
+            navigator.backStack.add(Route.Main)
+            viewModel.securityAudit.selectSubmode(io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode.SECURITY_AUDIT)
+        }
+    }
 
     LaunchedEffect(viewModel, snackbarHostState, context) {
         coroutineScope {
@@ -130,6 +139,8 @@ fun DefaultUI(
                                 MainPager(
                                     viewModel = viewModel,
                                     snackbarHostState = snackbarHostState,
+                                    openSecurityAudit = openSecurityAudit,
+                                    onSecurityAuditOpened = onSecurityAuditOpened,
                                 )
                             }
                             entry<Route.ColorPalette> { ColorPaletteScreen() }
@@ -144,6 +155,7 @@ fun DefaultUI(
                             entry<Route.Capture> { route -> io.github.bszapp.wifitoolbox.uidefault.screen.CaptureScreen(route.bssid, route.deviceMac) }
                             entry<Route.CaptureDetail> { route -> io.github.bszapp.wifitoolbox.uidefault.screen.CaptureDetailScreen(route) }
                             entry<Route.WpaHashcat> { io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(snackbarHostState = snackbarHostState) }
+                            entry<Route.SecurityAuditHistory> { io.github.bszapp.wifitoolbox.uidefault.securityaudit.SecurityAuditHistoryScreen(viewModel) }
                             entry<Route.HashcatRun> { route -> io.github.bszapp.wifitoolbox.uidefault.hashcat.HashcatScreen(
                                 snackbarHostState = snackbarHostState, initialHandshake = route.handshake) }
                         },
@@ -153,6 +165,8 @@ fun DefaultUI(
                         state = containerState,
                         onInterrupt = viewModel::interruptContainer,
                     )
+
+                    io.github.bszapp.wifitoolbox.uidefault.securityaudit.SecurityAuditSheets(viewModel.securityAudit)
 
                     confirmationDialogs.forEach { dialog ->
                         key(dialog.id) {
@@ -187,10 +201,19 @@ fun DefaultUI(
 private fun MainPager(
     viewModel: DefaultViewModel,
     snackbarHostState: SnackbarHostState,
+    openSecurityAudit: Boolean = false,
+    onSecurityAuditOpened: () -> Unit = {},
 ) {
     val navigator = LocalNavigator.current
     val pagerState = rememberPagerState(pageCount = { 4 })
     val mainState = rememberMainScreenState(pagerState)
+    LaunchedEffect(openSecurityAudit) {
+        if (openSecurityAudit) {
+            pagerState.scrollToPage(1)
+            mainState.syncPage()
+            onSecurityAuditOpened()
+        }
+    }
     val enableBlur = LocalEnableBlur.current
     val enableFloatingBottomBar = LocalEnableFloatingBottomBar.current
     val enableFloatingBottomBarBlur = LocalEnableFloatingBottomBarBlur.current

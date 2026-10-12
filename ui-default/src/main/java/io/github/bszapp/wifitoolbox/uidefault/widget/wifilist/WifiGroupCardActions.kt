@@ -10,6 +10,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +33,8 @@ fun WifiGroupCardActions(
     isConnected: Boolean,
     buttonContainerColor: Color?,
     buttonContentColor: Color?,
+    auditMode: Boolean = false,
+    auditRunning: Boolean = false,
     onConnect: () -> Unit = {},
     onDisconnect: () -> Unit = {},
     onOpenDetail: () -> Unit = {},
@@ -133,11 +136,12 @@ fun WifiGroupCardActions(
 
     ActionButtonGroupWithMenu(
         buttonConfig = ActionButtonConfig(
-            icon = if (isConnected) Icons.Outlined.LinkOff else Icons.Outlined.Link,
-            text = if (isConnected) "断开" else "连接",
+            icon = if (auditMode) { if (auditRunning) Icons.Outlined.Stop else Icons.Outlined.PlayArrow }
+                else if (isConnected) Icons.Outlined.LinkOff else Icons.Outlined.Link,
+            text = if (auditMode) { if (auditRunning) "停止" else "运行" } else if (isConnected) "断开" else "连接",
             containerColor = buttonContainerColor,
             contentColor = buttonContentColor,
-            onClick = if (isConnected) onDisconnect else onConnect,
+            onClick = if (auditMode) onConnect else if (isConnected) onDisconnect else onConnect,
         ),
         menuGroups = menuGroups,
         menuExpanded = menuExpanded,

@@ -29,9 +29,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.min
+import io.github.bszapp.wifitoolbox.contract.task.*
+import java.io.File
 
 class TaskController(
     private val scope: CoroutineScope,
+    historyDirectory: File,
     private val reportError: (
         source: String,
         operation: String,
@@ -39,6 +42,19 @@ class TaskController(
         remoteDetails: String?,
     ) -> Unit,
 ) : ITaskController {
+    private val auditStore = SecurityAuditHistoryStore(historyDirectory)
+    override val auditHistory = auditStore.state
+    private val _auditConfig = MutableStateFlow(SecurityAuditConfig())
+    override val auditConfig = _auditConfig.asStateFlow()
+    override fun configureSecurityAudit(config: SecurityAuditConfig) {
+        _auditConfig.value = config
+        val running = state.value.currentTaskId?.let(state.value.tasks::get)
+        if (running?.snapshot?.request?.payload is TaskRequestPayload.SecurityAudit) {
+            updateTask(running.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.SecurityAuditConfigure(config)))
+        }
+    }
+    override fun auditDictionary(recordId: String) = auditStore.dictionary(recordId)
+    init { scope.launch(Dispatchers.IO) { auditStore.load() } }
     private val connectionLock = Any()
     private val _state = MutableStateFlow(TaskControllerState())
     override val state: StateFlow<TaskControllerState> = _state.asStateFlow()
@@ -102,6 +118,13 @@ class TaskController(
                     binding.currentTaskId?.let { binding.pendingTaskIds += it; binding.pendingLogIds += it }
                     binding.globalLogsDirty = true
                 }
+                var offset = 0
+                while (isCurrent(binding)) {
+                    val ids = service.getSecurityAuditTaskIds(offset)
+                    if (ids.isEmpty()) break
+                    synchronized(binding.pendingLock) { binding.pendingTaskIds.addAll(ids.toList()) }
+                    offset += ids.size
+                }
                 reconcile(binding)
                 while (isActive && isCurrent(binding)) {
                     binding.signal.receive()
@@ -141,6 +164,7 @@ class TaskController(
                                     logs = current.tasks[taskId]?.logs
                                         ?: TaskLogState(scopeTaskId = taskId),
                                     capturedNetworks = current.tasks[taskId]?.capturedNetworks.orEmpty(),
+                                    auditNetworks = current.tasks[taskId]?.auditNetworks.orEmpty(),
                                 )
                             ),
                         )
@@ -153,6 +177,41 @@ class TaskController(
                     reportError("App.TaskController", "启动服务任务", error, null)
                 }
                 throw error
+            }
+        }
+    }
+
+    override suspend fun runSecurityAudit(input: SecurityAuditTaskInput, dictionary: File): Long = withContext(Dispatchers.IO) {
+        val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
+        try {
+            check(isCurrent(binding)) { "服务未连接" }
+            val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
+            require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大，请减少字典选择" }
+            auditStore.saveDictionary(input.network.dictionaryId, dictionary)
+            val id = SecurityAuditDictionaryTransport.open(dictionary).use { fd ->
+                binding.service.runSecurityAudit(request, fd)
+            }
+            val snapshot = binding.service.getTaskSnapshot(id)
+            val currentTaskId = synchronized(binding.pendingLock) {
+                binding.service.getCurrentTaskId().takeIf { it > 0L }.also { binding.currentTaskId = it }
+            }
+            updateState(binding) { current ->
+                current.copy(currentTaskId = currentTaskId, tasks = current.tasks +
+                    (id to (current.tasks[id]?.copy(snapshot = snapshot) ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))))
+            }
+            synchronized(binding.pendingLock) { binding.pendingTaskIds += id; binding.pendingLogIds += id }
+            binding.signal.trySend(Unit)
+            id
+        } catch (error: Throwable) {
+            if (isCurrent(binding)) reportError("App.TaskController", "运行网络安全测试", error, null)
+            throw error
+        }
+    }
+
+    override fun deleteAuditHistory(recordId: String) {
+        scope.launch(Dispatchers.IO) {
+            runCatching { auditStore.delete(recordId) }.onFailure {
+                reportError("App.TaskController", "删除安全测试历史", it, null)
             }
         }
     }
@@ -229,11 +288,13 @@ class TaskController(
                         ?: TaskLogState(scopeTaskId = taskId)
                     current.copy(
                         tasks = current.tasks + (
-                            taskId to TrackedTaskState(snapshot, existingLogs, current.tasks[taskId]?.capturedNetworks.orEmpty())
+                            taskId to TrackedTaskState(snapshot, existingLogs, current.tasks[taskId]?.capturedNetworks.orEmpty(),
+                                current.tasks[taskId]?.auditNetworks.orEmpty())
                         ),
                     )
                 }
                 syncCapturedNetworks(binding, taskId)
+                syncAuditNetworks(binding, taskId)
             }.onFailure { error ->
                 if (error !is DeadObjectException && error !is IOException && isCurrent(binding)) {
                     Log.d(TAG, "任务 $taskId 对账失败：${error.message}")
@@ -269,6 +330,39 @@ class TaskController(
             val old = current.tasks[taskId] ?: return@updateState current
             current.copy(tasks = current.tasks + (taskId to old.copy(capturedNetworks = networks.toList())))
         }
+    }
+
+    private fun syncAuditNetworks(binding: Binding, taskId: Long) {
+        val progress = _state.value.tasks[taskId]?.snapshot?.progress as? TaskProgress.SecurityAudit ?: return
+        if (binding.auditRevisions[taskId] == progress.revision) return
+        repeat(3) {
+            val records = ArrayList<SecurityAuditNetworkRecord>()
+            var revision: Long? = null
+            var changed = false
+            var total: Int
+            do {
+                if (!isCurrent(binding)) return
+                val page = PagedDataTransport.decode(binding.service.getSecurityAuditNetworks(taskId, records.size), SecurityAuditNetworkPage::class.java)
+                if (revision != null && revision != page.revision) { changed = true; break }
+                revision = page.revision
+                total = page.totalCount
+                require(page.fromIndex == records.size) { "安全测试分页不连续" }
+                require(page.networks.isNotEmpty() || total == records.size) { "安全测试分页为空" }
+                records.addAll(page.networks)
+            } while (records.size < total)
+            if (!changed) {
+                if (!isCurrent(binding)) return
+                updateState(binding) { state ->
+                    val old = state.tasks[taskId] ?: return@updateState state
+                    state.copy(tasks = state.tasks + (taskId to old.copy(auditNetworks = records.toList())))
+                }
+                auditStore.merge(records)
+                binding.auditRevisions[taskId] = revision ?: 0
+                return
+            }
+        }
+        synchronized(binding.pendingLock) { binding.pendingTaskIds += taskId }
+        binding.signal.trySend(Unit)
     }
 
     private fun syncLogs(binding: Binding, scopeTaskId: Long) {
@@ -401,6 +495,7 @@ class TaskController(
         val registrationLock: Any = Any(),
         val pendingTaskIds: MutableSet<Long> = mutableSetOf(),
         val pendingLogIds: MutableSet<Long> = mutableSetOf(),
+        val auditRevisions: MutableMap<Long, Long> = mutableMapOf(),
         var globalLogsDirty: Boolean = false,
         var currentTaskId: Long? = null,
         @Volatile var registered: Boolean = false,

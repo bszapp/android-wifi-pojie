@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.contract.terminal
 
 import android.os.ParcelFileDescriptor
+import io.github.bszapp.wifitoolbox.contract.PipeTransport
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -17,32 +18,22 @@ object TerminalLogTransport {
             "终端日志条数过多：${batch.entries.size}"
         }
 
-        val pipe = ParcelFileDescriptor.createReliablePipe()
-        val readSide = pipe[0]
-        val writeSide = pipe[1]
-        writerExecutor.execute {
-            try {
-                DataOutputStream(
-                    BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(writeSide)),
-                ).use { output ->
-                    output.writeInt(MAGIC)
-                    output.writeLong(batch.terminalId)
-                    output.writeLong(batch.generation)
-                    output.writeLong(batch.oldestAvailableId)
-                    output.writeLong(batch.latestId)
-                    output.writeInt(batch.lineCount)
-                    output.writeInt(batch.entries.size)
-                    batch.entries.forEach { entry ->
-                        output.writeLong(entry.id)
-                        output.writeText(entry.text)
-                    }
-                    output.flush()
+        return PipeTransport.open(writerExecutor, "终端日志") { stream ->
+            DataOutputStream(BufferedOutputStream(stream)).use { output ->
+                output.writeInt(MAGIC)
+                output.writeLong(batch.terminalId)
+                output.writeLong(batch.generation)
+                output.writeLong(batch.oldestAvailableId)
+                output.writeLong(batch.latestId)
+                output.writeInt(batch.lineCount)
+                output.writeInt(batch.entries.size)
+                batch.entries.forEach { entry ->
+                    output.writeLong(entry.id)
+                    output.writeText(entry.text)
                 }
-            } catch (_: Throwable) {
-                runCatching { writeSide.close() }
+                output.flush()
             }
         }
-        return readSide
     }
 
     fun decode(descriptor: ParcelFileDescriptor): TerminalLogBatch =
@@ -68,6 +59,7 @@ object TerminalLogTransport {
                     text = input.readText(),
                 )
             }
+            require(input.read() == -1) { "终端日志包含多余数据" }
             TerminalLogBatch(
                 terminalId = terminalId,
                 generation = generation,

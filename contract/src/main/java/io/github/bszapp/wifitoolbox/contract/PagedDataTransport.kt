@@ -25,30 +25,27 @@ object PagedDataTransport {
     fun encode(value: Parcelable): ParcelFileDescriptor {
         val data = bytes(value)
         require(data.size <= MAX_PAGE_BYTES) { "分页数据超出单页预算：${data.size}" }
-        val pipe = ParcelFileDescriptor.createReliablePipe()
-        writers.execute {
-            try {
-                DataOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(pipe[1])).use { out ->
-                    out.writeInt(data.size)
-                    var offset = 0
-                    while (offset < data.size) {
-                        val count = minOf(64 * 1024, data.size - offset)
-                        out.write(data, offset, count)
-                        offset += count
-                    }
+        return PipeTransport.open(writers, "分页数据") { stream ->
+            DataOutputStream(stream).use { out ->
+                out.writeInt(data.size)
+                var offset = 0
+                while (offset < data.size) {
+                    val count = minOf(64 * 1024, data.size - offset)
+                    out.write(data, offset, count)
+                    offset += count
                 }
-            } catch (error: Throwable) {
-                runCatching { pipe[1].closeWithError(error.message ?: "分页写入失败") }
             }
         }
-        return pipe[0]
     }
 
     fun <T : Parcelable> decode(fd: ParcelFileDescriptor, type: Class<T>): T {
         val data = DataInputStream(ParcelFileDescriptor.AutoCloseInputStream(fd)).use { input ->
             val length = input.readInt()
             require(length in 1..MAX_PAGE_BYTES) { "分页数据长度非法：$length" }
-            ByteArray(length).also(input::readFully)
+            ByteArray(length).also {
+                input.readFully(it)
+                require(input.read() == -1) { "分页数据包含多余内容" }
+            }
         }
         val parcel = Parcel.obtain()
         return try {

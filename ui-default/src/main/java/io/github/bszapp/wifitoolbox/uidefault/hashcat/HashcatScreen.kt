@@ -237,14 +237,8 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                             if (task.devices.isNotBlank()) item { Text("计算设备：${task.devices}", style = MiuixTheme.textStyles.body2) }
                             if (task.candidates.isNotBlank()) item { Text("当前候选批次：${task.candidates}", style = MiuixTheme.textStyles.body2) }
                             items(task.findings) { finding ->
-                                var visible by rememberSaveable(task.id, finding.dictionaryPosition, finding.password) { mutableStateOf(false) }
-                                Card(Modifier.fillMaxWidth()) {
-                                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                        Text("已在给定字典的第${finding.dictionaryPosition}位发现密码，此密码为弱密码，建议立即更换。")
-                                        Text(if (visible) finding.password else "••••••••", style = MiuixTheme.textStyles.subtitle)
-                                        TextButton(if (visible) "隐藏密码" else "显示密码", onClick = { visible = !visible })
-                                    }
-                                }
+                                io.github.bszapp.wifitoolbox.uidefault.component.WeakPasswordResult(
+                                    "${task.id}:${finding.dictionaryPosition}", finding.dictionaryPosition, finding.password)
                             }
                             task.error?.let { message -> item { Text(message, style = MiuixTheme.textStyles.body2) } }
                         }

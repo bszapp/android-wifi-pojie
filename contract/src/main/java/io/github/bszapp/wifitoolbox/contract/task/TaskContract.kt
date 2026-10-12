@@ -95,6 +95,12 @@ enum class TaskExecutionState {
 
 @Parcelize
 sealed class TaskProgress : Parcelable {
+    data class SecurityAudit(
+        val revision: Long,
+        val networkCount: Int,
+        val config: SecurityAuditConfig,
+    ) : TaskProgress()
+
     data class ConnectWifi(
         val stage: ConnectWifiStage,
     ) : TaskProgress()
@@ -202,6 +208,8 @@ data class WpsCapturedNetwork(
 
 @Parcelize
 sealed class TaskRequestPayload : Parcelable {
+    data class SecurityAudit(val input: SecurityAuditTaskInput) : TaskRequestPayload()
+
     data class ConnectWifi(
         val request: ConnectWifiTaskRequest,
     ) : TaskRequestPayload()
@@ -215,6 +223,10 @@ sealed class TaskRequestPayload : Parcelable {
 
 @Parcelize
 sealed class TaskUpdatePayload : Parcelable {
+    data class SecurityAuditUpsert(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
+    data class SecurityAuditRemove(val ssid: String) : TaskUpdatePayload()
+    data class SecurityAuditConfigure(val config: SecurityAuditConfig) : TaskUpdatePayload()
+
     data class WpsPbcContinuousCapture(
         val enabled: Boolean,
     ) : TaskUpdatePayload()
