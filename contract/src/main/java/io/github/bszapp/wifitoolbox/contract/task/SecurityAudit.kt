@@ -19,6 +19,17 @@ import kotlinx.parcelize.Parcelize
  */
 enum class SecurityAuditConnectionMethod { SYSTEM, NETWORK_CARD }
 
+/**
+ * 网卡方式的 MAC 策略：设备 MAC 始终使用本机真实地址。
+ *
+ * 异常时更换从首次连接起就使用随机地址并保持不变，同一密码的连续重试次数达到
+ * [SecurityAuditConfig.macChangeThreshold] 时，在该次连接前换成新的随机地址，换过之后
+ * 仍失败则继续换；推进到下一个字典项会把重试计数清零，此时沿用已换过的地址。
+ * 每次更换在每次连接前都使用新的随机地址。
+ * 用于评估路由器对异常环境的风控能力。
+ */
+enum class SecurityAuditMacMode { DEVICE, ON_FAILURE, EVERY_ATTEMPT }
+
 @Parcelize
 data class SecurityAuditConfig(
     val connectionMethod: SecurityAuditConnectionMethod = SecurityAuditConnectionMethod.SYSTEM,
@@ -30,7 +41,8 @@ data class SecurityAuditConfig(
     val cooldownBaseMillis: Long = 0,
     val handshakeTimeoutMillis: Long = 1500,
     val maxHandshakeAttempts: Int = 1,
-    val randomMac: Boolean = false,
+    val macMode: SecurityAuditMacMode = SecurityAuditMacMode.DEVICE,
+    val macChangeThreshold: Int = 1,
 ) : Parcelable
 
 @Parcelize

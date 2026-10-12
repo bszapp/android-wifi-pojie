@@ -144,6 +144,17 @@ fun DefaultUI(
                                 )
                             }
                             entry<Route.ColorPalette> { ColorPaletteScreen() }
+                            entry<Route.WifiQrScanner> {
+                                io.github.bszapp.wifitoolbox.uidefault.screen.WifiQrScannerScreen(
+                                    controller = viewModel.wifiQrCamera,
+                                    onNetwork = { network ->
+                                        if (navigator.current() == Route.WifiQrScanner) {
+                                            viewModel.acceptWifiQrNetwork(network)
+                                            navigator.pop()
+                                        }
+                                    },
+                                )
+                            }
                             entry<Route.Resources> { DictionaryScreen(dictionaryState) }
                             entry<Route.DictionaryEditor> { DictionaryEditorScreen(dictionaryState) }
                             entry<Route.Log> {

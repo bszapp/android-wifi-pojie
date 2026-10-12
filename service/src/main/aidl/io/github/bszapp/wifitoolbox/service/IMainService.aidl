@@ -1,6 +1,8 @@
 package io.github.bszapp.wifitoolbox.service;
 
 import android.os.ParcelFileDescriptor;
+import android.view.Surface;
+import io.github.bszapp.wifitoolbox.service.ICameraPreviewCallback;
 import io.github.bszapp.wifitoolbox.contract.container.ContainerOperationRequest;
 import io.github.bszapp.wifitoolbox.contract.container.ContainerState;
 import io.github.bszapp.wifitoolbox.contract.androidapi.AndroidApiRequest;
@@ -120,4 +122,8 @@ interface IMainService {
     long runSecurityAudit(in TaskStartRequest request, in ParcelFileDescriptor dictionary);
     ParcelFileDescriptor getSecurityAuditNetworks(long taskId, int fromIndex);
     long[] getSecurityAuditTaskIds(int offset);
+    // width / height / sensorOrientation；只传 Surface 句柄，不传视频字节。
+    int[] getRearCameraConfiguration();
+    void startCameraPreview(String sessionId, in Surface preview, in Surface analysis, ICameraPreviewCallback callback);
+    void stopCameraPreview(String sessionId);
 }

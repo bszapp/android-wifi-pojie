@@ -24,6 +24,7 @@ interface IAppController {
     val hashcat: io.github.bszapp.wifitoolbox.contract.hashcat.IHashcatController
     val settings: ISettingsManager
     val containers: IContainerController
+    val wifiQrCamera: io.github.bszapp.wifitoolbox.contract.camera.IWifiQrCameraController
     val errors: SharedFlow<AppError>
     val exitRequests: SharedFlow<Unit>//TODO:未免显得有些突兀的分类？
     val monitorMapFilterState: StateFlow<MonitorMapFilterState>

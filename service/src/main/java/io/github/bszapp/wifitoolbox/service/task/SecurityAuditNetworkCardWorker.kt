@@ -15,9 +15,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.security.SecureRandom
 import java.util.UUID
-import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -28,9 +26,11 @@ internal class SecurityAuditNetworkCardWorker(
 ) {
     @Volatile private var session: Session? = null
 
+    /** mac 由调度器按 MAC 策略在每次连接前决定；null 表示本轮使用设备原 MAC。 */
     fun performTaskLogic(
         ssid: String,
         password: String,
+        mac: String?,
         config: SecurityAuditConfig,
         context: TaskContext,
     ): ConnectionAttemptResult {
@@ -44,7 +44,7 @@ internal class SecurityAuditNetworkCardWorker(
             put("requestId", requestId)
             put("ssid", ssid)
             put("passwords", JSONArray(listOf(password)))
-            put("mac", if (config.randomMac) createRandomMacAddress() else JSONObject.NULL)
+            put("mac", mac ?: JSONObject.NULL)
             put("hostname", deviceName())
             put("hostnameEncoding", "gbk")
             put("timeoutMillis", connection.timeoutMillis)
@@ -412,12 +412,6 @@ internal class SecurityAuditNetworkCardWorker(
         else -> previous
     }
 
-    private fun createRandomMacAddress(): String {
-        val bytes = ByteArray(6).also(SECURE_RANDOM::nextBytes)
-        bytes[0] = ((bytes[0].toInt() and 0xfc) or 0x02).toByte()
-        return bytes.joinToString(":") { "%02x".format(Locale.ROOT, it.toInt() and 0xff) }
-    }
-
     private class Session {
         val sessionId = UUID.randomUUID().toString()
         val commandFifoId = UUID.randomUUID().toString()
@@ -443,7 +437,6 @@ internal class SecurityAuditNetworkCardWorker(
     }
 
     private companion object {
-        val SECURE_RANDOM = SecureRandom()
         const val SCRIPT_READY = "[*] Managed Wi-Fi diagnostic ready (protocol=2)"
         val LOG_PREFIXES = listOf("[*] ", "[-] ", "[+] ")
     }

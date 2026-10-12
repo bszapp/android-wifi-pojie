@@ -75,6 +75,7 @@ internal sealed interface ConnectWifiSheetContent {
         val ssid: String,
         val hasSavedConfiguration: Boolean,
         val allowNetworkCardTest: Boolean = false,
+        val initialPassword: String = "",
     ) : ConnectWifiSheetContent
 
     data object Task : ConnectWifiSheetContent
@@ -160,7 +161,11 @@ internal fun ConnectWifiTaskSheet(
         ?: initialInput
 
     val formState = remember(inputContent) {
-        ConnectWifiConfigurationFormState()
+        ConnectWifiConfigurationFormState().apply {
+            val initial = (inputContent as? ConnectWifiSheetContent.Network)?.initialPassword.orEmpty()
+            password = initial
+            networkCardPasswords = initial
+        }
     }
 
     val taskContent = content as? ConnectWifiSheetContent.Task

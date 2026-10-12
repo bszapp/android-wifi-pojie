@@ -104,11 +104,16 @@ internal class SecurityAuditTask(
         val selectedConfig = config
         entry.lastAttemptAt = SystemClock.elapsedRealtime()
         val started = entry.lastAttemptAt
+        // 网卡方式的随机策略在本轮连接前决定并保持；返回 null 即使用设备原 MAC。
+        val mac = selectMac(entry, selectedConfig)
+        val macLabel = mac
         entry.record = entry.record.copy(state = SecurityAuditNetworkState.CONNECTING, config = selectedConfig,
             attempts = entry.record.attempts + 1, nextAttemptAt = null,
-            updatedAt = System.currentTimeMillis(), message = "正在尝试：$password",
+            updatedAt = System.currentTimeMillis(),
+            message = if (macLabel != null) "正在尝试：$password\nMAC：$macLabel" else "正在尝试：$password",
             stage = ConnectWifiStage.ROUTER_COMMUNICATION)
-        context.log("[${entry.record.input.ssid}] 尝试字典第 ${entry.record.completed + 1}/${entry.passwords.size} 位")
+        context.log("[${entry.record.input.ssid}] 尝试字典第 ${entry.record.completed + 1}/${entry.passwords.size} 位" +
+            (macLabel?.let { " mac=$it" } ?: ""))
         publish(context)
         val child = context.forAttempt(entry.record.input.ssid, { progress ->
             if (progress is TaskProgress.ConnectWifi) {
@@ -123,7 +128,7 @@ internal class SecurityAuditTask(
                 entry.configurationCleanupAttempted = false
             }
             try {
-                worker.performTaskLogic(entry.record.input.ssid, password, selectedConfig, child)
+                worker.performTaskLogic(entry.record.input.ssid, password, mac, selectedConfig, child)
             } finally {
                 // 旧版先记录连接耗时，再清理连接；清理不计入密码尝试耗时。
                 duration = SystemClock.elapsedRealtime() - started
@@ -267,11 +272,42 @@ internal class SecurityAuditTask(
             context.log("[${entry.record.input.ssid}] 遗忘网络失败：${error.message ?: error.javaClass.name}")
         }
     }
+    /**
+     * 决定本次连接使用的 MAC；null 表示使用设备原 MAC。
+     *
+     * 异常时更换/每次更换在首次尝试就使用随机地址，并在该网络的后续尝试中一直保持，
+     * 不再回退到设备地址；同一密码连续重试次数达到阈值时即换成新的随机地址。
+     * 每次更换等价于阈值 0，即每次尝试都换新。
+     */
+    private fun selectMac(entry: Entry, config: SecurityAuditConfig): String? {
+        if (config.connectionMethod != SecurityAuditConnectionMethod.NETWORK_CARD) {
+            entry.mac = null
+            return null
+        }
+        return when (config.macMode) {
+            SecurityAuditMacMode.DEVICE -> { entry.mac = null; null }
+            SecurityAuditMacMode.EVERY_ATTEMPT -> randomMacAddress().also { entry.mac = it }
+            SecurityAuditMacMode.ON_FAILURE ->
+                if (entry.mac == null || entry.record.retryCount >= config.macChangeThreshold) {
+                    randomMacAddress().also { entry.mac = it }
+                } else entry.mac
+        }
+    }
+
+    /** 本地管理的单播随机 MAC，避开多播位。 */
+    private fun randomMacAddress(): String =
+        (1..6).joinToString(":") { "%02x".format(SECURE_RANDOM.nextInt(256) and 0xfc or 0x02) }
+
     private fun cooldownMillis(retries: Int): Long =
         if (retries > 0) 2.0.pow(retries.toDouble() - 1).toLong() * config.cooldownBaseMillis else 0
     private class AttemptChanged : InterruptedException()
+    private companion object {
+        val SECURE_RANDOM = java.security.SecureRandom()
+    }
     private data class Entry(var record: SecurityAuditNetworkRecord, var passwords: List<String>,
         var lastAttemptAt: Long = 0, var readyAt: Long = 0, val costs: MutableList<Long> = mutableListOf(),
+        /** 随机 MAC 策略下该网络当前保持的地址；null 表示使用设备原 MAC。 */
+        var mac: String? = null,
         var systemConfiguration: Boolean = record.config.connectionMethod == SecurityAuditConnectionMethod.SYSTEM,
         var configurationCleanupAttempted: Boolean = false)
 }

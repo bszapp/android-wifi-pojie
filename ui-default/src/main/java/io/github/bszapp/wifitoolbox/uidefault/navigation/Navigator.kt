@@ -22,6 +22,9 @@ sealed interface Route : NavKey, Parcelable {
     data object Log : Route
 
     @Parcelize
+    data object WifiQrScanner : Route
+
+    @Parcelize
     data class Capture(val bssid: String = "", val deviceMac: String = "") : Route
 
     @Parcelize

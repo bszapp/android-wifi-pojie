@@ -29,6 +29,7 @@ internal class SecurityAuditConnectWorker(
     fun performTaskLogic(
         ssid: String,
         password: String,
+        mac: String?,
         config: SecurityAuditConfig,
         context: TaskContext,
     ): ConnectionAttemptResult {
@@ -39,7 +40,7 @@ internal class SecurityAuditConnectWorker(
                 networkCardWorker.closeSession(context)
                 performSystemConnection(ssid, password, config, context)
             }
-            SecurityAuditConnectionMethod.NETWORK_CARD -> networkCardWorker.performTaskLogic(ssid, password, config, context)
+            SecurityAuditConnectionMethod.NETWORK_CARD -> networkCardWorker.performTaskLogic(ssid, password, mac, config, context)
         }
     }
 

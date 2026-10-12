@@ -72,7 +72,6 @@ class SecurityAuditUiState(
         controller.tasks.configureSecurityAudit(config)
         _sheet.update { it.copy(config = config) }
     }
-    fun applyConfig() = dismiss()
 
     fun manualNetwork() { _sheet.value = SecurityAuditSheetState(show = true,
         page = SecurityAuditSheetPage.MANUAL, config = currentConfig()) }

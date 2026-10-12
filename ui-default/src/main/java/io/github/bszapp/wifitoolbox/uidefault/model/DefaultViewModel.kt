@@ -36,6 +36,12 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     val tasks = controller.tasks
     val securityAudit = SecurityAuditUiState(app, controller, viewModelScope)
     val containerState = controller.containers.state
+    val wifiQrCamera = controller.wifiQrCamera
+    private val _scannedWifiNetwork = MutableStateFlow<WifiQrNetwork?>(null)
+    val scannedWifiNetwork: StateFlow<WifiQrNetwork?> = _scannedWifiNetwork
+
+    fun acceptWifiQrNetwork(network: WifiQrNetwork) { _scannedWifiNetwork.value = network }
+    fun consumeWifiQrNetwork() { _scannedWifiNetwork.value = null }
 
     val startup = StartupUiState(controller, viewModelScope) { exit, error ->
         showConfirmationDialog(

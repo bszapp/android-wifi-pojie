@@ -169,8 +169,13 @@ fun ListScreen(
                         ImmediateVisibility(
                             visible = selectedSource == WifiMode.NORMAL,
                         ) {
-                            IconButton(onClick = { taskActionScope.launch { runCatching { viewModel.startWpsPbcTask() } } }) {
-                                Icon(Icons.Rounded.WifiProtectedSetup, "启动 WPS-PBC", tint = colorScheme.onSurface)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { navigator.push(Route.WifiQrScanner) }) {
+                                    Icon(Icons.Rounded.QrCodeScanner, "扫码连接网络", tint = colorScheme.onSurface)
+                                }
+                                IconButton(onClick = { taskActionScope.launch { runCatching { viewModel.startWpsPbcTask() } } }) {
+                                    Icon(Icons.Rounded.WifiProtectedSetup, "启动 WPS-PBC", tint = colorScheme.onSurface)
+                                }
                             }
                         }
                         ImmediateVisibility(visible = selectedSource == WifiMode.MONITOR) {

@@ -37,6 +37,7 @@ android {
 dependencies {
     implementation(project(":contract"))
     implementation(project(":scripta"))
+    implementation("com.google.zxing:core:3.5.4")
 
     implementation(platform(libs.androidx.compose.bom))
 

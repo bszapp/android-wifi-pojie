@@ -63,6 +63,9 @@ class ToolboxApp : Application(), IAppController {
     private lateinit var taskController: TaskController
     private lateinit var hashcatController: io.github.bszapp.wifitoolbox.hashcat.HashcatTaskController
     private lateinit var containerController: ContainerController
+    private lateinit var wifiQrCameraController: io.github.bszapp.wifitoolbox.camera.WifiQrCameraController
+    override val wifiQrCamera: io.github.bszapp.wifitoolbox.contract.camera.IWifiQrCameraController
+        get() = wifiQrCameraController
     override lateinit var runtimeUpdates: io.github.bszapp.wifitoolbox.contract.startup.IRuntimeUpdateController
         private set
     override lateinit var settings: SettingsManager
@@ -205,6 +208,7 @@ class ToolboxApp : Application(), IAppController {
             scope = appScope,
             reportError = ::publishError,
         )
+        wifiQrCameraController = io.github.bszapp.wifitoolbox.camera.WifiQrCameraController(appScope, ::publishError)
         processLauncher = ProcessLauncher(
             context = this,
             onBeforeServiceStop = hashcatController::prepareServiceShutdown,
@@ -217,6 +221,7 @@ class ToolboxApp : Application(), IAppController {
                 )
             },
             onServiceConnected = { service, androidApi ->
+                wifiQrCameraController.connect(service)
                 wifiListController.connect(service, androidApi)
                 serviceLogController.connect(service)
                 terminalController.connect(service)
@@ -225,6 +230,7 @@ class ToolboxApp : Application(), IAppController {
                 hashcatController.connect(service)
             },
             onServiceDisconnected = {
+                wifiQrCameraController.disconnect()
                 wifiListController.disconnect()
                 serviceLogController.disconnect()
                 terminalController.disconnect()

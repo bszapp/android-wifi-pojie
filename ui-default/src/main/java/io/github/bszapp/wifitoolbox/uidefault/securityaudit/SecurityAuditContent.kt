@@ -33,7 +33,6 @@ import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
-import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
@@ -109,17 +108,17 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                 }
                 form.message?.let { message -> item { Text(message, style = MiuixTheme.textStyles.body2) } }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // 配置页修改即时生效，不再提供关闭/应用按钮；拖拽或返回即可关闭。
+            if (form.page != SecurityAuditSheetPage.CONFIGURATION) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextButton("关闭", onClick = model::dismiss, modifier = Modifier.weight(1f))
                 when (form.page) {
-                    SecurityAuditSheetPage.CONFIGURATION -> TextButton("应用", onClick = model::applyConfig,
-                        modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
                     SecurityAuditSheetPage.DICTIONARIES -> TextButton(if (form.busy) "准备中" else "运行", onClick = model::requestRun,
                         enabled = !form.busy && form.candidateCount > 0, modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
                     SecurityAuditSheetPage.DETAIL -> Unit
                     SecurityAuditSheetPage.SAVED, SecurityAuditSheetPage.RECOVERY -> Unit
                     SecurityAuditSheetPage.MANUAL -> TextButton("下一步", model::selectManualNetwork,
                         Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
+                    SecurityAuditSheetPage.CONFIGURATION -> Unit
                 }
             }
             Spacer(Modifier.height(safeBottom))
@@ -165,12 +164,19 @@ private fun AuditConfiguration(config: SecurityAuditConfig, onChange: (SecurityA
         LegacyTabRow(tabs = listOf("测试连通性", "测试连通性（网卡）"), selectedTabIndex = config.connectionMethod.ordinal,
             onTabSelected = { onChange(config.copy(connectionMethod = SecurityAuditConnectionMethod.entries[it])) })
         AnimatedVisibility(config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) {
-            SwitchPreference(
-                title = "随机 MAC",
-                summary = "每次网络尝试使用新的本地随机 MAC",
-                checked = config.randomMac,
-                onCheckedChange = { onChange(config.copy(randomMac = it)) },
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("MAC 策略", style = MiuixTheme.textStyles.subtitle)
+                Text("评估路由器对异常环境的风控能力；仅网卡方式支持，系统方式始终使用设备 MAC。",
+                    style = MiuixTheme.textStyles.footnote1)
+                LegacyTabRow(tabs = listOf("设备 MAC", "异常时更换", "每次更换"),
+                    selectedTabIndex = config.macMode.ordinal,
+                    onTabSelected = { onChange(config.copy(macMode = SecurityAuditMacMode.entries[it])) })
+                AnimatedVisibility(config.macMode == SecurityAuditMacMode.ON_FAILURE) {
+                    AuditSlider("连续重试次数", config.macChangeThreshold.toLong(), 1, 5, 1, "次") {
+                        onChange(config.copy(macChangeThreshold = it.toInt()))
+                    }
+                }
+            }
         }
         Text("单次尝试", style = MiuixTheme.textStyles.subtitle, color = MiuixTheme.colorScheme.primary)
         AuditSlider("最大尝试时间", connection.timeoutMillis, 1000L, 10000L, 500L, "ms") {

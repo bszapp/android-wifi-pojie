@@ -111,6 +111,19 @@ fun WifiList(
     var dismissConnectSheet by remember { mutableStateOf(false) }
     var isSubmittingTask by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val scannedNetwork by vm.scannedWifiNetwork.collectAsStateWithLifecycle()
+    LaunchedEffect(scannedNetwork) {
+        scannedNetwork?.let { network ->
+            dismissConnectSheet = false
+            connectSheetContent = ConnectWifiSheetContent.Network(
+                ssid = network.ssid,
+                hasSavedConfiguration = savedWifiList?.networks.orEmpty().any { it.SSID?.removeSurrounding("\"") == network.ssid },
+                allowNetworkCardTest = modeState?.mode == WifiMode.NORMAL,
+                initialPassword = network.password,
+            )
+            vm.consumeWifiQrNetwork()
+        }
+    }
     val connectSheetInstanceId = remember(connectSheetContent != null) {
         java.util.UUID.randomUUID().toString()
     }

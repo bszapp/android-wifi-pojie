@@ -492,6 +492,7 @@ internal class TaskManager(
     private fun validateAuditConfig(config: SecurityAuditConfig) {
         check(normalModeTaskReadyProvider()) { "安全测试只能在普通网卡模式运行" }
         require(config.retryCount in 0..6 && config.cooldownBaseMillis in 0..8000) { "重试/冷却配置非法" }
+        require(config.macChangeThreshold in 1..5) { "异常时更换的连续重试次数应为 1～5" }
         validateConnectionConfig(config.connection)
         if (config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) validateNetworkCardEnvironment()
     }

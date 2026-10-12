@@ -54,6 +54,9 @@ open class MainService(
 
     private val initializer = ServiceInitializer(serviceContext)
 
+    private val wifiQrCameraDelegate = lazy { io.github.bszapp.wifitoolbox.service.camera.WifiQrCameraManager() }
+    private val wifiQrCamera by wifiQrCameraDelegate
+
     private val wifiLogAnalyzer = WifiLogAnalyzer(systemWifiLogRecorder)
 
     private val communication = ServiceCommunication(
@@ -282,6 +285,13 @@ open class MainService(
     override fun connect(): Boolean = communication.connect()
 
     override fun isAlive(): Boolean = communication.isAlive()
+
+    override fun getRearCameraConfiguration(): IntArray = communication.callFromApp { wifiQrCamera.configuration() }
+
+    override fun startCameraPreview(id: String, preview: android.view.Surface, analysis: android.view.Surface, callback: ICameraPreviewCallback) =
+        communication.callFromApp { wifiQrCamera.start(id, preview, analysis, callback) }
+
+    override fun stopCameraPreview(id: String) = communication.callFromApp { wifiQrCamera.stop(id) }
 
     override fun getStartupInfo(): StartupInfo = communication.callFromApp {
         initializer.requireStartupInfo()
@@ -754,6 +764,7 @@ open class MainService(
     override fun shutdown() = communication.callFromApp {
         check(hashcatManager.prepareShutdown()) { "Hashcat 任务备份尚未完成，服务保持运行" }
         Log.d(TAG, "收到 shutdown，服务退出")
+        if (wifiQrCameraDelegate.isInitialized()) wifiQrCamera.close()
         taskManager.close()
         wifiListController.stop()
         taskManager.unregisterCallback(notificationTaskCallback)

@@ -107,7 +107,8 @@ internal class SecurityAuditHistoryStore(private val directory: File) {
             put("cooldownBase", record.config.cooldownBaseMillis)
             put("handshakeTimeoutValue", record.config.handshakeTimeoutMillis)
             put("handshakeAttemptsValue", record.config.maxHandshakeAttempts)
-            put("randomMac", record.config.randomMac)
+            put("macMode", record.config.macMode.name)
+            put("macChangeThreshold", record.config.macChangeThreshold)
         })
         put("startedAt", record.startedAt)
         put("updatedAt", record.updatedAt)
@@ -139,7 +140,11 @@ internal class SecurityAuditHistoryStore(private val directory: File) {
                     if (config.isNull("handshakeTimeout")) null else HandshakeTimeoutFlag(config.getLong("handshakeTimeout")))),
                 config.getInt("retryCount"), config.getLong("cooldownBase"),
                 config.optLong("handshakeTimeoutValue", 1500), config.optInt("handshakeAttemptsValue", 1),
-                config.optBoolean("randomMac", false)),
+                // 旧版随机 MAC 开关按“每次更换”还原；无该字段时保持设备 MAC。
+                if (config.has("macMode")) SecurityAuditMacMode.valueOf(config.getString("macMode"))
+                else if (config.optBoolean("randomMac", false)) SecurityAuditMacMode.EVERY_ATTEMPT
+                else SecurityAuditMacMode.DEVICE,
+                config.optInt("macChangeThreshold", 1).coerceIn(1, 5)),
             startedAt = json.getLong("startedAt"), updatedAt = json.getLong("updatedAt"),
             state = SecurityAuditNetworkState.valueOf(json.getString("state")), total = json.getInt("total"),
             completed = json.getInt("completed"), attempts = json.getLong("attempts"), retryCount = json.getInt("retryCount"),
