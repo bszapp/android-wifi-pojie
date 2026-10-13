@@ -55,6 +55,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.contract.wifilist.SystemScanData
 import io.github.bszapp.wifitoolbox.contract.wifilist.scanResults
 import io.github.bszapp.wifitoolbox.contract.wifilist.connection
+import io.github.bszapp.wifitoolbox.contract.wifilist.supportsWps
 import io.github.bszapp.wifitoolbox.contract.wifilist.hasData
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorDevice
@@ -233,6 +234,7 @@ fun WifiList(
                                 is TaskProgress.WpsPbc ->
                                     "WPS-PBC · 已获取 ${progress.networkCount} 个网络"
                                 is TaskProgress.UsbMonitor -> "电脑控制"
+                                is TaskProgress.WpsPin -> "WPS PIN · 已获取 ${progress.networkCount} 个网络"
                                 is TaskProgress.SecurityAudit -> "网络安全测试 · ${progress.networkCount} 个网络"
                                 null -> "加载中"
                             },
@@ -268,6 +270,7 @@ fun WifiList(
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
                                 auditMode = auditMode,
                                 auditRunning = auditRecord?.active == true,
+                                allowWpsPin = modeState?.mode == WifiMode.NORMAL,
                                 onClick = {
                                     selectedSsid = group.ssid
                                     showWifiDetailSheet = true
@@ -622,6 +625,7 @@ private fun WifiGroupCard(
     discoveredHiddenNameCount: Int,
     auditMode: Boolean = false,
     auditRunning: Boolean = false,
+    allowWpsPin: Boolean = false,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onConnect: () -> Unit,
@@ -703,6 +707,9 @@ private fun WifiGroupCard(
                     }
 
                     val tags = buildList {
+                        if (group.networks.any { it.supportsWps() }) {
+                            add(Triple("WPS", TagStyle.Secondary, null))
+                        }
                         if (group.accessPointCount > 1) {
                             add(Triple(group.accessPointCount.toString(), TagStyle.Tertiary, Icons.Default.Layers))
                         }
@@ -757,6 +764,8 @@ private fun WifiGroupCard(
                 },
                 onOpenDetail = { onClick() },
                 onConnectWithConfig = onConnectWithConfig,
+                allowWpsPin = allowWpsPin,
+                onWpsPin = { vm.openWpsPin(group.ssid) },
                 onUpdateConfig = { networkId, patch ->
                     vm.wifiList.updateWifiConfig(networkId, patch)
                 },

@@ -59,6 +59,7 @@ fun ListScreen(
         it.state == TaskExecutionState.RUNNING && it.request.payload is TaskRequestPayload.UsbMonitor
     }
     val displayedTask by viewModel.displayedTask.collectAsStateWithLifecycle()
+    val wpsPinForm by viewModel.wpsPinForm.collectAsStateWithLifecycle()
     val selectedSource = modeState?.mode ?: WifiMode.NORMAL
     val submode by viewModel.securityAudit.submode.collectAsStateWithLifecycle()
     val auditMode = selectedSource == WifiMode.NORMAL && submode == NormalWifiSubmode.SECURITY_AUDIT
@@ -387,6 +388,10 @@ fun ListScreen(
         },
     )
 
+    wpsPinForm?.let { form ->
+        WpsPinInputSheet(form, viewModel::startWpsPin,
+            viewModel::dismissWpsPinForm, viewModel::wpsPinFormDismissed)
+    }
     displayedTask?.let { task ->
         if (task.snapshot.taskId != inlineConnectTaskId) {
             DisplayedTaskSheet(viewModel = viewModel, task = task)
@@ -437,6 +442,8 @@ private fun DisplayedTaskSheet(
             onDismiss = viewModel::closeDisplayedTask,
         )
         TaskRequestPayload.UsbMonitor -> Unit
+        is TaskRequestPayload.WpsPin -> WpsPinTaskSheet(task, viewModel::stopDisplayedTask,
+            viewModel::closeDisplayedTask, viewModel::connectCapturedWpsNetwork)
         is TaskRequestPayload.SecurityAudit -> SecurityAuditTaskSheet(task,
             onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
             onInspect = viewModel.securityAudit::inspect)

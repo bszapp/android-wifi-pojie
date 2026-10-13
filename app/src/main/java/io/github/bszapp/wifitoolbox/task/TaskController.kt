@@ -315,7 +315,11 @@ class TaskController(
 
     private fun syncCapturedNetworks(binding: Binding, taskId: Long) {
         val task = _state.value.tasks[taskId] ?: return
-        val count = (task.snapshot.progress as? TaskProgress.WpsPbc)?.networkCount ?: return
+        val count = when (val progress = task.snapshot.progress) {
+            is TaskProgress.WpsPbc -> progress.networkCount
+            is TaskProgress.WpsPin -> progress.networkCount
+            else -> return
+        }
         val networks = ArrayList(task.capturedNetworks)
         while (isCurrent(binding) && networks.size < count) {
             val page = PagedDataTransport.decode(

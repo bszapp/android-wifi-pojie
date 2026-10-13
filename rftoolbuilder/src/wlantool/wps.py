@@ -12,6 +12,12 @@ import time
 from datetime import datetime
 import csv
 import argparse
+import json
+import queue
+import threading
+import signal
+import re
+from contextlib import closing as close_resource
 
 
 RESTART_AFTER_EXCLUDED_AP = object()
@@ -43,12 +49,14 @@ class ConnectionStatus:
 class Companion:
     """Main application part"""
     def __init__(self, interface, save_result=False, print_debug=False, bssid=None,
-                 exclude_macs=None, complete_protocol=False):
+                 exclude_macs=None, complete_protocol=False, check_running=None):
         self.interface = interface
         self.save_result = save_result
         self.print_debug = print_debug
         self.exclude_macs = exclude_macs or []
         self.complete_protocol = complete_protocol
+        self.check_running = check_running or (lambda: None)
+        self.cleaned = False
 
         self.tempdir = tempfile.mkdtemp()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
@@ -60,6 +68,7 @@ class Companion:
         self.res_socket_file = f"{tempfile.gettempdir()}/{next(tempfile._get_candidate_names())}"
         self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.retsock.bind(self.res_socket_file)
+        self.retsock.settimeout(.2)
 
         self.connection_status = ConnectionStatus()
 
@@ -80,13 +89,30 @@ class Companion:
         ]
         self.wpas = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+        self.output_lines = queue.Queue()
+        process = self.wpas
+        output_lines = self.output_lines
+
+        def receive_output():
+            try:
+                for line in process.stdout:
+                    output_lines.put(line)
+            finally:
+                output_lines.put(None)
+
+        self.output_thread = threading.Thread(target=receive_output, name='wps-supplicant-output', daemon=True)
+        self.output_thread.start()
         # Waiting for wpa_supplicant control interface initialization
+        deadline = time.monotonic() + 10
         while True:
+            self.check_running()
             ret = self.wpas.poll()
-            if ret is not None and ret != 0:
-                raise ValueError('wpa_supplicant returned an error: ' + self.wpas.communicate()[0])
+            if ret is not None:
+                raise ValueError('wpa_supplicant exited before control interface was ready: %s' % ret)
             if os.path.exists(self.wpas_ctrl_path):
                 break
+            if time.monotonic() >= deadline:
+                raise TimeoutError('wpa_supplicant control interface initialization timed out')
             time.sleep(.1)
 
     def __stop_wpa_supplicant(self):
@@ -100,6 +126,7 @@ class Companion:
                 self.wpas.kill()
                 self.wpas.wait()
         if self.wpas.stdout is not None:
+            self.output_thread.join(timeout=1)
             self.wpas.stdout.close()
 
     def __restart_wpa_supplicant(self):
@@ -119,9 +146,15 @@ class Companion:
     def sendAndReceive(self, command):
         """Sends command to wpa_supplicant and returns the reply"""
         self.retsock.sendto(command.encode(), self.wpas_ctrl_path)
-        (b, address) = self.retsock.recvfrom(4096)
-        inmsg = b.decode('utf-8', errors='replace')
-        return inmsg
+        deadline = time.monotonic() + 5
+        while True:
+            self.check_running()
+            try:
+                b, address = self.retsock.recvfrom(4096)
+                return b.decode('utf-8', errors='replace')
+            except socket.timeout:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('wpa_supplicant control reply timed out: %s' % command)
 
     @staticmethod
     def _explain_wpas_not_ok_status(command: str, respond: str):
@@ -134,7 +167,13 @@ class Companion:
     def __handle_wpas(self, pbc_mode=False, verbose=None, bssid=""):
         if not verbose:
             verbose = self.print_debug
-        line = self.wpas.stdout.readline()
+        while True:
+            self.check_running()
+            try:
+                line = self.output_lines.get(timeout=.1)
+                break
+            except queue.Empty:
+                continue
         if not line:
             self.wpas.wait()
             return False
@@ -222,6 +261,7 @@ class Companion:
                 return True
 
             self.connection_status.status = 'authenticating'
+            self.connection_status.bssid = target_bssid
             if 'SSID' in line:
                 self.connection_status.essid = codecs.decode("'".join(line.split("'")[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
             self.__print_with_indicators('*', 'Authenticating…')
@@ -233,7 +273,11 @@ class Companion:
                 self.connection_status.essid = codecs.decode("'".join(line.split("'")[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
             self.__print_with_indicators('*', 'Associating with AP…')
         elif ('Associated with' in line) and (self.interface in line):
-            associated_bssid = line.split()[-1].upper()
+            match = re.search(r'Associated with ((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})', line)
+            if match is None:
+                return True
+            associated_bssid = match.group(1).upper()
+            self.connection_status.bssid = associated_bssid
             if self.connection_status.essid:
                 self.__print_with_indicators('+', 'Associated with {} (ESSID: {})'.format(associated_bssid, self.connection_status.essid))
             else:
@@ -296,10 +340,6 @@ class Companion:
 
     def __single_connection_attempt(self, bssid=None, pin=None, pbc_mode=False, verbose=None):
         self.connection_status.clear()
-        initial_output = self.wpas.stdout.read(300)   # Clean the pipe
-        if verbose or self.print_debug:
-            sys.stdout.write(initial_output)
-            sys.stdout.flush()
 
         if pbc_mode:
             # Consume each reply before WPS_PBC so a stale blacklist reply
@@ -375,11 +415,18 @@ class Companion:
         print('[{}] [{}] {}'.format(level, self.lastPwr, msg))
 
     def cleanup(self):
-        self.retsock.close()
+        if self.cleaned:
+            return
+        self.cleaned = True
+        if hasattr(self, 'retsock'):
+            self.retsock.close()
         self.__stop_wpa_supplicant()
-        os.remove(self.res_socket_file)
-        shutil.rmtree(self.tempdir, ignore_errors=True)
-        os.remove(self.tempconf)
+        for name in ('res_socket_file', 'tempconf'):
+            path = getattr(self, name, None)
+            if path and os.path.exists(path):
+                os.remove(path)
+        if hasattr(self, 'tempdir'):
+            shutil.rmtree(self.tempdir, ignore_errors=True)
 
     def __del__(self):
         try:
@@ -406,6 +453,304 @@ def die(msg):
     sys.exit(1)
 
 
+def persistent_fifo_main(interface, command_pipe, event_pipe):
+    """One owner-controlled session; only caller-supplied PIN or explicit PBC commands."""
+    import managed_connect
+    from managed_supplicant_guard import SupplicantPauseGuard
+
+    pending = queue.Queue()
+    closing = threading.Event()
+    cancel = threading.Event()
+    lock = threading.Lock()
+    active_request = [None]
+    cancelled = set()
+    guard = None
+    writer = None
+    restored = False
+    emit_lock = threading.RLock()
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+
+    def emit(kind, **fields):
+        with emit_lock:
+            writer.write(json.dumps(dict(type=kind, **fields), ensure_ascii=False) + '\n')
+            writer.flush()
+
+    def forward_log(content):
+        if not content.strip():
+            return
+        request_id = active_request[0]
+        emit('log', requestId=request_id, content=content)
+        if request_id is None:
+            return
+        packet = re.search(r'(Sending|Received) WPS Message (M[1-8]D?|WSC_Done)', content)
+        if packet:
+            emit('progress', requestId=request_id, stage='HANDSHAKE', packet=packet[2],
+                 direction='SENDING' if packet[1] == 'Sending' else 'RECEIVED')
+        elif 'Received WSC NACK' in content:
+            emit('progress', requestId=request_id, stage='HANDSHAKE', packet='WSC_NACK', direction='RECEIVED')
+        else:
+            for text, stage in (
+                ('Scanning…', 'SCANNING'), ('Authenticating…', 'AUTHENTICATING'),
+                ('Associating with AP…', 'ASSOCIATING'), ('Associated with ', 'ASSOCIATED'),
+                ('Sending EAPOL Start…', 'EAPOL_START'), ('Received Identity Request', 'IDENTITY_REQUEST'),
+                ('Sending Identity Response…', 'IDENTITY_RESPONSE'), ('WPS protocol completed', 'PROTOCOL_COMPLETED'),
+            ):
+                if text in content:
+                    emit('progress', requestId=request_id, stage=stage)
+                    break
+
+    class FifoConsole:
+        """Preserve console output and forward complete lines without changing WPS behavior."""
+        def __init__(self, stream):
+            self.stream = stream
+            self.pending = ''
+            self.lock = threading.RLock()
+
+        def write(self, text):
+            with self.lock:
+                self.pending += text
+                while '\n' in self.pending or len(self.pending) >= 8192:
+                    newline = self.pending.find('\n')
+                    end = newline if 0 <= newline < 8192 else 8192
+                    line = self.pending[:end]
+                    self.pending = self.pending[end + (1 if newline == end else 0):]
+                    forward_log(line)
+                self.stream.write(text)
+            return len(text)
+
+        def flush(self):
+            self.stream.flush()
+
+        def finish(self):
+            with self.lock:
+                if self.pending:
+                    forward_log(self.pending)
+                    self.pending = ''
+                self.stream.flush()
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+    def check_running():
+        if closing.is_set() or cancel.is_set():
+            raise InterruptedError('WPS request cancelled')
+        if guard is not None:
+            guard.ensure_active()
+
+    def shutdown(*_):
+        closing.set()
+        cancel.set()
+        managed_connect.stop_requested.set()
+        pending.put(None)
+
+    def read_commands():
+        try:
+            with open(command_pipe, encoding='utf-8') as source:
+                for raw in source:
+                    try:
+                        request = json.loads(raw)
+                        if not isinstance(request, dict):
+                            raise ValueError('Command must be an object')
+                        kind = request.get('type')
+                        if kind == 'shutdown':
+                            shutdown()
+                            return
+                        if kind == 'cancel':
+                            request_id = request.get('requestId')
+                            with lock:
+                                if request_id == active_request[0]:
+                                    cancel.set()
+                                else:
+                                    cancelled.add(request_id)
+                            continue
+                        if kind != 'run' or not isinstance(request.get('requestId'), str) or not request['requestId']:
+                            raise ValueError('run requires requestId')
+                        pending.put(request)
+                    except (ValueError, TypeError) as error:
+                        print('[-] Invalid FIFO command: %s' % error, flush=True)
+        except BaseException as error:
+            print('[-] Command FIFO failed: %r' % error, flush=True)
+        finally:
+            shutdown()
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, shutdown)
+
+    def guard_log(name, **fields):
+        print('[*] %s: %s' % (name, json.dumps(fields, ensure_ascii=False)), flush=True)
+
+    try:
+        writer = open(event_pipe, 'w', encoding='utf-8', buffering=1)
+        sys.stdout = FifoConsole(original_stdout)
+        sys.stderr = FifoConsole(original_stderr)
+        threading.Thread(target=read_commands, name='wps-command-fifo', daemon=True).start()
+        guard = SupplicantPauseGuard(None, guard_log)
+        guard.start(check_running)
+        # Reuse the exact managed diagnostic disconnect path, including socket ownership handling.
+        managed_connect.supplicant_guard = guard
+        managed_connect.overall_deadline = time.monotonic() + 10
+        with close_resource(managed_connect.Netlink(interface)) as nl:
+            info = nl.command(5, name='read WPS interface mode', reply=True)[0]
+            mode = managed_connect.struct.unpack('=I', managed_connect.scan.first_attr(info, 5))[0]
+            if mode != 2:
+                raise RuntimeError('WPS requires managed interface mode')
+            before_flags = managed_connect.flags(interface)
+            if not before_flags & 1:
+                managed_connect.flags(interface, before_flags | 1)
+            connected = lambda: any(
+                managed_connect.scan.first_attr(managed_connect.scan.parse_attrs(bss), 9) ==
+                managed_connect.struct.pack('=I', 1) for bss in nl.read_results())
+            if connected():
+                print('[*] Disconnecting current system connection…', flush=True)
+                nl.disconnect_existing()
+                while connected():
+                    check_running()
+                    managed_connect.ensure_running()
+                    time.sleep(.05)
+        managed_connect.overall_deadline = None
+        emit('ready', protocol=3)
+        print('[*] WPS FIFO session ready (protocol=3)', flush=True)
+        while not closing.is_set():
+            try:
+                request = pending.get(timeout=.25)
+            except queue.Empty:
+                guard.ensure_active()
+                continue
+            if request is None:
+                break
+            request_id = request['requestId']
+            with lock:
+                cancel.clear()
+                active_request[0] = request_id
+                if request_id in cancelled:
+                    cancel.set()
+                    cancelled.discard(request_id)
+            companion = None
+            success = False
+            network = None
+            message = ''
+            request_nl = None
+            original_flags = None
+            original_mac = None
+            restore_mac = False
+            actual_mac = None
+            try:
+                check_running()
+                emit('progress', requestId=request_id, stage='PREPARING')
+                mode = request.get('mode')
+                bssid = request.get('mac')
+                pin = request.get('pin')
+                excluded = request.get('excludeMacs', [])
+                valid_mac = lambda value: isinstance(value, str) and re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', value)
+                if mode not in ('pin', 'pbc') or (bssid is not None and not valid_mac(bssid)):
+                    raise ValueError('Invalid WPS mode or target MAC')
+                if mode == 'pin' and (not bssid or not isinstance(pin, str) or not re.fullmatch(r'(?:[0-9]{4}|[0-9]{8})', pin)):
+                    raise ValueError('PIN mode requires MAC and one 4/8-digit PIN')
+                if not isinstance(excluded, list) or any(not valid_mac(mac) for mac in excluded):
+                    raise ValueError('Invalid excludeMacs')
+                local_mac = request.get('localMac')
+                if local_mac is not None and not isinstance(local_mac, str):
+                    raise ValueError('localMac must be a MAC string or null')
+                local_mac = local_mac.strip() if local_mac else None
+                requested_mac = None
+                if local_mac:
+                    if not valid_mac(local_mac):
+                        raise ValueError('Invalid localMac format')
+                    requested_mac = bytes.fromhex(local_mac.replace(':', ''))
+                    if requested_mac[0] & 1 or requested_mac == bytes(6):
+                        raise ValueError('localMac must be a valid unicast address')
+                request_nl = managed_connect.Netlink(interface)
+                original_flags = managed_connect.flags(interface)
+                original_mac = managed_connect.read_mac(request_nl)
+                actual_mac = original_mac
+                if requested_mac is not None:
+                    # Same ioctl/down-up/readback sequence as managed_connect.run().
+                    restore_mac = True
+                    managed_connect.flags(interface, original_flags & ~1)
+                    managed_connect.set_mac(interface, requested_mac)
+                    actual_mac = managed_connect.read_mac(request_nl)
+                    print('[*] Local MAC set: requested=%s actual=%s original=%s' % (
+                        requested_mac.hex(':'), actual_mac.hex(':'), original_mac.hex(':')), flush=True)
+                    if actual_mac != requested_mac:
+                        raise RuntimeError('Driver did not retain the requested local MAC')
+                managed_connect.flags(interface, original_flags | 1)
+                if managed_connect.read_mac(request_nl) != actual_mac:
+                    raise RuntimeError('Local MAC changed after bringing the interface up')
+                print('[*] WPS local MAC: %s' % actual_mac.hex(':'), flush=True)
+                check_running()
+                companion = Companion(interface, bssid=bssid, exclude_macs=[mac.upper() for mac in excluded],
+                                      complete_protocol=request.get('completeProtocol', True), check_running=check_running)
+                if managed_connect.read_mac(request_nl) != actual_mac:
+                    raise RuntimeError('Private supplicant changed the selected local MAC')
+                success = companion.single_connection(bssid=bssid, pin=pin, pbc_mode=mode == 'pbc')
+                if managed_connect.read_mac(request_nl) != actual_mac:
+                    raise RuntimeError('Local MAC changed during WPS exchange')
+                state = companion.connection_status
+                final_mac = (state.bssid or bssid or '').lower()
+                if state.wpa_psk and state.essid and valid_mac(final_mac):
+                    network = dict(ssid=state.essid, mac=final_mac, password=state.wpa_psk)
+                message = state.status
+            except Exception as error:
+                message = str(error)
+                print('[-] WPS request failed: %s' % message, flush=True)
+            finally:
+                cleanup_completed = True
+                if companion is not None:
+                    try:
+                        companion.cleanup()
+                    except Exception as error:
+                        cleanup_completed = False
+                        print('[-] WPS request cleanup failed: %r' % error, flush=True)
+                # The private supplicant must exit before restoring the original interface identity.
+                if restore_mac and original_mac is not None:
+                    try:
+                        managed_connect.flags(interface, managed_connect.flags(interface) & ~1)
+                        managed_connect.set_mac(interface, original_mac)
+                        if managed_connect.read_mac(request_nl) != original_mac:
+                            raise RuntimeError('Original local MAC could not be confirmed by reading it back')
+                        print('[*] Local MAC restored: %s' % original_mac.hex(':'), flush=True)
+                    except Exception as error:
+                        cleanup_completed = False
+                        print('[-] Restore local MAC failed: %r' % error, flush=True)
+                if original_flags is not None:
+                    try:
+                        managed_connect.flags(interface, original_flags)
+                        if request_nl is not None and original_mac is not None and managed_connect.read_mac(request_nl) != original_mac:
+                            raise RuntimeError('Local MAC changed after restoring interface flags')
+                    except Exception as error:
+                        cleanup_completed = False
+                        print('[-] Restore interface flags failed: %r' % error, flush=True)
+                if request_nl is not None:
+                    request_nl.close()
+                with lock:
+                    active_request[0] = None
+            emit('result', requestId=request_id, success=bool(success), network=network,
+                 message=message, cleanupCompleted=cleanup_completed,
+                 localMac=actual_mac.hex(':') if actual_mac is not None else None)
+            if not cleanup_completed:
+                break
+    except Exception as error:
+        print('[-] WPS FIFO session failed: %r' % error, flush=True)
+        if writer is not None:
+            emit('error', message=str(error))
+    finally:
+        if guard is not None:
+            try:
+                restored = guard.release()
+            except Exception as error:
+                print('[-] System supplicant recovery failed: %r' % error, flush=True)
+        managed_connect.supplicant_guard = None
+        if writer is not None:
+            try:
+                sys.stdout.finish()
+                sys.stderr.finish()
+                emit('stopped', supplicantRestored=restored)
+            finally:
+                sys.stdout, sys.stderr = original_stdout, original_stderr
+                writer.close()
+    return 0 if restored else 1
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='WPS PIN & PBC Single Connection Tool')
 
@@ -415,6 +760,8 @@ if __name__ == '__main__':
         required=True,
         help='Name of the interface to use (e.g. wlan0)'
     )
+    parser.add_argument('--command-pipe')
+    parser.add_argument('--event-pipe')
     parser.add_argument(
         '-mac',
         dest='bssid',
@@ -462,6 +809,14 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args()
+
+    if bool(args.command_pipe) != bool(args.event_pipe):
+        die('Both --command-pipe and --event-pipe are required')
+    if args.command_pipe:
+        if os.getuid() != 0:
+            die('Run it as root')
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.exit(persistent_fifo_main(args.interface, args.command_pipe, args.event_pipe))
 
     # 验证参数合理性
     if not args.pin and not args.pbc:

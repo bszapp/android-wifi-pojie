@@ -25,6 +25,8 @@ import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import android.os.ParcelFileDescriptor
+import android.net.wifi.ScanResult
+import io.github.bszapp.wifitoolbox.contract.wifilist.supportsWps
 import io.github.bszapp.wifitoolbox.contract.task.*
 
 internal class TaskManager(
@@ -32,6 +34,7 @@ internal class TaskManager(
     private val wifiLogAnalyzer: WifiLogAnalyzer,
     private val terminalManager: TerminalManager,
     private val normalModeTaskReadyProvider: () -> Boolean,
+    private val scanResultsProvider: () -> List<ScanResult>,
     private val usbMonitorTaskReadyProvider: () -> Boolean,
     private val acquireUsbMonitor: () -> AutoCloseable,
     private val onSavedWifiNetworksChanged: () -> Unit,
@@ -364,6 +367,14 @@ internal class TaskManager(
                     onSavedWifiNetworksChanged = onSavedWifiNetworksChanged,
                     onError = onError,
                 )
+                is TaskRequestPayload.WpsPin -> {
+                    val target = scanResultsProvider().filter {
+                        it.SSID == payload.input.ssid && it.supportsWps()
+                    }.maxByOrNull { if (it.level == 0) Int.MIN_VALUE else it.level }
+                        ?: error("当前扫描结果没有同名且带 WPS 广播的接入点")
+                    WpsPinTask(payload.input, target.BSSID, terminalManager, androidApi,
+                        onSavedWifiNetworksChanged, onError)
+                }
             }
             val pendingUpdates = synchronized(lock) {
                 val record = records[taskId] ?: return
@@ -456,6 +467,20 @@ internal class TaskManager(
                 check(normalModeTaskReadyProvider()) {
                     "WPS-PBC 任务只能在普通模式且容器环境已配置时运行"
                 }
+            }
+            is TaskRequestPayload.WpsPin -> {
+                require(android.os.Process.myUid() == 0) { "WPS PIN 需要 Root 工作模式" }
+                check(normalModeTaskReadyProvider()) { "WPS PIN 只能在普通模式运行" }
+                require(payload.input.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
+                require(Regex("(?:[0-9]{4}|[0-9]{8})").matches(payload.input.pin)) { "PIN 应为 4 位或 8 位数字" }
+                payload.input.localMac?.trim()?.takeIf { it.isNotEmpty() }?.let { mac ->
+                    require(MAC_ADDRESS.matches(mac)) { "本机 MAC 格式非法" }
+                    require((mac.substringBefore(':').toInt(16) and 1) == 0 && mac != "00:00:00:00:00:00") {
+                        "本机 MAC 必须为有效单播地址"
+                    }
+                }
+                require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
+                require(terminalManager.hasRootfsFile("wlantool/wps.py")) { "容器缺少 wps.py，请更新容器系统" }
             }
         }
     }

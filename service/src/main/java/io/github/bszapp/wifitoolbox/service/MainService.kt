@@ -17,6 +17,7 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.task.TaskStartRequest
 import io.github.bszapp.wifitoolbox.contract.task.TaskUpdateRequest
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
+import io.github.bszapp.wifitoolbox.contract.wifilist.scanResults
 import io.github.bszapp.wifitoolbox.service.task.TaskManager
 import io.github.bszapp.wifitoolbox.service.container.ContainerSystemManager
 import io.github.bszapp.wifitoolbox.service.container.ContainerMountManager
@@ -136,6 +137,7 @@ open class MainService(
         wifiLogAnalyzer = wifiLogAnalyzer,
         terminalManager = terminalManager,
         normalModeTaskReadyProvider = wifiListController::isNormalModeTaskReady,
+        scanResultsProvider = { wifiListController.getWifiState().scanResults },
         usbMonitorTaskReadyProvider = wifiListController::isUsbMonitorTaskReady,
         acquireUsbMonitor = wifiListController::acquireUsbMonitor,
         onSavedWifiNetworksChanged = wifiListController::refreshSavedNetworks,

@@ -177,7 +177,7 @@ private fun WpsCapturedNetworksPage(task: TrackedTaskState?) {
 }
 
 @Composable
-private fun WpsTaskLogsPage(task: TrackedTaskState?) {
+internal fun WpsTaskLogsPage(task: TrackedTaskState?) {
     val entries = task?.logs?.entries.orEmpty()
     val listState = rememberLazyListState()
     val latestId = entries.lastOrNull()?.taskLineId

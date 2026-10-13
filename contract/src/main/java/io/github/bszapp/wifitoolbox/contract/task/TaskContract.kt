@@ -64,19 +64,34 @@ import kotlinx.parcelize.Parcelize
  *
  * WPS-PBC 任务只允许在普通网卡模式且容器环境已配置时启动，与系统扫描或底层扫描来源无关。
  * 终端创建统一检查 Root 权限及容器安装情况。任务通过 Service 管理的
- * chroot 终端运行 `/wlantool` 工作目录中的 `python wps.py -i wlan0 --pbc`；指定目标时追加
- * `-mac <BSSID>`。Service 必须把脚本 stdout 与 stderr 的每一条非空输出原样写入任务日志，
- * 并从脚本输出的 Selected AP、WPA PSK 和 AP SSID 行组合出捕获结果。App 可以在任务运行
+ * chroot 终端运行 `/wlantool` 工作目录中的 wps.py 双 FIFO 会话。run 命令指定 mode=pbc、
+ * mac、excludeMacs、completeProtocol。FIFO log 事件原样携带脚本每条非空输出，包括
+ * E-Hash、AuthKey 等调试内容；控制台保留相同输出，Service 只把 FIFO 日志写入任务日志一次。
+ * progress 事件携带 requestId、stage、packet、direction；阶段及 M1～M8 的发送/接收
+ * 更新 [WpsHandshakeProgress]，调试内容留在通用日志中，不塞进任务快照。
+ * 并从 FIFO result 中读取凭据。App 可以在任务运行
  * 期间更新持续捕获、自动保存、不使用完整协议和忽略重复握手设备选项。持续捕获完全由
- * Service 控制：本轮脚本结束后，根据最新配置重新运行同一脚本；脚本本身不接收持续捕获
- * 控制命令。每轮脚本启动都必须显式传入当时的不使用完整协议选项；开启忽略重复握手设备时，
- * 还必须通过 `-exclude` 传入本任务此前已经捕获到的全部 BSSID。运行时更新这两个脚本选项时，
- * Service 必须结束当前一轮脚本，并立即使用更新后的完整参数重新启动；不得等待持续捕获自然
+ * Service 控制：本轮结束后，根据最新配置发送下一条 PBC run；脚本本身不控制持续捕获。
+ * 每轮请求都显式传入当时的完整协议选项；开启忽略重复握手设备时，
+ * 还必须通过 excludeMacs 传入本任务此前已经捕获到的全部 BSSID。运行时更新这两个脚本选项时，
+ * Service 必须 cancel 当前一轮并等待清理，然后立即使用更新后的完整参数重新提交；不得等待持续捕获自然
  * 进入下一轮。自动保存只改变 Service 收到新凭据后的保存行为。
  * 保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，不触发连接。捕获
  * 结果按每次获取顺序保留，不按 BSSID、SSID 或密码去重；其中 mac 表示目标接入点 BSSID。
  * 普通网卡模式只约束任务的启动时机。任务获得 ID 后独立运行，切换扫描来源不得停止任务；
+ * 会话初始化时挂起系统 supplicant 并释放当前连接，整个任务保持挂起，退出前确认恢复。
  * 只有显式停止任务、任务自行结束或 Service 进程结束时才结束当前任务终端。
+ *
+ * ## WpsPinTask
+ *
+ * 仅使用用户输入的一个 PIN，不枚举或生成 PIN。普通模式的 Root 服务从当前扫描快照中
+ * 选择同 SSID、带 WPS 广播的最强接入点，PIN 是否可用由实际握手返回。通过 chroot 中 wps.py 的双 FIFO 会话发送
+ * run 请求（requestId、mac、pin、可选 localMac），接收 ready/log/progress/result/stopped。localMac 为本机
+ * MAC，留空使用该轮开始时网卡的 MAC；每轮结束或取消后恢复原 MAC 和网卡 flags。会话初始化时复用
+ * managed_connect 的 supplicant 挂起及当前连接释放逻辑，结束时恢复并确认后才结束任务。
+ * 脚本普通控制台输出原样进入任务日志；凭据通过 FIFO 结果进入现有 WPS 结果分页。
+ * 获取后自动调用同一保存网络 API，不自动连接；保存失败通过错误广播报告并保留结果。
+ * FINISHED 仍仅表示执行结束，具体成败写入日志。
  *
  * ## UsbMonitorTask
  *
@@ -111,6 +126,13 @@ sealed class TaskProgress : Parcelable {
         val useIncompleteProtocol: Boolean,
         val ignoreRepeatedDevices: Boolean,
         val networkCount: Int,
+        val handshake: WpsHandshakeProgress? = null,
+    ) : TaskProgress()
+
+    data class WpsPin(
+        val targetMac: String?,
+        val networkCount: Int,
+        val handshake: WpsHandshakeProgress = WpsHandshakeProgress(WpsHandshakeStage.PREPARING),
     ) : TaskProgress()
 
     data class UsbMonitor(
@@ -121,6 +143,22 @@ sealed class TaskProgress : Parcelable {
 }
 
 typealias ConnectWifiTaskProgress = TaskProgress.ConnectWifi
+
+/** 当前实际观察到的 WPS 阶段；packet 可为 M1～M8、M2D、WSC_Done 或 WSC_NACK。 */
+@Parcelize
+data class WpsHandshakeProgress(
+    val stage: WpsHandshakeStage,
+    val packet: String? = null,
+    val direction: WpsPacketDirection? = null,
+) : Parcelable
+
+enum class WpsPacketDirection { SENDING, RECEIVED }
+
+enum class WpsHandshakeStage {
+    PREPARING, SCANNING, AUTHENTICATING, ASSOCIATING, ASSOCIATED,
+    EAPOL_START, IDENTITY_REQUEST, IDENTITY_RESPONSE, HANDSHAKE,
+    PROTOCOL_COMPLETED, SAVING_NETWORK, RESTORING_SYSTEM,
+}
 
 enum class ConnectWifiStage {
     ROUTER_COMMUNICATION,
@@ -207,6 +245,9 @@ data class WpsCapturedNetwork(
 ) : Parcelable
 
 @Parcelize
+data class WpsPinTaskInput(val ssid: String, val pin: String, val localMac: String? = null) : Parcelable
+
+@Parcelize
 sealed class TaskRequestPayload : Parcelable {
     data class SecurityAudit(val input: SecurityAuditTaskInput) : TaskRequestPayload()
 
@@ -217,6 +258,8 @@ sealed class TaskRequestPayload : Parcelable {
     data class WpsPbc(
         val input: WpsPbcTaskInput,
     ) : TaskRequestPayload()
+
+    data class WpsPin(val input: WpsPinTaskInput) : TaskRequestPayload()
 
     data object UsbMonitor : TaskRequestPayload()
 }
@@ -255,6 +298,9 @@ data class TaskStartRequest(
 ) : Parcelable {
     companion object {
         fun usbMonitor() = TaskStartRequest(TaskRequestPayload.UsbMonitor)
+
+        fun wpsPin(ssid: String, pin: String, localMac: String? = null) =
+            TaskStartRequest(TaskRequestPayload.WpsPin(WpsPinTaskInput(ssid, pin, localMac)))
 
         fun connectWifi(
             input: ConnectWifiTaskInput,

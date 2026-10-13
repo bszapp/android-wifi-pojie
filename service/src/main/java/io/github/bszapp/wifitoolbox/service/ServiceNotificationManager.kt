@@ -120,6 +120,7 @@ internal class ServiceNotificationManager(
     private fun taskName(task: TaskSnapshot): String = when (val payload = task.request.payload) {
         TaskRequestPayload.UsbMonitor -> "电脑控制"
         is TaskRequestPayload.WpsPbc -> "WPS-PBC"
+        is TaskRequestPayload.WpsPin -> "WPS PIN"
         is TaskRequestPayload.SecurityAudit -> "网络安全测试"
         is TaskRequestPayload.ConnectWifi -> {
             val input = payload.request.input

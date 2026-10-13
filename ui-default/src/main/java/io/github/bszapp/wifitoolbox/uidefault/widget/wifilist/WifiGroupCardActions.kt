@@ -11,6 +11,8 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.Password
+import io.github.bszapp.wifitoolbox.contract.wifilist.supportsWps
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +41,8 @@ fun WifiGroupCardActions(
     onDisconnect: () -> Unit = {},
     onOpenDetail: () -> Unit = {},
     onConnectWithConfig: (WifiConfiguration) -> Unit = {},
+    allowWpsPin: Boolean = false,
+    onWpsPin: () -> Unit = {},
     onUpdateConfig: (networkId: Int, patch: WifiConfigPatch) -> Unit = { _, _ -> },
 ) {
     var menuExpanded by rememberSaveable { mutableStateOf(false) }
@@ -46,6 +50,12 @@ fun WifiGroupCardActions(
     val supportsAutoJoin = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
     val menuGroups = buildList {
+        if (allowWpsPin && group.ssid.isNotBlank() && group.networks.any { it.supportsWps() }) {
+            add(MenuGroupConfig(title = "WPS", items = listOf(MenuItemConfig(
+                title = "使用PIN获取密码", icon = Icons.Outlined.Password,
+                onCheckedChange = { menuExpanded = false; onWpsPin() },
+            ))))
+        }
         add(
             MenuGroupConfig(
                 icon = null,

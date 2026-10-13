@@ -77,6 +77,8 @@ WPS_ATTR_DEVICE_NAME = 0x1011
 WPS_ATTR_MODEL_NAME = 0x1023
 WPS_ATTR_MODEL_NUMBER = 0x1024
 WPS_ATTR_AP_SETUP_LOCKED = 0x1057
+WPS_ATTR_CONFIG_METHODS = 0x1008
+WPS_PIN_CONFIG_METHODS = 0x0004 | 0x0008 | 0x0100
 
 SCAN_TIMEOUT_SECONDS = 20.0
 MIN_SCAN_DURATION_SECONDS = 3.0
@@ -1102,6 +1104,11 @@ def parse_bss(payload: bytes) -> Optional[dict]:
 
     locked_data = first_wps(WPS_ATTR_AP_SETUP_LOCKED)
     locked = bool(locked_data and int.from_bytes(locked_data, "big"))
+    methods_data = first_wps(WPS_ATTR_CONFIG_METHODS)
+    methods = int.from_bytes(methods_data, "big") if methods_data and len(methods_data) == 2 else None
+    pin_supported = methods is not None and bool(methods & WPS_PIN_CONFIG_METHODS)
+    if pin_supported:
+        capabilities.append("WPS-PIN")
     frequency_data = first_attr(attrs, NL80211_BSS_FREQUENCY)
     frequency = (
         struct.unpack_from("=I", frequency_data)[0]
@@ -1133,6 +1140,8 @@ def parse_bss(payload: bytes) -> Optional[dict]:
         "centerFreq1": center_freq1,
         "wps": {
             "supported": bool(wps_data),
+            "pinSupported": pin_supported,
+            "configMethods": methods,
             "locked": locked,
             "model": decode_wps_text(first_wps(WPS_ATTR_MODEL_NAME)),
             "modelNumber": decode_wps_text(first_wps(WPS_ATTR_MODEL_NUMBER)),

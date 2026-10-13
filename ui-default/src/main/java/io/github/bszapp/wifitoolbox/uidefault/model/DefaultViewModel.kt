@@ -24,6 +24,9 @@ data class ConnectWifiSheetCloseRequest(
     val sheetInstanceId: String,
 )
 
+data class WpsPinFormState(val ssid: String,
+    val submitting: Boolean = false, val visible: Boolean = true)
+
 class DefaultViewModel(app: Application) : AndroidViewModel(app) {
 
     private val controller: IAppController = AppControllerProvider.get()
@@ -59,6 +62,31 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     private val taskTracker = TaskTracker(controller.tasks, viewModelScope)
     val currentTask: StateFlow<TaskSnapshot?> = taskTracker.currentTask
     val displayedTask: StateFlow<TrackedTaskState?> = taskTracker.trackedTask
+    private val _wpsPinForm = MutableStateFlow<WpsPinFormState?>(null)
+    val wpsPinForm: StateFlow<WpsPinFormState?> = _wpsPinForm
+
+    fun openWpsPin(ssid: String) { _wpsPinForm.value = WpsPinFormState(ssid) }
+    fun dismissWpsPinForm() { _wpsPinForm.value = _wpsPinForm.value?.copy(visible = false) }
+    fun wpsPinFormDismissed() { if (_wpsPinForm.value?.visible == false) _wpsPinForm.value = null }
+    fun startWpsPin(pin: String, localMac: String) {
+        val form = _wpsPinForm.value ?: return
+        if (form.submitting) return
+        _wpsPinForm.value = form.copy(submitting = true)
+        viewModelScope.launch {
+            try {
+                startTask(TaskStartRequest.wpsPin(form.ssid, pin, localMac.trim().takeIf { it.isNotEmpty() }))
+                _wpsPinForm.value = _wpsPinForm.value?.copy(visible = false)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // 启动失败由 App.TaskController 的统一错误广播报告，保留输入表单。
+            } finally { _wpsPinForm.value = _wpsPinForm.value?.copy(submitting = false) }
+        }
+    }
+
+    fun connectCapturedWpsNetwork(network: io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork) {
+        acceptWifiQrNetwork(WifiQrNetwork(network.ssid, network.password))
+    }
 
     private val confirmationDialogManager =
         UiConfirmationDialogManager(viewModelScope)
