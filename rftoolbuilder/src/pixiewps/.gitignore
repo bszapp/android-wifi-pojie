@@ -1,0 +1,12 @@
+# Files
+*~
+pixiewps
+pixiewrapper
+
+# Extensions
+*.o
+*.d
+*.a
+*.so
+*.out
+*.exe

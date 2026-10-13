@@ -155,12 +155,16 @@ fun Project.configureContainerBuild() {
         WORK_DIR=${shellQuote(rootfsWorkDir)}
         CACHE_DIR=${shellQuote(distfilesCacheDir)}
         OUTPUT=${shellQuote(generatedRootfsLinuxPath)}
+        ANDROID_NDK_DIR=${shellQuote(linuxNdkDir)}
+        export ANDROID_NDK_DIR
         test "${'$'}WORK_DIR" = ${shellQuote(rootfsWorkDir)}
         rm -rf -- "${'$'}WORK_DIR"
         mkdir -p "${'$'}WORK_DIR/rftoolbuilder" "${'$'}WORK_DIR/app/src/main/assets" "${'$'}CACHE_DIR"
         cp "${'$'}PROJECT/rftoolbuilder/build.sh" "${'$'}WORK_DIR/rftoolbuilder/build.sh"
         cp "${'$'}PROJECT/rftoolbuilder/downloads.sh" "${'$'}WORK_DIR/rftoolbuilder/downloads.sh"
-        sed -i 's/\r${'$'}//' "${'$'}WORK_DIR/rftoolbuilder/build.sh" "${'$'}WORK_DIR/rftoolbuilder/downloads.sh"
+        cp "${'$'}PROJECT/rftoolbuilder/build-pixiewps.sh" "${'$'}WORK_DIR/rftoolbuilder/build-pixiewps.sh"
+        cp "${'$'}PROJECT/rftoolbuilder/pixiewps-cc.sh" "${'$'}WORK_DIR/rftoolbuilder/pixiewps-cc.sh"
+        sed -i 's/\r${'$'}//' "${'$'}WORK_DIR/rftoolbuilder/"*.sh
         tar --ignore-case --exclude='src/wlantool/readme*' -C "${'$'}PROJECT/rftoolbuilder" -cf - src | tar -C "${'$'}WORK_DIR/rftoolbuilder" -xf -
         ln -s "${'$'}CACHE_DIR" "${'$'}WORK_DIR/rftoolbuilder/distfiles"
         cd "${'$'}WORK_DIR"
@@ -174,7 +178,7 @@ fun Project.configureContainerBuild() {
         group = "build"
         description = "Builds rootfs.tar.xz with WSL on Windows or directly on Ubuntu."
         inputs.files(rootProject.fileTree("rftoolbuilder") {
-            include("build.sh", "downloads.sh", "src/**")
+            include("build.sh", "downloads.sh", "build-pixiewps.sh", "pixiewps-cc.sh", "src/**")
             exclude("**/README", "**/README.*", "**/Readme", "**/Readme.*", "**/readme", "**/readme.*")
         })
         inputs.property("appVersionCode", appVersionCode)

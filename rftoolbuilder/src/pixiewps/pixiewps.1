@@ -1,0 +1,126 @@
+.TH PIXIEWPS "1" "November 2017" "pixiewps " "Offline WPS bruteforce tool"
+.SH NAME
+\fBpixiewps\fR \- Offline Wi-Fi Protected Setup bruteforce tool
+.SH DESCRIPTION
+.IP
+Pixiewps is a tool written in C used to bruteforce offline the WPS PIN method exploiting
+the low or non-existing entropy of some Access Points, the so-called "pixie-dust attack".
+.IP
+It is meant for educational purposes only.
+.IP
+.PP
+.SH SYNOPSIS
+.B pixiewps <arguments>
+.SH ARGUMENTS
+.SS REQUIRED ARGUMENTS
+\fB\-e\fR, \fB\-\-pke\fR
+.IP
+Enrollee's DH public key, found in M1.
+.PP
+\fB\-r\fR, \fB\-\-pkr\fR
+.IP
+Registrar's DH public key, found in M2. It can be avoided by specifying \fB\-\-dh\-small\fR
+in both Reaver and pixiewps.
+.IP
+pixiewps \fB\-e\fR <pke> \fB\-s\fR <e\-hash1> \fB\-z\fR <e\-hash2> \fB\-a\fR <authkey> \fB\-n\fR <e\-nonce> \fB\-S\fR
+.PP
+\fB\-s\fR, \fB\-\-e\-hash1\fR
+.IP
+Enrollee's hash 1, found in M3. It's the hash of the first half of the PIN.
+.PP
+\fB\-z\fR, \fB\-\-e\-hash2\fR
+.IP
+Enrollee's hash 2, found in M3. It's the hash of the second half of the PIN.
+.PP
+\fB\-a\fR, \fB\-\-authkey\fR
+.IP
+Authentication session key. Although for this parameter a modified version of Reaver or Bully
+is needed, it can be avoided by specifying small Diffie\-Hellman keys in both Reaver and pixiewps
+and supplying \fB\-\-e\-nonce\fR, \fB\-\-r\-nonce\fR and \fB\-\-e\-bssid\fR.
+.IP
+pixiewps \fB\-e\fR <pke> \fB\-s\fR <e\-hash1> \fB\-z\fR <e\-hash2> \fB\-S\fR \fB\-n\fR <e\-nonce> \fB\-m\fR <r\-nonce> \fB\-b\fR <e\-bssid>
+.PP
+\fB\-n\fR, \fB\-\-e\-nonce\fR
+.IP
+Enrollee's nonce, found in M1.
+.PP
+.SS OPTIONAL ARGUMENTS
+\fB\-m\fR, \fB\-\-r\-nonce\fR
+.IP
+Registrar's nonce, found in M2. Used with other parameters to compute the session keys.
+.PP
+\fB\-b\fR, \fB\-\-e\-bssid\fR
+.IP
+Enrollee's BSSID. Used with other parameters to compute the session keys.
+.PP
+\fB\-S\fR, \fB\-\-dh\-small\fR (deprecated)
+.IP
+Small Diffie\-Hellman keys. The same option must be specified in Reaver too. Some Access Points
+seem to be buggy and don't behave correctly with this option. Avoid using it with Reaver when
+possible.
+.PP
+\fB\-v\fR, \fB\-\-verbosity\fR
+.IP
+Verbosity level 1-3, 1 is quietest, default is 3.
+.PP
+\fB\-h\fR
+.IP
+Display a simple help usage screen.
+.PP
+\fB\-\-help\fR
+.IP
+Display verbose help.
+.PP
+\fB\-V\fR, \fB\-\-version\fR
+.IP
+Display version and other information.
+.PP
+\fB\-\-mode\fR N[,... N]
+.IP
+Select modes, comma separated (experimental modes are not used unless specified):
+.IP
+\fB1\fR \- RT/MT/CL
+.IP
+\fB2\fR \- eCos simple
+.IP
+\fB3\fR \- RTL819x
+.IP
+\fB4\fR \- eCos simplest [Experimental]
+.IP
+\fB5\fR \- eCos Knuth    [Experimental]
+.PP
+\fB\-\-start\fR [mm/]yyyy
+.TP
+\fB\-\-end\fR [mm/]yyyy
+.IP
+Starting and ending dates for mode 3, they are interchangeable.
+.IP
+If only one is specified, the current time will be used for the other. The earliest possible date
+is 01/1970, corresponding to 0 (Unix epoch time), the latest is 02/2038, corresponding to 0x7FFFFFFF.
+If \fB\-\-force\fR is used then pixiewps will start from the current time and go back all the way to 0.
+.PP
+.SS MISCELLANEOUS ARGUMENTS
+\fB\-7\fR, \fB\-\-m7\-enc\fR
+.IP
+Encrypted settings, found in M7. Recover Enrollee's WPA-PSK and secret nonce 2. This feature only
+works on some Access Points vulnerable to mode 3.
+.IP
+pixiewps \fB\-e\fR <pke> \fB\-r\fR <pkr> \fB\-n\fR <e\-nonce> \fB\-m\fR <r\-nonce> \fB\-b\fR <e\-bssid> \fB\-7\fR <enc7> \fB\-\-mode 3\fR
+.PP
+\fB\-5\fR, \fB\-\-m5\-enc\fR
+.IP
+Encrypted settings, found in M5. Recover Enrollee's secret nonce 1. This option must be used in
+conjunction with \fB\-\-m7\-enc\fR. If \fB\-\-e\-hash1\fR and \fB\-\-e\-hash2\fR are also specified,
+pixiewps will also recover the WPS PIN.
+.IP
+pixiewps \fB\-e\fR <pke> \fB\-r\fR <pkr> \fB\-n\fR <e\-nonce> \fB\-m\fR <r\-nonce> \fB\-b\fR <e\-bssid> \fB\-7\fR <enc7> \fB\-5\fR <enc5> \fB\-\-mode 3\fR
+.IP
+pixiewps \fB\-e\fR <pke> \fB\-r\fR <pkr> \fB\-n\fR <e\-nonce> \fB\-m\fR <r\-nonce> \fB\-b\fR <e\-bssid> \fB\-7\fR <enc7> \fB\-5\fR <enc5> \fB\-\-mode 3\fR \fB\-s\fR <e\-hash1> \fB\-z\fR <e\-hash2>
+.SH EXAMPLES
+pixiewps --pke <pke> --pkr <pkr> --e-hash1 <e-hash1> --e-hash2 <e-hash2> --authkey <authkey> --e-nonce <e-nonce>
+.PP
+pixiewps -e <pke> -r <pkr> -s <e-hash1> -z <e-hash2> -a <authkey> -n <e-nonce>
+.SH AUTHOR
+Pixiewps was developed by wiire.
+.PP
+This manual page was written by Daniel Echeverry <epsilon77@gmail.com> and Samuel Henrique <samueloph@gmail.com> for the Debian project, but can be used by other projects as well.
