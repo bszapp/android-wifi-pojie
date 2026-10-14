@@ -6,7 +6,7 @@ import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.math.pow
+import java.util.concurrent.ConcurrentHashMap
 
 /** 旧版多网络轮询、冷却、重试调度；单次连接由安全测试专用执行器完成。 */
 internal class SecurityAuditTask(
@@ -18,16 +18,20 @@ internal class SecurityAuditTask(
     private val updates = LinkedBlockingQueue<TaskUpdatePayload>()
     private val attemptRevision = AtomicLong()
     private val entries = mutableListOf<Entry>()
+    private val queuedSsids = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var accepting = true
     @Volatile private var attemptingSsid: String? = null
 
-    init { addOrEdit(input.network) }
+    init { queuedSsids.add(input.network.ssid); add(input.network) }
 
     override fun update(update: TaskUpdateRequest): Boolean {
         synchronized(updates) {
             if (!accepting) return false
             when (val payload = update.payload) {
-                is TaskUpdatePayload.SecurityAuditUpsert -> attemptRevision.incrementAndGet()
+                is TaskUpdatePayload.SecurityAuditAdd -> {
+                    if (!queuedSsids.add(payload.network.ssid)) return false
+                    attemptRevision.incrementAndGet()
+                }
                 is TaskUpdatePayload.SecurityAuditRemove -> if (payload.ssid == attemptingSsid) attemptRevision.incrementAndGet()
                 is TaskUpdatePayload.SecurityAuditConfigure -> config = payload.config
                 else -> return false
@@ -54,11 +58,10 @@ internal class SecurityAuditTask(
                     context.log("运行队列为空，本批安全测试结束")
                     return
                 }
-                val now = SystemClock.elapsedRealtime()
-                val next = active.filter { it.readyAt <= now }.minByOrNull { it.lastAttemptAt }
+                val next = SecurityAuditQueue.next(active)
                 if (next == null) {
                     publish(context)
-                    val wait = (active.minOf { it.readyAt } - now).coerceIn(1, 100)
+                    val wait = SecurityAuditQueue.waitMillis(active)
                     updates.poll(wait, TimeUnit.MILLISECONDS)?.let { applyUpdate(it, context) }
                     continue
                 }
@@ -179,15 +182,15 @@ internal class SecurityAuditTask(
             ConnectionAttemptResult.FAILED -> advance(entry)
             ConnectionAttemptResult.TIMEOUT, ConnectionAttemptResult.REJECTED -> {
                 val count = entry.record.retryCount + 1
-                if (config.retryCount < 6 && count > config.retryCount) advance(entry)
+                if (SecurityAuditQueue.retryExhausted(config.retryCount, count)) advance(entry)
                 else {
                     val delay = cooldownMillis(count)
                     // 时间使用单调钟；仅用于展示的下次时间转换成墙上时间。
-                    entry.readyAt = entry.lastAttemptAt + delay
+                    entry.readyAt = SecurityAuditQueue.readyAt(entry.lastAttemptAt, delay)
                     entry.record = entry.record.copy(retryCount = count,
                         state = if (delay > 0) SecurityAuditNetworkState.COOLDOWN else SecurityAuditNetworkState.QUEUED,
                         message = "${if (result == ConnectionAttemptResult.TIMEOUT) "超时" else worker.rejectionDescription ?: "路由器拒绝接入"}，第 $count 次重试",
-                        nextAttemptAt = System.currentTimeMillis() + (entry.readyAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                        nextAttemptAt = SecurityAuditQueue.displayTime(entry.readyAt))
                 }
             }
             ConnectionAttemptResult.ERROR -> entry.record = entry.record.copy(
@@ -214,9 +217,9 @@ internal class SecurityAuditTask(
 
     private fun applyUpdate(update: TaskUpdatePayload, context: TaskContext) {
         when (update) {
-            is TaskUpdatePayload.SecurityAuditUpsert -> {
-                addOrEdit(update.network)
-                context.log("[${update.network.ssid}] 已添加或编辑运行字典")
+            is TaskUpdatePayload.SecurityAuditAdd -> {
+                add(update.network)
+                context.log("[${update.network.ssid}] 已添加运行网络，候选字典固定")
             }
             is TaskUpdatePayload.SecurityAuditRemove -> {
                 entries.filter { it.record.active && it.record.input.ssid == update.ssid }.forEach {
@@ -231,9 +234,9 @@ internal class SecurityAuditTask(
                 entries.filter { it.record.active }.forEach {
                     it.record = it.record.copy(config = config)
                     if (it.record.retryCount > 0) {
-                        it.readyAt = it.lastAttemptAt + cooldownMillis(it.record.retryCount)
-                        it.record = it.record.copy(nextAttemptAt = System.currentTimeMillis() +
-                            (it.readyAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                        it.readyAt = SecurityAuditQueue.readyAt(it.lastAttemptAt, cooldownMillis(it.record.retryCount))
+                        it.record = it.record.copy(nextAttemptAt = SecurityAuditQueue.displayTime(it.readyAt),
+                            state = if (it.readyAt > SystemClock.elapsedRealtime()) SecurityAuditNetworkState.COOLDOWN else SecurityAuditNetworkState.QUEUED)
                     }
                 }
                 context.log("安全测试运行配置已更新")
@@ -242,26 +245,22 @@ internal class SecurityAuditTask(
         }
     }
 
-    private fun addOrEdit(input: SecurityAuditNetworkInput) {
+    private fun add(input: SecurityAuditNetworkInput) {
         val passwords = dictionary(input.dictionaryId)
-        val existing = entries.firstOrNull { it.record.active && it.record.input.ssid == input.ssid }
-        if (existing != null) {
-            val same = existing.passwords == passwords
-            existing.passwords = passwords
-            existing.readyAt = 0
-            existing.record = existing.record.copy(input = input, total = passwords.size,
-                completed = if (same) existing.record.completed else 0, retryCount = 0,
-                nextAttemptAt = null, stage = null, state = SecurityAuditNetworkState.QUEUED,
-                updatedAt = System.currentTimeMillis(), message = "排队中")
-        } else {
-            val now = System.currentTimeMillis()
-            entries += Entry(AuditRecord.Dictionary(UUID.randomUUID().toString(), input, config,
-                now, now, SecurityAuditNetworkState.QUEUED, passwords.size,
-                completed = input.startIndex.coerceIn(0, passwords.size)), passwords)
-        }
+        check(entries.none { it.record.active && it.record.ssid == input.ssid }) { "网络已在运行，不允许更新字典" }
+        val now = System.currentTimeMillis()
+        entries += Entry(AuditRecord.Dictionary(UUID.randomUUID().toString(), input, config,
+            now, now, SecurityAuditNetworkState.QUEUED, passwords.size,
+            completed = input.startIndex.coerceIn(0, passwords.size)), passwords)
     }
 
-    private fun publish(context: TaskContext) = context.publishAuditNetworks(config, entries.map { it.record })
+    private fun publish(context: TaskContext) {
+        synchronized(updates) {
+            queuedSsids.retainAll(entries.filter { it.record.active }.map { it.record.ssid } +
+                updates.filterIsInstance<TaskUpdatePayload.SecurityAuditAdd>().map { it.network.ssid })
+        }
+        context.publishAuditNetworks(config, entries.map { it.record })
+    }
     private fun forgetNetwork(entry: Entry, context: TaskContext) {
         if (!entry.systemConfiguration || entry.configurationCleanupAttempted) return
         entry.configurationCleanupAttempted = true
@@ -299,15 +298,17 @@ internal class SecurityAuditTask(
         (1..6).joinToString(":") { "%02x".format(SECURE_RANDOM.nextInt(256) and 0xfc or 0x02) }
 
     private fun cooldownMillis(retries: Int): Long =
-        if (retries > 0) 2.0.pow(retries.toDouble() - 1).toLong() * config.cooldownBaseMillis else 0
+        SecurityAuditQueue.cooldownMillis(config.cooldownBaseMillis, retries)
     private class AttemptChanged : InterruptedException()
     private companion object {
         val SECURE_RANDOM = java.security.SecureRandom()
     }
-    private data class Entry(var record: AuditRecord.Dictionary, var passwords: List<String>,
-        var lastAttemptAt: Long = 0, var readyAt: Long = 0, val costs: MutableList<Long> = mutableListOf(),
+    private data class Entry(var record: AuditRecord.Dictionary, val passwords: List<String>,
+        override var lastAttemptAt: Long = 0, override var readyAt: Long = 0, val costs: MutableList<Long> = mutableListOf(),
         /** 随机 MAC 策略下该网络当前保持的地址；null 表示使用设备原 MAC。 */
         var mac: String? = null,
         var systemConfiguration: Boolean = record.config.connectionMethod == SecurityAuditConnectionMethod.SYSTEM,
-        var configurationCleanupAttempted: Boolean = false)
+        var configurationCleanupAttempted: Boolean = false) : SecurityAuditQueueEntry {
+        override val active get() = record.active
+    }
 }

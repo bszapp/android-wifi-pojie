@@ -175,7 +175,7 @@ fun WifiList(
             runningAuditNetworks.mapNotNull { entry -> all.firstOrNull { it.ssid == entry.ssid } } +
                 scanned.filter { group -> runningAuditNetworks.none { it.ssid == group.ssid } }
         }
-    }
+    }.distinctBy { it.ssid }
     LaunchedEffect(auditMode, runningAuditNetworks.size) {
         if (auditMode && runningAuditNetworks.isNotEmpty()) listState.animateScrollToItem(0)
     }
@@ -280,7 +280,7 @@ fun WifiList(
                                 discoveredHiddenNameCount =
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
                                 auditMode = auditMode,
-                                auditRunning = auditRecord?.active == true,
+                                 auditRunning = auditRecord?.active == true && !(wpsAuditMode && group.ssid.isEmpty()),
                                 allowWpsPin = modeState?.mode == WifiMode.NORMAL,
                                 onClick = {
                                     selectedSsid = group.ssid
@@ -288,10 +288,10 @@ fun WifiList(
                                 },
                                 onConnect = {
                                     if (auditMode) {
-                                        if (auditRecord?.active == true) vm.securityAudit.stopNetwork(group.ssid)
+                                        if (auditRecord?.active == true && !(wpsAuditMode && group.ssid.isEmpty())) vm.securityAudit.stopNetwork(group.ssid, (auditRecord as? AuditRecord.Wps)?.mac)
                                         else if (wpsAuditMode) vm.securityAudit.openWpsNetwork(
                                             group.ssid, group.savedWifiList.isNotEmpty(),
-                                            group.networks.any { it.supportsWps() })
+                                            group.networks.any { it.supportsWps() }, group.networks)
                                         else vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
                                         return@WifiGroupCard
                                     }
@@ -314,17 +314,19 @@ fun WifiList(
                             val previous = auditHistory.firstOrNull { it.ssid == group.ssid && it.kind == auditKind }
                             if (previous != null) Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                                 TagItem(if (wpsAuditMode) "WPS 有历史" else "有历史", style = TagStyle.Secondary)
-                                if (auditRecord?.active != true && !previous.active) Text(previous.message, style = MiuixTheme.textStyles.footnote1)
                             }
                             if (wpsAuditMode) {
+                                auditBatch?.auditNetworks?.filterIsInstance<AuditRecord.Wps>()
+                                    ?.filter { it.ssid == group.ssid && it.active }?.forEach { entry ->
                                 io.github.bszapp.wifitoolbox.uidefault.securityaudit.WpsAuditNetworkProgress(
-                                    (auditRecord as? AuditRecord.Wps)?.takeIf { it.active }) {
-                                    vm.securityAudit.stopNetwork(group.ssid)
+                                    entry) {
+                                    vm.securityAudit.stopNetwork(entry.ssid, entry.mac)
+                                }
                                 }
                             } else {
                                 io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(
                                     (auditRecord as? AuditRecord.Dictionary)?.takeIf { it.active }) {
-                                    vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
+                                     vm.securityAudit.stopNetwork(group.ssid)
                                 }
                             }
                         }

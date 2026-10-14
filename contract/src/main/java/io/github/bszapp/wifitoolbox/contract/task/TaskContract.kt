@@ -274,11 +274,13 @@ sealed class TaskRequestPayload : Parcelable {
 
 @Parcelize
 sealed class TaskUpdatePayload : Parcelable {
-    data class SecurityAuditUpsert(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
-    data class SecurityAuditRemove(val ssid: String) : TaskUpdatePayload()
+    /** 仅追加新网络，已有运行网络的字典不可更新。 */
+    data class SecurityAuditAdd(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
+    data class SecurityAuditRemove(val ssid: String, val mac: String? = null) : TaskUpdatePayload()
     data class SecurityAuditConfigure(val config: SecurityAuditConfig) : TaskUpdatePayload()
 
-    /** WPS 安全测试运行中只允许更新配置与按 SSID 移除网络。 */
+    data class WpsSecurityAuditAdd(val targets: List<WpsSecurityAuditTarget>) : TaskUpdatePayload()
+    /** WPS 安全测试运行中可追加网络、更新配置、移除明确目标。 */
     data class WpsSecurityAuditConfigure(val config: WpsSecurityAuditConfig) : TaskUpdatePayload()
 
     data class WpsPbcContinuousCapture(

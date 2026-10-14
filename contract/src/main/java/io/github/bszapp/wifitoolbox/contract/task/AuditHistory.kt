@@ -4,11 +4,10 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 /**
- * # 安全测试历史记录
+ * # 安全测试运行快照
  *
- * 安全测试（字典破解）与 WPS 安全测试（PIN 破解）共用同一份历史数据源，按 [kind]
- * 区分两种来源；两者共享的公共字段上提到密封类 [AuditRecord]，各自特有的进度字段留在
- * 子类中。历史按 `"$kind|${ssid}"` 键控，同一 SSID 的两种测试互不覆盖。
+ * 服务调度与 App 实时同步使用本类型，运行现场不直接持久化。
+ * 持久历史使用独立的 [AuditHistoryRecord]。
  */
 enum class AuditRecordKind { DICTIONARY, WPS }
 
@@ -87,7 +86,6 @@ sealed class AuditRecord : Parcelable {
         /** 当前会话实时阶段，仅用于服务快照与界面同步，不写入历史文件。 */
         val handshakeProgress: WpsHandshakeProgress? = null,
         val handshake: WpsHandshake? = null,
-        val nDayVerdict: Boolean? = null,
         val elapsedMillis: Long = 0,
         /** 最终取得网络密码时使用的 PIN，与离线计算出的 [vulnPin] 分开记录。 */
         val pin: String? = null,
@@ -102,6 +100,49 @@ sealed class AuditRecord : Parcelable {
                 WpsSecurityAuditPhase.SECOND_HALF -> secondHalfIndex.coerceAtMost(1000) / 1000f
                 WpsSecurityAuditPhase.DONE -> 1f
             }
+    }
+}
+
+/** App 数据库历史；不含调度状态、运行配置或实时提示。 */
+sealed class AuditHistoryRecord {
+    abstract val id: String
+    abstract val kind: AuditRecordKind
+    abstract val ssid: String
+    abstract val updatedAt: Long
+    abstract val password: String?
+
+    data class Dictionary(
+        override val id: String,
+        override val ssid: String,
+        val passwords: List<String>,
+        val completed: Int,
+        override val password: String?,
+        override val updatedAt: Long,
+        val elapsedMillis: Long,
+        val averageAttemptMillis: Long?,
+        val dictionaryPosition: Int?,
+    ) : AuditHistoryRecord() {
+        override val kind get() = AuditRecordKind.DICTIONARY
+        val total get() = passwords.size
+    }
+
+    data class Wps(
+        override val id: String,
+        override val ssid: String,
+        val mac: String?,
+        override val updatedAt: Long,
+        val phase: WpsSecurityAuditPhase,
+        val firstHalf: String?,
+        val firstHalfIndex: Int,
+        val secondHalfIndex: Int,
+        val attempts: Long,
+        val elapsedMillis: Long,
+        val averageAttemptMillis: Long?,
+        val pin: String?,
+        override val password: String?,
+        val passwordFoundPhase: WpsSecurityAuditPhase?,
+    ) : AuditHistoryRecord() {
+        override val kind get() = AuditRecordKind.WPS
     }
 }
 

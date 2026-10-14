@@ -33,8 +33,8 @@ import io.github.bszapp.wifitoolbox.contract.task.*
 import java.io.File
 
 class TaskController(
+    context: android.content.Context,
     private val scope: CoroutineScope,
-    historyDirectory: File,
     private val reportError: (
         source: String,
         operation: String,
@@ -42,7 +42,7 @@ class TaskController(
         remoteDetails: String?,
     ) -> Unit,
 ) : ITaskController {
-    private val auditStore = SecurityAuditHistoryStore(historyDirectory)
+    private val auditStore = SecurityAuditHistoryStore(context)
     override val auditHistory = auditStore.state
     private val _auditConfig = MutableStateFlow(SecurityAuditConfig())
     override val auditConfig = _auditConfig.asStateFlow()
@@ -66,7 +66,6 @@ class TaskController(
             )
         }
     }
-    override fun auditDictionary(recordId: String) = auditStore.dictionary(recordId)
     init { scope.launch(Dispatchers.IO) { auditStore.load() } }
     private val connectionLock = Any()
     private val _state = MutableStateFlow(TaskControllerState())
@@ -196,6 +195,7 @@ class TaskController(
 
     override suspend fun runSecurityAudit(input: SecurityAuditTaskInput, dictionary: File): Long = withContext(Dispatchers.IO) {
         val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
+        var accepted = false
         try {
             check(isCurrent(binding)) { "服务未连接" }
             val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
@@ -204,6 +204,7 @@ class TaskController(
             val id = SecurityAuditDictionaryTransport.open(dictionary).use { fd ->
                 binding.service.runSecurityAudit(request, fd)
             }
+            accepted = true
             val snapshot = binding.service.getTaskSnapshot(id)
             val currentTaskId = synchronized(binding.pendingLock) {
                 binding.service.getCurrentTaskId().takeIf { it > 0L }.also { binding.currentTaskId = it }
@@ -216,6 +217,7 @@ class TaskController(
             binding.signal.trySend(Unit)
             id
         } catch (error: Throwable) {
+            if (!accepted) auditStore.discardDictionary(input.network.dictionaryId)
             if (isCurrent(binding)) reportError("App.TaskController", "运行网络安全测试", error, null)
             throw error
         }

@@ -15,7 +15,8 @@ import kotlinx.parcelize.Parcelize
  *
  * 1. [WpsSecurityAuditPhase.FAIRY_DUST]：先用 `12345670` 发起一次握手抓取 WPS 握手数据，
  *    由 Service 在 chroot 中调用 `/bin/pixiewps` 现场计算漏洞 PIN，再用该 PIN 发起第二次
- *    握手。漏洞 PIN 成功取到密码时记录 [AuditRecord.Wps.nDayVerdict] = true。
+ *    握手。历史只保存整体阶段；握手数据与临时计算出的 PIN 仅存在于运行内存。
+ *    最终结果由 PIN、密码及发现阶段记录，不保存额外的漏洞判定。
  * 2. [WpsSecurityAuditPhase.FIRST_HALF]：`0000`~`9999` 逐个尝试前四位（占位后三位为 `000`
  *    并按七位 PIN 规则补校验位）；收到 M5 即表示前半段正确，记录后进入第三阶段。
  * 3. [WpsSecurityAuditPhase.SECOND_HALF]：已知前四位后逐个尝试后三位（同样补校验位），
@@ -23,9 +24,11 @@ import kotlinx.parcelize.Parcelize
  *
  * 任意阶段取得密码即结束该网络。未取得密码时只记录本次实际事件，不根据消息编号推断错误。
  *
- * PIN 错误被拒属正常结果，不计入重试、不触发冷却；只有超时和 WPS-FAIL 等异常才按
- * [WpsSecurityAuditConfig.retryCount] / [WpsSecurityAuditConfig.cooldownBaseMillis]
- * 重试与指数冷却。MAC 策略复用 [SecurityAuditMacMode]。
+ * 未推进到 M5 的结果一律算单次异常，包括 WSC_NACK、WPS-FAIL、超时与未进入握手，
+ * 全部按 [WpsSecurityAuditConfig.retryCount] / [WpsSecurityAuditConfig.cooldownBaseMillis]
+ * 重试当前 PIN 并指数冷却，重试用尽后才推进游标。脚本会把 NACK 的具体原因
+ * （前/后半段不匹配、CONFIG_ERROR）随结果回传，仅用于日志与展示，不参与游标推进判断。
+ * MAC 策略复用 [SecurityAuditMacMode]。
  *
  * 字典内容不涉及本任务；凭据与安全测试历史使用同一数据源，按
  * [AuditRecordKind] 区分。
@@ -56,9 +59,9 @@ data class WpsSecurityAuditConfig(
     /** 复用安全测试的 MAC 策略；WPS 走网卡通道，任何策略都会实际改写本机 MAC。 */
     val macMode: SecurityAuditMacMode = SecurityAuditMacMode.DEVICE,
     val macChangeThreshold: Int = 1,
-    /** 超时/异常的重试次数；本任务中 6 同样按 6 次重试处理，避免异常网络无限停滞。 */
+    /** 超时/异常的重试次数；6 表示无限，与字典安全测试一致。 */
     val retryCount: Int = 6,
-    val cooldownBaseMillis: Long = 0,
+    val cooldownBaseMillis: Long = 1000,
     /** 单网络握手次数上限，0 表示不限。达到上限只记录测试已结束，不推断防护结论。 */
     val maxAttemptsPerNetwork: Int = 0,
 ) : Parcelable
@@ -69,11 +72,14 @@ data class WpsSecurityAuditTarget(
     val mac: String? = null,
     /** 断点续跑：从历史记录恢复的阶段。 */
     val resumePhase: WpsSecurityAuditPhase = WpsSecurityAuditPhase.FAIRY_DUST,
-    val resumeVulnPin: String? = null,
     val resumeFirstHalf: String? = null,
     val resumeFirstHalfIndex: Int = 0,
     val resumeSecondHalfIndex: Int = 0,
 ) : Parcelable
+
+/** 隐藏名称按明确选择的接入点区分，禁止用空名称猜测目标。 */
+fun wpsAuditTargetKey(ssid: String, mac: String?): String =
+    if (ssid.isEmpty()) "bssid:${requireNotNull(mac).lowercase()}" else "ssid:$ssid"
 
 @Parcelize
 data class WpsSecurityAuditTaskInput(

@@ -64,6 +64,29 @@ internal class TaskManager(
 
     fun start(request: TaskStartRequest): Long {
         require(request.payload !is TaskRequestPayload.SecurityAudit) { "安全测试必须通过字典流接口启动" }
+        val wps = request.payload as? TaskRequestPayload.WpsSecurityAudit
+        if (wps != null) {
+            validate(request)
+            return synchronized(lock) {
+                val running = currentTaskId?.let(records::get)
+                if (running == null) createTask(request)
+                else {
+                    val current = running.snapshot.request.payload as? TaskRequestPayload.WpsSecurityAudit
+                        ?: error("已有其他任务正在运行")
+                    if (running.activeTask == null) {
+                        val pending = current.input.targets + running.pendingUpdates.flatMap {
+                            (it.payload as? TaskUpdatePayload.WpsSecurityAuditAdd)?.targets.orEmpty()
+                        }
+                        val keys = pending.map { wpsAuditTargetKey(it.ssid, it.mac) }.toSet()
+                        check(wps.input.targets.none { wpsAuditTargetKey(it.ssid, it.mac) in keys }) { "目标网络已在运行队列中" }
+                    }
+                    val update = TaskUpdateRequest(TaskUpdatePayload.WpsSecurityAuditAdd(wps.input.targets))
+                    val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
+                    check(accepted) { "目标网络已在队列中，或本批任务已结束" }
+                    running.snapshot.taskId
+                }
+            }
+        }
         return createTask(request)
     }
 
@@ -105,13 +128,20 @@ internal class TaskManager(
             val running = currentTaskId?.let(records::get)
             if (running != null) {
                 check(running.snapshot.request.payload is TaskRequestPayload.SecurityAudit) { "已有其他任务正在运行" }
+                if (running.activeTask == null) {
+                    val first = (running.snapshot.request.payload as TaskRequestPayload.SecurityAudit).input.network.ssid
+                    check(input.network.ssid != first && running.pendingUpdates.none {
+                        (it.payload as? TaskUpdatePayload.SecurityAuditAdd)?.network?.ssid == input.network.ssid
+                    }) { "网络已在运行，不允许更新字典" }
+                }
                 val key = input.network.dictionaryId
+                check(key !in running.auditDictionaries) { "字典已经给定，不允许更新" }
                 running.auditDictionaries[key] = passwords
-                val update = TaskUpdateRequest(TaskUpdatePayload.SecurityAuditUpsert(input.network))
+                val update = TaskUpdateRequest(TaskUpdatePayload.SecurityAuditAdd(input.network))
                 val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
                 if (!accepted) {
                     running.auditDictionaries.remove(key)
-                    error("本批任务已结束，请重新点击运行")
+                    error("网络已在运行，不允许更新字典；或本批任务已结束")
                 }
                 running.snapshot.taskId
             } else {
@@ -514,7 +544,7 @@ internal class TaskManager(
             when (val payload = update.payload) {
                 is TaskUpdatePayload.SecurityAuditConfigure -> validateAuditConfig(payload.config)
                 is TaskUpdatePayload.SecurityAuditRemove -> require(payload.ssid.toByteArray().size in 1..32)
-                is TaskUpdatePayload.SecurityAuditUpsert -> error("字典更新需要使用字典流接口")
+                is TaskUpdatePayload.SecurityAuditAdd -> error("新增网络需要使用字典流接口")
                 else -> error("安全测试不支持此更新")
             }
             return
@@ -522,7 +552,9 @@ internal class TaskManager(
         if (request.payload is TaskRequestPayload.WpsSecurityAudit) {
             when (val payload = update.payload) {
                 is TaskUpdatePayload.WpsSecurityAuditConfigure -> validateWpsAuditConfig(payload.config)
-                is TaskUpdatePayload.SecurityAuditRemove -> require(payload.ssid.toByteArray(Charsets.UTF_8).size in 1..32)
+                is TaskUpdatePayload.SecurityAuditRemove -> validateWpsTarget(WpsSecurityAuditTarget(payload.ssid, payload.mac))
+                is TaskUpdatePayload.WpsSecurityAuditAdd -> validateWpsAudit(WpsSecurityAuditTaskInput(
+                    (request.payload as TaskRequestPayload.WpsSecurityAudit).input.config, payload.targets))
                 else -> error("WPS 安全测试不支持此更新")
             }
             return
@@ -542,16 +574,21 @@ internal class TaskManager(
         require(input.targets.isNotEmpty()) { "至少选择一个网络" }
         val seen = mutableSetOf<String>()
         input.targets.forEach { target ->
-            require(target.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
-            require(seen.add(target.ssid)) { "同一 SSID 只能出现一次：${target.ssid}" }
+            validateWpsTarget(target)
+            require(seen.add(wpsAuditTargetKey(target.ssid, target.mac))) { "同一目标只能出现一次" }
+        }
+        validateWpsAuditConfig(input.config)
+    }
+
+    private fun validateWpsTarget(target: WpsSecurityAuditTarget) {
+            require(target.ssid.toByteArray(Charsets.UTF_8).size in 0..32) { "SSID 长度不能超过32字节" }
+            require(target.ssid.isNotEmpty() || target.mac != null) { "隐藏网络必须先选择具体接入点" }
             target.mac?.let { mac ->
                 require(MAC_ADDRESS.matches(mac)) { "目标设备 MAC 格式非法：$mac" }
                 require((mac.substringBefore(':').toInt(16) and 1) == 0 && mac != "00:00:00:00:00:00") {
                     "目标设备 MAC 必须为有效单播地址"
                 }
             }
-        }
-        validateWpsAuditConfig(input.config)
     }
 
     private fun validateWpsAuditConfig(config: WpsSecurityAuditConfig) {

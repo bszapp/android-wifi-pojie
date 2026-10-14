@@ -79,11 +79,24 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
         val settingsChanged: Boolean,
         /** 收到 M5，即路由器已确认 PIN 前半段正确。 */
         val firstHalfValid: Boolean,
+        /** 本次握手中观察到的最高 M 消息编号。 */
+        val maxMMessage: Int,
+        /** 本轮的终止原因；正常完成时为 null。 */
+        val failure: Failure?,
         /** 本次握手抓到的 WPS 关键数据；不完整时为 null。 */
         val handshake: WpsHandshake?,
         /** 脚本回传的状态（GOT_PSK / WSC_NACK / WPS_FAIL / WPS_SUCCESS 等）。 */
         val status: String,
     )
+
+    /**
+     * 本轮的拒绝/失败原因，由脚本按 wpa_supplicant 的实际输出分类后回传。
+     * [code] 为稳定短码：`WSC_NACK_FIRST_HALF`（前半段不匹配）、`WSC_NACK_SECOND_HALF`
+     * （收到 M5 后被拒，后半段不匹配）、`WSC_NACK_CONFIG_<n>`（读到具体 CONFIG_ERROR）、
+     * `WPS_TIMEOUT` / `WPS_OVERLAP` / `WPS_FAIL` / `SUPPPLICANT_REJECT` /
+     * `EXCLUDED_AP` / `EXCEPTION`。
+     */
+    data class Failure(val code: String, val detail: String, val maxMMessage: Int)
 
     fun run(request: JSONObject, changed: () -> Boolean = { false }): Result {
         val requestId = UUID.randomUUID().toString()
@@ -111,12 +124,17 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                         val network = value?.let {
                             WpsCapturedNetwork(it.getString("ssid"), it.getString("mac"), it.getString("password"))
                         }
-                        context.log("WPS 本轮结束：${event.value.optString("message")}")
+                        val failure = readFailure(event.value.optJSONObject("failure"))
+                        context.log("WPS 本轮结束：${event.value.optString("message")}" + (failure?.let {
+                            "，原因=${it.code}${if (it.detail.isEmpty()) "" else " · ${it.detail}"}"
+                        } ?: ""))
                         return Result(
                             network = network,
                             success = event.value.optBoolean("success"),
                             settingsChanged = cancelledForUpdate,
                             firstHalfValid = event.value.optBoolean("firstHalfValid"),
+                            maxMMessage = event.value.optInt("maxMMessage"),
+                            failure = failure,
                             handshake = readHandshake(event.value.optJSONObject("handshake")),
                             status = event.value.optString("message"),
                         )
@@ -129,6 +147,14 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                 else -> Unit
             }
         }
+    }
+
+    private fun readFailure(value: JSONObject?): Failure? = value?.takeIf { it.optString("code").isNotEmpty() }?.let {
+        Failure(
+            code = it.getString("code"),
+            detail = it.optString("detail"),
+            maxMMessage = it.optInt("maxMMessage"),
+        )
     }
 
     private fun readHandshake(value: JSONObject?): WpsHandshake? = value?.let {

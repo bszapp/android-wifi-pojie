@@ -12,7 +12,8 @@ import kotlinx.parcelize.Parcelize
  *
  * 字典内容通过 FD 流传输，不进入 Binder Parcelable。每个网络记录由 Service 分配 UUID，
  * 保留字典位置、尝试计数、用时和结果；App 分页读取并持久化历史，不自行推进任务。
- * 增加或替换字典需要再次取得授权确认。UI 的配置、三秒等待、勾选和展示状态不属于任务。
+ * 每个网络只在首次启动时提供完整字典，运行中不可替换。新增网络仍需授权确认。
+ * UI 的配置、三秒等待、勾选和展示状态不属于任务。
  * 系统测试按旧版更新配置；空密码使用已有配置。每轮断开并保留配置，下一轮继续更新。
  * 网络移除、字典耗尽或执行异常后遗忘配置；成功的网络保留配置。不备份或恢复原密码。
  * 网卡方式独立控制脚本终端及清理，不修改 Android 保存配置，不复用普通连通性测试任务。
@@ -38,7 +39,7 @@ data class SecurityAuditConfig(
         failureFlags = ConnectWifiFailureFlags(false, HandshakeAttemptsExceededFlag(1), null),
     ),
     val retryCount: Int = 6,
-    val cooldownBaseMillis: Long = 0,
+    val cooldownBaseMillis: Long = 1000,
     val handshakeTimeoutMillis: Long = 1500,
     val maxHandshakeAttempts: Int = 1,
     val macMode: SecurityAuditMacMode = SecurityAuditMacMode.DEVICE,

