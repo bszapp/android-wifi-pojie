@@ -4,6 +4,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.system.StructPollfd
 import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork
+import io.github.bszapp.wifitoolbox.contract.task.WpsHandshake
 import io.github.bszapp.wifitoolbox.contract.task.WpsHandshakeProgress
 import io.github.bszapp.wifitoolbox.contract.task.WpsHandshakeStage
 import io.github.bszapp.wifitoolbox.contract.task.WpsPacketDirection
@@ -72,7 +73,17 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
         }
     }
 
-    data class Result(val network: WpsCapturedNetwork?, val success: Boolean, val settingsChanged: Boolean)
+    data class Result(
+        val network: WpsCapturedNetwork?,
+        val success: Boolean,
+        val settingsChanged: Boolean,
+        /** 收到 M5，即路由器已确认 PIN 前半段正确。 */
+        val firstHalfValid: Boolean,
+        /** 本次握手抓到的 WPS 关键数据；不完整时为 null。 */
+        val handshake: WpsHandshake?,
+        /** 脚本回传的状态（GOT_PSK / WSC_NACK / WPS_FAIL / WPS_SUCCESS 等）。 */
+        val status: String,
+    )
 
     fun run(request: JSONObject, changed: () -> Boolean = { false }): Result {
         val requestId = UUID.randomUUID().toString()
@@ -101,7 +112,14 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                             WpsCapturedNetwork(it.getString("ssid"), it.getString("mac"), it.getString("password"))
                         }
                         context.log("WPS 本轮结束：${event.value.optString("message")}")
-                        return Result(network, event.value.optBoolean("success"), cancelledForUpdate)
+                        return Result(
+                            network = network,
+                            success = event.value.optBoolean("success"),
+                            settingsChanged = cancelledForUpdate,
+                            firstHalfValid = event.value.optBoolean("firstHalfValid"),
+                            handshake = readHandshake(event.value.optJSONObject("handshake")),
+                            status = event.value.optString("message"),
+                        )
                     }
                     "error" -> error(event.value.optString("message"))
                     "stopped" -> { restored = event.value.optBoolean("supplicantRestored"); error("WPS 会话提前结束") }
@@ -111,6 +129,18 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                 else -> Unit
             }
         }
+    }
+
+    private fun readHandshake(value: JSONObject?): WpsHandshake? = value?.let {
+        WpsHandshake(
+            pke = it.optString("pke"),
+            pkr = it.optString("pkr"),
+            eNonce = it.optString("eNonce"),
+            authKey = it.optString("authKey"),
+            eHash1 = it.optString("eHash1"),
+            eHash2 = it.optString("eHash2"),
+            essid = it.optString("essid"),
+        ).takeIf(WpsHandshake::complete)
     }
 
     private fun send(value: JSONObject) {

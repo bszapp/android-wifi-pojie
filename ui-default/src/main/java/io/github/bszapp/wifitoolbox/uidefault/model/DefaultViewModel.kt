@@ -58,6 +58,7 @@ class DefaultViewModel(app: Application) : AndroidViewModel(app) {
     val wifiList = WifiListUiState(
         controller = controller,
         scope = viewModelScope,
+        assets = app.assets,
     )
     private val taskTracker = TaskTracker(controller.tasks, viewModelScope)
     val currentTask: StateFlow<TaskSnapshot?> = taskTracker.currentTask

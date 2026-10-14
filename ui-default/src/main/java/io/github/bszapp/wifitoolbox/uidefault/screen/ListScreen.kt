@@ -25,6 +25,7 @@ import io.github.bszapp.wifitoolbox.uidefault.component.ListPopupDefaults
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode
 import io.github.bszapp.wifitoolbox.uidefault.securityaudit.SecurityAuditTaskSheet
+import io.github.bszapp.wifitoolbox.uidefault.securityaudit.WpsSecurityAuditTaskSheet
 import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
 import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import io.github.bszapp.wifitoolbox.uidefault.theme.LocalEnableBlur
@@ -62,7 +63,8 @@ fun ListScreen(
     val wpsPinForm by viewModel.wpsPinForm.collectAsStateWithLifecycle()
     val selectedSource = modeState?.mode ?: WifiMode.NORMAL
     val submode by viewModel.securityAudit.submode.collectAsStateWithLifecycle()
-    val auditMode = selectedSource == WifiMode.NORMAL && submode == NormalWifiSubmode.SECURITY_AUDIT
+    val auditMode = selectedSource == WifiMode.NORMAL && submode != NormalWifiSubmode.SCAN
+    val wpsAuditMode = selectedSource == WifiMode.NORMAL && submode == NormalWifiSubmode.WPS_SECURITY_AUDIT
     val isScanning = wifiState.isScanning || isSendingScanRequest
     val controlsBusy = isScanning || modeState?.modeSwitch?.isRunning == true
     val taskActionScope = rememberCoroutineScope()
@@ -112,7 +114,11 @@ fun ListScreen(
             BlurredBar(backdrop) {
                 TopAppBar(
                     color = barColor,
-                    title = if (auditMode) "安全测试" else selectedSource.displayName,
+                    title = when {
+                        wpsAuditMode -> "WPS 安全测试"
+                        auditMode -> "安全测试"
+                        else -> selectedSource.displayName
+                    },
                     navigationIcon = {
                         Box {
                             val showTopPopup = remember { mutableStateOf(false) }
@@ -260,10 +266,17 @@ fun ListScreen(
                                                 showMore.value = false
                                             })
                                         HorizontalDivider()
-                                        listOf("扫描模式", "安全测试模式").forEachIndexed { index, label ->
-                                            DropdownImpl(text = label, isSelected = submode.ordinal == index,
-                                                optionSize = 2, index = index, onSelectedIndexChange = {
-                                                    viewModel.securityAudit.selectSubmode(NormalWifiSubmode.entries[index])
+                                        val submodes = NormalWifiSubmode.entries.map { value ->
+                                            value to when (value) {
+                                                NormalWifiSubmode.SCAN -> "扫描模式"
+                                                NormalWifiSubmode.SECURITY_AUDIT -> "安全测试"
+                                                NormalWifiSubmode.WPS_SECURITY_AUDIT -> "WPS 安全测试"
+                                            }
+                                        }
+                                        submodes.forEachIndexed { index, (value, label) ->
+                                            DropdownImpl(text = label, isSelected = submode == value,
+                                                optionSize = submodes.size, index = index, onSelectedIndexChange = {
+                                                    viewModel.securityAudit.selectSubmode(value)
                                                     showMore.value = false
                                                 })
                                         }
@@ -447,6 +460,9 @@ private fun DisplayedTaskSheet(
         is TaskRequestPayload.SecurityAudit -> SecurityAuditTaskSheet(task,
             onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
             onInspect = viewModel.securityAudit::inspect)
+        is TaskRequestPayload.WpsSecurityAudit -> WpsSecurityAuditTaskSheet(task,
+            onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
+            onInspect = viewModel.securityAudit::inspectWps)
     }
 }
 

@@ -84,6 +84,10 @@ while IFS='|' read -r rel sha url; do
   fetch "$url" "$sha" "$rel"
 done <<'EOF'
 musl-1.2.6.tar.gz|d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a|https://musl.libc.org/releases/musl-1.2.6.tar.gz
+alpine/libnl3-dev-3.11.0-r0.apk|5b8c0ada61a4ee533bb699488295fc1288c6f0326f612aa36fc8b37874e592e2|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libnl3-dev-3.11.0-r0.apk
+alpine/libnl3-static-3.11.0-r0.apk|39c0fbf78adc9021e4c4f1e1115902df97b52bff2db9f4b8bc6152bf13fc8b87|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libnl3-static-3.11.0-r0.apk
+alpine/libpcap-dev-1.10.7-r0.apk|ef74ef0217be45ab728c469e1f1805d321d0abffe2299091a103a4419548a534|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libpcap-dev-1.10.7-r0.apk
+alpine/linux-headers-6.16.12-r0.apk|955f0df4b10c2bbeda03ba366bf4aef7d5113d35a943e355dc89e006d28b0d66|https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/linux-headers-6.16.12-r0.apk
 talloc-2.4.3.tar.gz|dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd|https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz
 zlib-1.3.1.tar.gz|9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23|https://zlib.net/fossils/zlib-1.3.1.tar.gz
 alpine/alpine-minirootfs-3.23.4-aarch64.tar.gz|9250667a8affac8f1e98086392f80f43f086626701e9bce33398eb9b6c0bd64c|https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.4-aarch64.tar.gz

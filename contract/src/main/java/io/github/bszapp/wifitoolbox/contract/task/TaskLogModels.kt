@@ -30,7 +30,7 @@ data class TrackedTaskState(
     val snapshot: TaskSnapshot,
     val logs: TaskLogState,
     val capturedNetworks: List<WpsCapturedNetwork> = emptyList(),
-    val auditNetworks: List<SecurityAuditNetworkRecord> = emptyList(),
+    val auditNetworks: List<AuditRecord> = emptyList(),
 )
 
 data class TaskControllerState(

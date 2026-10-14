@@ -1138,6 +1138,8 @@ def parse_bss(payload: bytes) -> Optional[dict]:
         "channelWidth": channel_width,
         "centerFreq0": center_freq0,
         "centerFreq1": center_freq1,
+        # Preserve the actual WPS vendor IEs so Kotlin can inspect the device model.
+        "wpsInformationElements": [(WPS_VENDOR_TYPE + blob).hex() for blob in wps_data],
         "wps": {
             "supported": bool(wps_data),
             "pinSupported": pin_supported,

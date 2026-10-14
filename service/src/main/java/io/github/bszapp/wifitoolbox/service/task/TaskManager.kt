@@ -123,17 +123,20 @@ internal class TaskManager(
 
     fun auditTaskIds(offset: Int): LongArray = synchronized(lock) {
         require(offset >= 0)
-        records.values.asSequence().filter { it.snapshot.request.payload is TaskRequestPayload.SecurityAudit }
+        records.values.asSequence().filter {
+            it.snapshot.request.payload is TaskRequestPayload.SecurityAudit ||
+                it.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit
+        }
             .drop(offset).take(100).map { it.snapshot.taskId }.toList().toLongArray()
     }
 
-    fun auditNetworkPage(taskId: Long, fromIndex: Int): SecurityAuditNetworkPage = synchronized(lock) {
+    fun auditNetworkPage(taskId: Long, fromIndex: Int): AuditRecordPage = synchronized(lock) {
         val record = records[taskId] ?: error("任务 $taskId 不存在")
         val networks = record.auditNetworks
         require(fromIndex in 0..networks.size)
         var end = minOf(fromIndex + 100, networks.size)
         while (true) {
-            val page = SecurityAuditNetworkPage(record.auditRevision, fromIndex, networks.size, networks.subList(fromIndex, end).toList())
+            val page = AuditRecordPage(record.auditRevision, fromIndex, networks.size, networks.subList(fromIndex, end).toList())
             if (PagedDataTransport.bytes(page).size <= PagedDataTransport.MAX_PAGE_BYTES) return@synchronized page
             check(end > fromIndex + 1) { "单条安全测试记录超过传输预算" }
             end--
@@ -141,13 +144,18 @@ internal class TaskManager(
         @Suppress("UNREACHABLE_CODE") error("不可达")
     }
 
-    internal fun updateAuditNetworks(taskId: Long, config: SecurityAuditConfig, networks: List<SecurityAuditNetworkRecord>) {
+    internal fun updateAuditNetworks(
+        taskId: Long,
+        networks: List<AuditRecord>,
+        progressOf: (revision: Long, activeCount: Int) -> TaskProgress,
+    ) {
         synchronized(lock) {
             val record = records[taskId] ?: return
-            if (record.auditNetworks == networks && (record.snapshot.progress as? TaskProgress.SecurityAudit)?.config == config) return
+            val active = networks.count { it.active }
+            if (record.auditNetworks == networks && record.snapshot.progress == progressOf(record.auditRevision, active)) return
             record.auditNetworks = networks
             record.auditRevision++
-            updateProgress(taskId, TaskProgress.SecurityAudit(record.auditRevision, networks.count { it.active }, config))
+            updateProgress(taskId, progressOf(record.auditRevision, networks.count { it.active }))
         }
     }
 
@@ -318,13 +326,20 @@ internal class TaskManager(
 
     internal fun auditNotificationText(): String? = synchronized(lock) {
         val record = currentTaskId?.let(records::get) ?: return@synchronized null
-        if (record.snapshot.request.payload !is TaskRequestPayload.SecurityAudit) return@synchronized null
+        val isDictionary = record.snapshot.request.payload is TaskRequestPayload.SecurityAudit
+        if (!isDictionary && record.snapshot.request.payload !is TaskRequestPayload.WpsSecurityAudit) {
+            return@synchronized null
+        }
         val active = record.auditNetworks.filter { it.active }
         val current = active.firstOrNull { it.state == SecurityAuditNetworkState.CONNECTING }
-        val estimates = active.map { it.averageAttemptMillis?.times(it.total - it.completed) }
+        if (!isDictionary) {
+            val label = if (current != null) "${current.ssid} · ${current.message}" else "等待冷却"
+            return "WPS 安全测试：$label"
+        }
+        val estimates = active.map { (it as AuditRecord.Dictionary).averageAttemptMillis?.times(it.total - it.completed) }
         val remaining = if (estimates.any { it == null } || estimates.isEmpty()) "剩余时间计算中"
             else "预计剩余 ${estimates.filterNotNull().sum() / 1000} 秒"
-        if (current != null) "网络安全测试：${current.input.ssid} · ${current.message}；$remaining"
+        if (current != null) "网络安全测试：${current.ssid} · ${current.message}；$remaining"
         else if (active.isNotEmpty()) "网络安全测试：等待冷却；$remaining"
         else "网络安全测试：准备中"
     }
@@ -364,6 +379,14 @@ internal class TaskManager(
                     input = payload.input,
                     terminalManager = terminalManager,
                     androidApi = androidApi,
+                    onSavedWifiNetworksChanged = onSavedWifiNetworksChanged,
+                    onError = onError,
+                )
+                is TaskRequestPayload.WpsSecurityAudit -> WpsSecurityAuditTask(
+                    input = payload.input,
+                    terminals = terminalManager,
+                    androidApi = androidApi,
+                    scanResults = scanResultsProvider,
                     onSavedWifiNetworksChanged = onSavedWifiNetworksChanged,
                     onError = onError,
                 )
@@ -423,6 +446,7 @@ internal class TaskManager(
     private fun validate(request: TaskStartRequest) {
         when (val payload = request.payload) {
             is TaskRequestPayload.SecurityAudit -> validateAudit(payload.input)
+            is TaskRequestPayload.WpsSecurityAudit -> validateWpsAudit(payload.input)
             TaskRequestPayload.UsbMonitor -> {
                 require(android.os.Process.myUid() == 0) { "电脑控制需要 Root 工作模式" }
                 check(usbMonitorTaskReadyProvider()) { "电脑控制只能在监听模式运行" }
@@ -495,6 +519,14 @@ internal class TaskManager(
             }
             return
         }
+        if (request.payload is TaskRequestPayload.WpsSecurityAudit) {
+            when (val payload = update.payload) {
+                is TaskUpdatePayload.WpsSecurityAuditConfigure -> validateWpsAuditConfig(payload.config)
+                is TaskUpdatePayload.SecurityAuditRemove -> require(payload.ssid.toByteArray(Charsets.UTF_8).size in 1..32)
+                else -> error("WPS 安全测试不支持此更新")
+            }
+            return
+        }
         require(request.payload is TaskRequestPayload.WpsPbc) { "当前任务不支持运行时更新" }
         when (update.payload) {
             is TaskUpdatePayload.WpsPbcContinuousCapture,
@@ -504,6 +536,33 @@ internal class TaskManager(
             -> Unit
             else -> error("WPS-PBC 不支持此更新")
         }
+    }
+
+    private fun validateWpsAudit(input: WpsSecurityAuditTaskInput) {
+        require(input.targets.isNotEmpty()) { "至少选择一个网络" }
+        val seen = mutableSetOf<String>()
+        input.targets.forEach { target ->
+            require(target.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
+            require(seen.add(target.ssid)) { "同一 SSID 只能出现一次：${target.ssid}" }
+            target.mac?.let { mac ->
+                require(MAC_ADDRESS.matches(mac)) { "目标设备 MAC 格式非法：$mac" }
+                require((mac.substringBefore(':').toInt(16) and 1) == 0 && mac != "00:00:00:00:00:00") {
+                    "目标设备 MAC 必须为有效单播地址"
+                }
+            }
+        }
+        validateWpsAuditConfig(input.config)
+    }
+
+    private fun validateWpsAuditConfig(config: WpsSecurityAuditConfig) {
+        require(android.os.Process.myUid() == 0) { "WPS 安全测试需要 Root 工作模式" }
+        check(normalModeTaskReadyProvider()) { "WPS 安全测试只能在普通模式且容器环境已配置时运行" }
+        require(config.retryCount in 0..6 && config.cooldownBaseMillis in 0..8000) { "重试/冷却配置非法" }
+        require(config.macChangeThreshold in 1..5) { "异常时更换的连续重试次数应为 1～5" }
+        require(config.maxAttemptsPerNetwork >= 0) { "单网络尝试上限不能为负" }
+        require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
+        require(terminalManager.hasRootfsFile("wlantool/wps.py")) { "容器缺少 wps.py，请更新容器系统" }
+        require(terminalManager.hasRootfsFile("bin/pixiewps")) { "容器缺少 pixiewps，请更新容器系统" }
     }
 
     private fun validateAudit(input: SecurityAuditTaskInput) {
@@ -683,7 +742,7 @@ internal class TaskManager(
         val logs: ArrayList<TaskLogEntry> = ArrayList(),
         val capturedNetworks: ArrayList<WpsCapturedNetwork> = ArrayList(),
         val auditDictionaries: MutableMap<String, List<String>> = mutableMapOf(),
-        var auditNetworks: List<SecurityAuditNetworkRecord> = emptyList(),
+        var auditNetworks: List<AuditRecord> = emptyList(),
         var auditRevision: Long = 0,
         var nextLogId: Long = 0L,
         var logGeneration: Long = 0L,

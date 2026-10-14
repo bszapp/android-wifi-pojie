@@ -34,6 +34,10 @@ esac
 
 for required in \
   "$DIST_DIR/musl-1.2.6.tar.gz" \
+  "$DIST_DIR/alpine/libnl3-dev-3.11.0-r0.apk" \
+  "$DIST_DIR/alpine/libnl3-static-3.11.0-r0.apk" \
+  "$DIST_DIR/alpine/libpcap-dev-1.10.7-r0.apk" \
+  "$DIST_DIR/alpine/linux-headers-6.16.12-r0.apk" \
   "$DIST_DIR/alpine/alpine-minirootfs-3.23.4-aarch64.tar.gz" \
   "$DIST_DIR/alpine/dbus-libs-1.16.2-r1.apk" \
   "$DIST_DIR/alpine/gdbm-1.26-r0.apk" \
@@ -152,6 +156,7 @@ rm -rf "$ROOTFS_STAGE/wlantool/__pycache__"
 : > "$ROOTFS_STAGE/wlantool/vulnwsc.txt"
 chmod 755 "$ROOTFS_STAGE/wlantool/scan.py"
 sh "$ROOT_DIR/build-pixiewps.sh" "$ROOTFS_STAGE"
+sh "$ROOT_DIR/build-mdk4.sh" "$ROOTFS_STAGE"
 ln -sf /usr/bin/python3 "$ROOTFS_STAGE/usr/local/bin/python"
 cat > "$ROOTFS_STAGE/etc/wpa_supplicant.conf" <<'EOF'
 ctrl_interface=/var/run/wpa_supplicant

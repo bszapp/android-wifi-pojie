@@ -87,16 +87,16 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                         TextButton("重新选择字典", model::chooseDictionaries, Modifier.fillMaxWidth())
                     }
                     SecurityAuditSheetPage.RECOVERY -> item {
-                        val previous = history.firstOrNull { it.id == form.recordId }
+                        val previous = history.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == form.recordId }
                         Text("上次进度：${previous?.completed ?: 0}/${previous?.total ?: 0}", style = MiuixTheme.textStyles.body2)
                         TextButton("继续上次测试", { previous?.let { model.resumeHistory(it.id) } }, Modifier.fillMaxWidth())
                         TextButton("重新选择字典", model::chooseDictionaries, Modifier.fillMaxWidth())
                     }
                     SecurityAuditSheetPage.DETAIL -> {
-                        val record = history.firstOrNull { it.id == form.recordId }
+                        val record = history.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == form.recordId }
                         if (record == null) item { Text("暂无记录") }
                         else {
-                            item { Text(record.input.ssid, style = MiuixTheme.textStyles.title3) }
+                            item { Text(record.ssid, style = MiuixTheme.textStyles.title3) }
                             item { AuditRecordDetails(record) }
                             if (record.password == null && record.completed < record.total) item {
                                 TextButton("从此记录继续", { model.resumeHistory(record.id) }, Modifier.fillMaxWidth())
@@ -149,7 +149,7 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
 }
 
 @Composable
-private fun AuditChoice(title: String, checked: Boolean, onClick: () -> Unit, summary: String? = null) {
+internal fun AuditChoice(title: String, checked: Boolean, onClick: () -> Unit, summary: String? = null) {
     BasicComponent(title = title, summary = summary, onClick = onClick, endActions = {
         Checkbox(if (checked) ToggleableState.On else ToggleableState.Off, onClick = onClick)
     })
@@ -213,7 +213,7 @@ private fun AuditConfiguration(config: SecurityAuditConfig, onChange: (SecurityA
 }
 
 @Composable
-private fun AuditSlider(title: String, value: Long, min: Long, max: Long, step: Long, unit: String, onChange: (Long) -> Unit) {
+internal fun AuditSlider(title: String, value: Long, min: Long, max: Long, step: Long, unit: String, onChange: (Long) -> Unit) {
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(title, style = MiuixTheme.textStyles.body2)
@@ -225,7 +225,7 @@ private fun AuditSlider(title: String, value: Long, min: Long, max: Long, step: 
 }
 
 @Composable
-fun AuditNetworkProgress(record: SecurityAuditNetworkRecord?, onEdit: () -> Unit) {
+fun AuditNetworkProgress(record: AuditRecord.Dictionary?, onEdit: () -> Unit) {
     var lastRecord by remember { mutableStateOf(record) }
     if (record != null) lastRecord = record
     AnimatedVisibility(visible = record != null, enter = expandVertically(), exit = shrinkVertically()) {
@@ -248,7 +248,7 @@ fun AuditNetworkProgress(record: SecurityAuditNetworkRecord?, onEdit: () -> Unit
 }
 
 @Composable
-private fun AuditRecordDetails(record: SecurityAuditNetworkRecord) {
+private fun AuditRecordDetails(record: AuditRecord.Dictionary) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(record.state.label(), style = MiuixTheme.textStyles.subtitle)
         Text("开始时间：${timestamp(record.startedAt)}\n记录时间：${timestamp(record.updatedAt)}", style = MiuixTheme.textStyles.body2)
@@ -261,7 +261,8 @@ private fun AuditRecordDetails(record: SecurityAuditNetworkRecord) {
 }
 
 @Composable
-fun SecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDismiss: () -> Unit, onInspect: (String) -> Unit) {
+fun SecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDismiss: () -> Unit,
+    onInspect: (String) -> Unit, onInspectWps: (String) -> Unit = onInspect) {
     var show by rememberSaveable(task.snapshot.taskId) { mutableStateOf(true) }
     var logsExpanded by rememberSaveable(task.snapshot.taskId) { mutableStateOf(false) }
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
@@ -271,8 +272,15 @@ fun SecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDismiss
             LazyColumn(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 item { Text(if (task.snapshot.state == TaskExecutionState.RUNNING) "运行中" else "本批任务已结束", style = MiuixTheme.textStyles.subtitle) }
                 items(task.auditNetworks, key = { it.id }) { record ->
-                    Card(Modifier.fillMaxWidth(), onClick = { show = false; onInspect(record.id) }) {
-                        BasicComponent(title = record.input.ssid, summary = "${record.state.label()} · ${record.completed}/${record.total}\n${record.message}")
+                    Card(Modifier.fillMaxWidth(), onClick = {
+                        show = false
+                        if (record is AuditRecord.Dictionary) onInspect(record.id) else onInspectWps(record.id)
+                    }) {
+                        BasicComponent(title = record.ssid,
+                            summary = when (record) {
+                                is AuditRecord.Dictionary -> "${record.state.label(record.kind)} · ${record.completed}/${record.total}\n${record.message}"
+                                is AuditRecord.Wps -> "${record.state.label(record.kind)} · ${wpsPhaseLabel(record.phase)}\n${record.message}"
+                            })
                     }
                 }
                 item { TextButton(if (logsExpanded) "收起运行日志" else "展开运行日志", onClick = { logsExpanded = !logsExpanded }) }
@@ -288,7 +296,7 @@ fun SecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDismiss
 fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
     val navigator = LocalNavigator.current
     val history by viewModel.securityAudit.history.collectAsStateWithLifecycle()
-    val sorted = remember(history) { history.sortedWith(compareByDescending<SecurityAuditNetworkRecord> { it.password != null }.thenByDescending { it.updatedAt }) }
+    val sorted = remember(history) { history.sortedWith(compareByDescending<AuditRecord> { it.password != null }.thenByDescending { it.updatedAt }) }
     val scroll = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
     Scaffold(topBar = { BlurredBar(backdrop) {
@@ -303,9 +311,16 @@ fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
                 if (sorted.isEmpty()) item { Text("暂无安全测试历史") }
                 items(sorted, key = { it.id }) { record ->
                     Card(Modifier.fillMaxWidth()) {
-                        BasicComponent(title = record.input.ssid, summary = "${timestamp(record.updatedAt)} · ${record.state.label()}${if (record.password != null) " · 发现弱密码" else ""}",
-                            onClick = { viewModel.securityAudit.inspect(record.id) }, endActions = {
-                                IconButton(onClick = { viewModel.showConfirmationDialog(title = "删除历史记录", content = "删除 ${record.input.ssid} 的这条安全测试记录？",
+                        BasicComponent(title = record.ssid, summary = buildString {
+                            if (record.kind == AuditRecordKind.WPS) append("WPS 安全测试 · ")
+                            append(timestamp(record.updatedAt))
+                            append(" · ${record.state.label(record.kind)}")
+                            if (record.password != null && record.kind == AuditRecordKind.DICTIONARY) append(" · 发现弱密码")
+                        }, onClick = {
+                            if (record is AuditRecord.Dictionary) viewModel.securityAudit.inspect(record.id)
+                            else viewModel.securityAudit.inspectWps(record.id)
+                        }, endActions = {
+                                IconButton(onClick = { viewModel.showConfirmationDialog(title = "删除历史记录", content = "删除 ${record.ssid} 的这条安全测试记录？",
                                     onConfirmed = { viewModel.securityAudit.deleteHistory(record.id) }) }) { Icon(Icons.Rounded.DeleteOutline, "删除历史") }
                             })
                     }
@@ -315,15 +330,26 @@ fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
     }
 }
 
-private fun timestamp(value: Long) = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
-private fun SecurityAuditNetworkState.label() = when (this) {
+internal fun timestamp(value: Long) = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
+internal fun SecurityAuditNetworkState.label(kind: AuditRecordKind = AuditRecordKind.DICTIONARY) = when (this) {
     SecurityAuditNetworkState.QUEUED -> "排队中"
-    SecurityAuditNetworkState.CONNECTING -> "测试中"
+    SecurityAuditNetworkState.CONNECTING -> if (kind == AuditRecordKind.WPS) "握手中" else "测试中"
     SecurityAuditNetworkState.COOLDOWN -> "冷却中"
-    SecurityAuditNetworkState.SUCCEEDED -> "发现弱密码"
-    SecurityAuditNetworkState.EXHAUSTED -> "字典已耗尽"
+    SecurityAuditNetworkState.SUCCEEDED -> if (kind == AuditRecordKind.WPS) "取得密码" else "发现弱密码"
+    SecurityAuditNetworkState.EXHAUSTED -> if (kind == AuditRecordKind.WPS) "已结束" else "字典已耗尽"
     SecurityAuditNetworkState.STOPPED -> "已停止"
     SecurityAuditNetworkState.ERROR -> "执行异常"
+}
+internal fun wpsPhaseLabel(phase: WpsSecurityAuditPhase) = when (phase) {
+    WpsSecurityAuditPhase.FAIRY_DUST -> "仙尘阶段"
+    WpsSecurityAuditPhase.FIRST_HALF -> "前四位枚举"
+    WpsSecurityAuditPhase.SECOND_HALF -> "后三位枚举"
+    WpsSecurityAuditPhase.DONE -> "已结束"
+}
+internal fun wpsNDayLabel(value: Boolean?) = when (value) {
+    true -> "存在随机数缺陷漏洞"
+    false -> "未发现随机数缺陷漏洞"
+    null -> "随机数缺陷未评估"
 }
 private fun ConnectWifiStage.label() = when (this) {
     ConnectWifiStage.ROUTER_COMMUNICATION -> "与路由器建立通信"

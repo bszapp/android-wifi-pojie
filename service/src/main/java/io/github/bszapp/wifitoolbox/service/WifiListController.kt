@@ -1241,6 +1241,26 @@ internal class WifiListController(
                         channelWidth = value.optInt("channelWidth", ScanResult.CHANNEL_WIDTH_20MHZ)
                         centerFreq0 = value.optInt("centerFreq0", frequency)
                         centerFreq1 = value.optInt("centerFreq1", 0)
+                        value.optJSONArray("wpsInformationElements")?.let { elements ->
+                            val type = Class.forName("android.net.wifi.ScanResult\$InformationElement")
+                            val array = java.lang.reflect.Array.newInstance(type, elements.length())
+                            val constructor = runCatching {
+                                type.getDeclaredConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                                    ByteArray::class.java)
+                            }.getOrNull()
+                            for (elementIndex in 0 until elements.length()) {
+                                val hex = elements.getString(elementIndex)
+                                require(hex.length % 2 == 0) { "WPS 信息元素编码非法" }
+                                val bytes = ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+                                val element = constructor?.newInstance(221, 0, bytes)
+                                    ?: type.getDeclaredConstructor().newInstance().also {
+                                        type.getField("id").setInt(it, 221)
+                                        type.getField("bytes").set(it, bytes)
+                                    }
+                                java.lang.reflect.Array.set(array, elementIndex, element)
+                            }
+                            ScanResult::class.java.getField("informationElements").set(this, array)
+                        }
                     },
                 )
             }

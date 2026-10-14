@@ -23,8 +23,23 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
-enum class NormalWifiSubmode { SCAN, SECURITY_AUDIT }
+enum class NormalWifiSubmode { SCAN, SECURITY_AUDIT, WPS_SECURITY_AUDIT }
 enum class SecurityAuditSheetPage { CONFIGURATION, DICTIONARIES, DETAIL, SAVED, RECOVERY, MANUAL }
+enum class WpsAuditSheetPage { TARGET, CONFIGURATION, DETAIL }
+data class WpsAuditSheetState(
+    val show: Boolean = false,
+    val page: WpsAuditSheetPage = WpsAuditSheetPage.TARGET,
+    val config: WpsSecurityAuditConfig = WpsSecurityAuditConfig(),
+    val ssid: String = "",
+    val saved: Boolean = false,
+    val supportsWps: Boolean = true,
+    val recordId: String? = null,
+    val busy: Boolean = false,
+    val message: String? = null,
+    val authorizationShow: Boolean = false,
+    val authorizationAgreed: Boolean = false,
+    val authorizationReadyAt: Long = 0,
+)
 data class SecurityAuditSheetState(
     val show: Boolean = false,
     val page: SecurityAuditSheetPage = SecurityAuditSheetPage.CONFIGURATION,
@@ -54,6 +69,7 @@ class SecurityAuditUiState(
     val submode = _submode.asStateFlow()
     private val _sheet = MutableStateFlow(SecurityAuditSheetState())
     val sheet = _sheet.asStateFlow()
+    private val _wpsForm = MutableStateFlow(WpsAuditSheetState())
     private val _dictionaries = MutableStateFlow<List<DictionaryResource>>(emptyList())
     val dictionaries = _dictionaries.asStateFlow()
     val history = controller.tasks.auditHistory
@@ -62,12 +78,26 @@ class SecurityAuditUiState(
     private var preparedPasswords: List<String> = emptyList()
 
     val batch = controller.tasks.state.map { state ->
-        state.currentTaskId?.let(state.tasks::get)?.takeIf { it.snapshot.request.payload is TaskRequestPayload.SecurityAudit }
+        state.currentTaskId?.let(state.tasks::get)?.takeIf {
+            val payload = it.snapshot.request.payload
+            payload is TaskRequestPayload.SecurityAudit || payload is TaskRequestPayload.WpsSecurityAudit
+        }
     }.stateIn(scope, SharingStarted.Eagerly, null)
+
+    val wpsBatch = batch.map { running ->
+        running?.takeIf { it.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit }
+    }.stateIn(scope, SharingStarted.Eagerly, null)
+
+    val wpsForm = _wpsForm.asStateFlow()
 
     fun selectSubmode(value: NormalWifiSubmode) { _submode.value = value }
     private fun currentConfig() = (runningBatch()?.snapshot?.progress as? TaskProgress.SecurityAudit)?.config ?: controller.tasks.auditConfig.value
-    fun configure() { _sheet.value = SecurityAuditSheetState(show = true, config = currentConfig()) }
+    private fun currentWpsConfig() =
+        (runningWpsBatch()?.snapshot?.progress as? TaskProgress.WpsSecurityAudit)?.config ?: controller.tasks.wpsAuditConfig.value
+    fun configure() {
+        if (submode.value == NormalWifiSubmode.WPS_SECURITY_AUDIT) configureWps() else _sheet.value =
+            SecurityAuditSheetState(show = true, config = currentConfig())
+    }
     fun changeConfig(config: SecurityAuditConfig) {
         controller.tasks.configureSecurityAudit(config)
         _sheet.update { it.copy(config = config) }
@@ -87,8 +117,10 @@ class SecurityAuditUiState(
     fun openNetwork(ssid: String, saved: Boolean) {
         preparation?.cancel()
         preparedPasswords = emptyList()
-        val existing = batch.value?.auditNetworks?.firstOrNull { it.active && it.input.ssid == ssid }
-        val previous = history.value.firstOrNull { it.input.ssid == ssid && it.password == null && it.completed < it.total }
+        val existing = runningBatch()?.auditNetworks?.filterIsInstance<AuditRecord.Dictionary>()
+            ?.firstOrNull { it.active && it.ssid == ssid }
+        val previous = history.value.filterIsInstance<AuditRecord.Dictionary>()
+            .firstOrNull { it.ssid == ssid && it.password == null && it.completed < it.total }
         val page = when { existing != null -> SecurityAuditSheetPage.DICTIONARIES
             saved -> SecurityAuditSheetPage.SAVED
             previous != null -> SecurityAuditSheetPage.RECOVERY
@@ -156,13 +188,13 @@ class SecurityAuditUiState(
     }
 
     fun resumeHistory(recordId: String) {
-        val record = history.value.firstOrNull { it.id == recordId } ?: return
+        val record = history.value.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == recordId } ?: return
         if (controller.tasks.auditDictionary(recordId) == null) {
             _sheet.update { it.copy(message = "此旧记录未保存完整字典，请重新选择字典") }; return
         }
-        _sheet.update { it.copy(ssid = record.input.ssid, config = currentConfig(),
+        _sheet.update { it.copy(ssid = record.ssid, config = currentConfig(),
             saved = controller.wifiList.savedWifiList.value?.networks.orEmpty().any { network ->
-                network.SSID?.removeSurrounding("\"") == record.input.ssid },
+                network.SSID?.removeSurrounding("\"") == record.ssid },
             resumeRecordId = recordId, useSavedPassword = false, candidateCount = record.total) }
         requestRun()
     }
@@ -186,7 +218,8 @@ class SecurityAuditUiState(
                 try {
                     withContext(Dispatchers.IO) {
                         val selected = form.selectedIds.mapNotNull { id -> _dictionaries.value.firstOrNull { it.id == id && it.type == 0 } }
-                        val previous = form.resumeRecordId?.let { id -> history.value.firstOrNull { it.id == id } }
+                        val previous = form.resumeRecordId?.let { id ->
+                            history.value.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == id } }
                         val file = File(app.cacheDir, "security-audit-${UUID.randomUUID()}.txt")
                         combined = file
                         if (previous != null) {
@@ -207,13 +240,79 @@ class SecurityAuditUiState(
         }
     }
 
-    private fun runningBatch() = batch.value?.takeIf { it.snapshot.state == TaskExecutionState.RUNNING }
-    fun stopNetwork(ssid: String) { runningBatch()?.let { controller.tasks.updateTask(it.snapshot.taskId,
-        TaskUpdateRequest(TaskUpdatePayload.SecurityAuditRemove(ssid))) } }
-    fun stopBatch() { runningBatch()?.let { controller.tasks.stopTask(it.snapshot.taskId) } }
+    private fun runningBatch() = batch.value?.takeIf {
+        it.snapshot.request.payload is TaskRequestPayload.SecurityAudit &&
+            it.snapshot.state == TaskExecutionState.RUNNING
+    }
+    private fun runningWpsBatch() = wpsBatch.value?.takeIf { it.snapshot.state == TaskExecutionState.RUNNING }
+
+    fun stopNetwork(ssid: String) {
+        val task = runningBatch() ?: runningWpsBatch() ?: return
+        controller.tasks.updateTask(task.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.SecurityAuditRemove(ssid)))
+    }
+    fun stopBatch() { (runningBatch() ?: runningWpsBatch())?.let { controller.tasks.stopTask(it.snapshot.taskId) } }
     fun inspect(recordId: String) { _sheet.value = SecurityAuditSheetState(show = true,
         page = SecurityAuditSheetPage.DETAIL, recordId = recordId,
-        ssid = history.value.firstOrNull { it.id == recordId }?.input?.ssid.orEmpty()) }
-    fun dismiss() { _sheet.update { it.copy(show = false, authorizationShow = false) } }
+        ssid = history.value.filterIsInstance<AuditRecord.Dictionary>().firstOrNull { it.id == recordId }?.ssid.orEmpty()) }
+
+    // ── WPS 安全测试 ────────────────────────────────────────────────────────
+    fun configureWps() { _wpsForm.value = WpsAuditSheetState(show = true,
+        page = WpsAuditSheetPage.CONFIGURATION, config = currentWpsConfig()) }
+    fun changeWpsConfig(config: WpsSecurityAuditConfig) {
+        controller.tasks.configureWpsSecurityAudit(config)
+        _wpsForm.update { it.copy(config = config) }
+    }
+
+    fun openWpsNetwork(ssid: String, saved: Boolean, supportsWps: Boolean) {
+        val previous = history.value.filterIsInstance<AuditRecord.Wps>()
+            .firstOrNull { it.ssid == ssid && it.password == null && it.phase != WpsSecurityAuditPhase.DONE }
+        _wpsForm.value = WpsAuditSheetState(show = true, page = WpsAuditSheetPage.TARGET,
+            ssid = ssid, saved = saved, supportsWps = supportsWps, config = currentWpsConfig(),
+            recordId = previous?.id)
+    }
+
+    fun requestWpsRun() {
+        val form = _wpsForm.value
+        if (!form.supportsWps) { _wpsForm.update { it.copy(message = "此网络未广播 WPS 能力") }; return }
+        _wpsForm.update { it.copy(authorizationShow = true, authorizationAgreed = false,
+            authorizationReadyAt = SystemClock.elapsedRealtime() + 3000, message = null) }
+    }
+    fun agreeWps(value: Boolean) { _wpsForm.update { it.copy(authorizationAgreed = value) } }
+    fun dismissWpsAuthorization() { _wpsForm.update { it.copy(authorizationShow = false) } }
+    fun confirmWpsRun() {
+        val form = _wpsForm.value
+        if (!form.authorizationShow || !form.authorizationAgreed || form.busy) return
+        if (SystemClock.elapsedRealtime() < form.authorizationReadyAt) return
+        _wpsForm.value = form.copy(authorizationShow = false, busy = true, message = null)
+        scope.launch {
+            try {
+                val previous = form.recordId?.let { id ->
+                    history.value.filterIsInstance<AuditRecord.Wps>().firstOrNull { it.id == id } }
+                val id = controller.tasks.runWpsSecurityAudit(WpsSecurityAuditTaskInput(
+                    currentWpsConfig(),
+                    listOf(WpsSecurityAuditTarget(
+                        ssid = form.ssid,
+                        resumePhase = previous?.phase ?: WpsSecurityAuditPhase.FAIRY_DUST,
+                        resumeVulnPin = previous?.vulnPin,
+                        resumeFirstHalf = previous?.firstHalf,
+                        resumeFirstHalfIndex = previous?.firstHalfIndex ?: 0,
+                        resumeSecondHalfIndex = previous?.secondHalfIndex ?: 0,
+                    )),
+                ))
+                controller.tasks.trackTask(id)
+                _wpsForm.value = WpsAuditSheetState()
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                _wpsForm.update { it.copy(busy = false, message = error.message ?: error.javaClass.name) }
+            }
+        }
+    }
+
+    fun inspectWps(recordId: String) { _wpsForm.value = WpsAuditSheetState(show = true,
+        page = WpsAuditSheetPage.DETAIL, recordId = recordId,
+        ssid = history.value.filterIsInstance<AuditRecord.Wps>().firstOrNull { it.id == recordId }?.ssid.orEmpty()) }
+    fun dismissWps() { _wpsForm.update { it.copy(show = false, authorizationShow = false) } }
+
+    fun dismiss() { _sheet.update { it.copy(show = false, authorizationShow = false) }; dismissWps() }
     fun deleteHistory(id: String) = controller.tasks.deleteAuditHistory(id)
 }

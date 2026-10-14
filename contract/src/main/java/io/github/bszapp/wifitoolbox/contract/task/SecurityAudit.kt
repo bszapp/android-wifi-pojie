@@ -62,34 +62,3 @@ data class SecurityAuditTaskInput(
 
 enum class SecurityAuditNetworkState { QUEUED, CONNECTING, COOLDOWN, SUCCEEDED, EXHAUSTED, STOPPED, ERROR }
 
-@Parcelize
-data class SecurityAuditNetworkRecord(
-    val id: String,
-    val input: SecurityAuditNetworkInput,
-    val config: SecurityAuditConfig,
-    val startedAt: Long,
-    val updatedAt: Long,
-    val state: SecurityAuditNetworkState,
-    val total: Int,
-    val completed: Int = 0,
-    val attempts: Long = 0,
-    val retryCount: Int = 0,
-    val elapsedMillis: Long = 0,
-    val averageAttemptMillis: Long? = null,
-    val nextAttemptAt: Long? = null,
-    val stage: ConnectWifiStage? = null,
-    val message: String = "排队中",
-    val password: String? = null,
-    val dictionaryPosition: Int? = null,
-) : Parcelable {
-    val active: Boolean get() = state == SecurityAuditNetworkState.QUEUED ||
-        state == SecurityAuditNetworkState.CONNECTING || state == SecurityAuditNetworkState.COOLDOWN
-}
-
-@Parcelize
-data class SecurityAuditNetworkPage(
-    val revision: Long,
-    val fromIndex: Int,
-    val totalCount: Int,
-    val networks: List<SecurityAuditNetworkRecord>,
-) : Parcelable

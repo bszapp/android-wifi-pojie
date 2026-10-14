@@ -164,6 +164,8 @@ fun Project.configureContainerBuild() {
         cp "${'$'}PROJECT/rftoolbuilder/downloads.sh" "${'$'}WORK_DIR/rftoolbuilder/downloads.sh"
         cp "${'$'}PROJECT/rftoolbuilder/build-pixiewps.sh" "${'$'}WORK_DIR/rftoolbuilder/build-pixiewps.sh"
         cp "${'$'}PROJECT/rftoolbuilder/pixiewps-cc.sh" "${'$'}WORK_DIR/rftoolbuilder/pixiewps-cc.sh"
+        cp "${'$'}PROJECT/rftoolbuilder/build-mdk4.sh" "${'$'}WORK_DIR/rftoolbuilder/build-mdk4.sh"
+        cp "${'$'}PROJECT/rftoolbuilder/mdk4-cc.sh" "${'$'}WORK_DIR/rftoolbuilder/mdk4-cc.sh"
         sed -i 's/\r${'$'}//' "${'$'}WORK_DIR/rftoolbuilder/"*.sh
         tar --ignore-case --exclude='src/wlantool/readme*' -C "${'$'}PROJECT/rftoolbuilder" -cf - src | tar -C "${'$'}WORK_DIR/rftoolbuilder" -xf -
         ln -s "${'$'}CACHE_DIR" "${'$'}WORK_DIR/rftoolbuilder/distfiles"
@@ -178,7 +180,7 @@ fun Project.configureContainerBuild() {
         group = "build"
         description = "Builds rootfs.tar.xz with WSL on Windows or directly on Ubuntu."
         inputs.files(rootProject.fileTree("rftoolbuilder") {
-            include("build.sh", "downloads.sh", "build-pixiewps.sh", "pixiewps-cc.sh", "src/**")
+            include("build.sh", "downloads.sh", "build-pixiewps.sh", "pixiewps-cc.sh", "build-mdk4.sh", "mdk4-cc.sh", "src/**")
             exclude("**/README", "**/README.*", "**/Readme", "**/Readme.*", "**/readme", "**/readme.*")
         })
         inputs.property("appVersionCode", appVersionCode)

@@ -116,6 +116,12 @@ sealed class TaskProgress : Parcelable {
         val config: SecurityAuditConfig,
     ) : TaskProgress()
 
+    data class WpsSecurityAudit(
+        val revision: Long,
+        val networkCount: Int,
+        val config: WpsSecurityAuditConfig,
+    ) : TaskProgress()
+
     data class ConnectWifi(
         val stage: ConnectWifiStage,
     ) : TaskProgress()
@@ -251,6 +257,8 @@ data class WpsPinTaskInput(val ssid: String, val pin: String, val localMac: Stri
 sealed class TaskRequestPayload : Parcelable {
     data class SecurityAudit(val input: SecurityAuditTaskInput) : TaskRequestPayload()
 
+    data class WpsSecurityAudit(val input: WpsSecurityAuditTaskInput) : TaskRequestPayload()
+
     data class ConnectWifi(
         val request: ConnectWifiTaskRequest,
     ) : TaskRequestPayload()
@@ -269,6 +277,9 @@ sealed class TaskUpdatePayload : Parcelable {
     data class SecurityAuditUpsert(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
     data class SecurityAuditRemove(val ssid: String) : TaskUpdatePayload()
     data class SecurityAuditConfigure(val config: SecurityAuditConfig) : TaskUpdatePayload()
+
+    /** WPS 安全测试运行中只允许更新配置与按 SSID 移除网络。 */
+    data class WpsSecurityAuditConfigure(val config: WpsSecurityAuditConfig) : TaskUpdatePayload()
 
     data class WpsPbcContinuousCapture(
         val enabled: Boolean,
@@ -315,6 +326,10 @@ data class TaskStartRequest(
             input: WpsPbcTaskInput = WpsPbcTaskInput(),
         ) = TaskStartRequest(
             payload = TaskRequestPayload.WpsPbc(input),
+        )
+
+        fun wpsSecurityAudit(input: WpsSecurityAuditTaskInput) = TaskStartRequest(
+            payload = TaskRequestPayload.WpsSecurityAudit(input),
         )
     }
 }

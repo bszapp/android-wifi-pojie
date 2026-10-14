@@ -255,7 +255,7 @@ internal class SecurityAuditTask(
                 updatedAt = System.currentTimeMillis(), message = "排队中")
         } else {
             val now = System.currentTimeMillis()
-            entries += Entry(SecurityAuditNetworkRecord(UUID.randomUUID().toString(), input, config,
+            entries += Entry(AuditRecord.Dictionary(UUID.randomUUID().toString(), input, config,
                 now, now, SecurityAuditNetworkState.QUEUED, passwords.size,
                 completed = input.startIndex.coerceIn(0, passwords.size)), passwords)
         }
@@ -304,7 +304,7 @@ internal class SecurityAuditTask(
     private companion object {
         val SECURE_RANDOM = java.security.SecureRandom()
     }
-    private data class Entry(var record: SecurityAuditNetworkRecord, var passwords: List<String>,
+    private data class Entry(var record: AuditRecord.Dictionary, var passwords: List<String>,
         var lastAttemptAt: Long = 0, var readyAt: Long = 0, val costs: MutableList<Long> = mutableListOf(),
         /** 随机 MAC 策略下该网络当前保持的地址；null 表示使用设备原 MAC。 */
         var mac: String? = null,

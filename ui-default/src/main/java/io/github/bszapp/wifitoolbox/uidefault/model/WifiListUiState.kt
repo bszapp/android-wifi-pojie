@@ -1,6 +1,7 @@
 package io.github.bszapp.wifitoolbox.uidefault.model
 
 import android.net.Uri
+import android.content.res.AssetManager
 import io.github.bszapp.wifitoolbox.contract.IAppController
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiConfigPatch
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
@@ -9,6 +10,8 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeTestOutcome
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.contract.wifilist.SystemScanData
+import io.github.bszapp.wifitoolbox.contract.wifilist.scanResults
+import io.github.bszapp.wifitoolbox.contract.wifilist.connection
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -17,6 +20,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -24,10 +31,13 @@ import kotlinx.coroutines.withContext
 class WifiListUiState(
     private val controller: IAppController,
     private val scope: CoroutineScope,
+    assets: AssetManager,
 ) {
 
     /** Service 独立维护并传输的 Wi-Fi 运行状态。 */
     val state = controller.wifiList.state
+    private val mutableDeviceAssessments = MutableStateFlow<Map<String, WifiDeviceAssessment>>(emptyMap())
+    val deviceAssessments = mutableDeviceAssessments.asStateFlow()
 
     /** 与 WifiState 同级、独立传输的已保存 Wi-Fi 列表。 */
     val savedWifiList = controller.wifiList.savedWifiList
@@ -54,6 +64,29 @@ class WifiListUiState(
     private var previousWifiState: WifiState? = null
 
     init {
+        scope.launch {
+            val catalog = withContext(Dispatchers.IO) { WifiDeviceRiskCatalog(assets) }
+            combine(
+                state.map { it.scanResults to it.connection?.bssid }.distinctUntilChanged(),
+                modeState.map { mode ->
+                    mode?.monitorStatistics?.accessPoints.orEmpty().map { it.bssid }
+                }.distinctUntilChanged(),
+            ) { (results, connectedBssid), capturedBssids ->
+                Triple(results, connectedBssid, capturedBssids)
+            }.collectLatest { (results, connectedBssid, capturedBssids) ->
+                mutableDeviceAssessments.value = withContext(Dispatchers.Default) {
+                    buildMap {
+                        for (bssid in capturedBssids + listOfNotNull(connectedBssid)) {
+                            if (bssid.isNotBlank()) put(bssid.lowercase(), catalog.assess(bssid))
+                        }
+                        for (result in results) {
+                            val bssid = result.BSSID?.takeIf(String::isNotBlank) ?: continue
+                            put(bssid.lowercase(), catalog.assess(result))
+                        }
+                    }
+                }
+            }
+        }
         scope.launch {
             var previousMode = modeState.value?.mode
             modeState.collect { current ->

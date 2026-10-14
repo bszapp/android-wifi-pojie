@@ -122,6 +122,7 @@ internal class ServiceNotificationManager(
         is TaskRequestPayload.WpsPbc -> "WPS-PBC"
         is TaskRequestPayload.WpsPin -> "WPS PIN"
         is TaskRequestPayload.SecurityAudit -> "网络安全测试"
+        is TaskRequestPayload.WpsSecurityAudit -> "WPS 安全测试"
         is TaskRequestPayload.ConnectWifi -> {
             val input = payload.request.input
             when {

@@ -46,11 +46,24 @@ class TaskController(
     override val auditHistory = auditStore.state
     private val _auditConfig = MutableStateFlow(SecurityAuditConfig())
     override val auditConfig = _auditConfig.asStateFlow()
+    private val _wpsAuditConfig = MutableStateFlow(WpsSecurityAuditConfig())
+    override val wpsAuditConfig = _wpsAuditConfig.asStateFlow()
     override fun configureSecurityAudit(config: SecurityAuditConfig) {
         _auditConfig.value = config
         val running = state.value.currentTaskId?.let(state.value.tasks::get)
         if (running?.snapshot?.request?.payload is TaskRequestPayload.SecurityAudit) {
             updateTask(running.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.SecurityAuditConfigure(config)))
+        }
+    }
+
+    override fun configureWpsSecurityAudit(config: WpsSecurityAuditConfig) {
+        _wpsAuditConfig.value = config
+        val running = state.value.currentTaskId?.let(state.value.tasks::get)
+        if (running?.snapshot?.request?.payload is TaskRequestPayload.WpsSecurityAudit) {
+            updateTask(
+                running.snapshot.taskId,
+                TaskUpdateRequest(TaskUpdatePayload.WpsSecurityAuditConfigure(config)),
+            )
         }
     }
     override fun auditDictionary(recordId: String) = auditStore.dictionary(recordId)
@@ -208,6 +221,37 @@ class TaskController(
         }
     }
 
+    override suspend fun runWpsSecurityAudit(input: WpsSecurityAuditTaskInput): Long =
+        withContext(Dispatchers.IO) {
+            val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
+            try {
+                check(isCurrent(binding)) { "服务未连接" }
+                require(input.targets.isNotEmpty()) { "至少选择一个网络" }
+                val request = TaskStartRequest.wpsSecurityAudit(input)
+                require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "WPS 安全测试请求元数据过大，请减少网络选择" }
+                val id = binding.service.startTask(request)
+                val snapshot = binding.service.getTaskSnapshot(id)
+                val currentTaskId = synchronized(binding.pendingLock) {
+                    binding.service.getCurrentTaskId().takeIf { it > 0L }.also { binding.currentTaskId = it }
+                }
+                updateState(binding) { current ->
+                    current.copy(
+                        currentTaskId = currentTaskId,
+                        tasks = current.tasks + (
+                            id to (current.tasks[id]?.copy(snapshot = snapshot)
+                                ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))
+                            ),
+                    )
+                }
+                synchronized(binding.pendingLock) { binding.pendingTaskIds += id; binding.pendingLogIds += id }
+                binding.signal.trySend(Unit)
+                id
+            } catch (error: Throwable) {
+                if (isCurrent(binding)) reportError("App.TaskController", "运行 WPS 安全测试", error, null)
+                throw error
+            }
+        }
+
     override fun deleteAuditHistory(recordId: String) {
         scope.launch(Dispatchers.IO) {
             runCatching { auditStore.delete(recordId) }.onFailure {
@@ -337,22 +381,33 @@ class TaskController(
     }
 
     private fun syncAuditNetworks(binding: Binding, taskId: Long) {
-        val progress = _state.value.tasks[taskId]?.snapshot?.progress as? TaskProgress.SecurityAudit ?: return
-        if (binding.auditRevisions[taskId] == progress.revision) return
+        val progress = _state.value.tasks[taskId]?.snapshot?.progress
+        val revisionOf: (TaskProgress) -> Long? = {
+            when (it) {
+                is TaskProgress.SecurityAudit -> it.revision
+                is TaskProgress.WpsSecurityAudit -> it.revision
+                else -> null
+            }
+        }
+        val revision = progress?.let(revisionOf) ?: return
+        if (binding.auditRevisions[taskId] == revision) return
         repeat(3) {
-            val records = ArrayList<SecurityAuditNetworkRecord>()
-            var revision: Long? = null
+            val records = ArrayList<AuditRecord>()
+            var pageRevision: Long? = null
             var changed = false
             var total: Int
             do {
                 if (!isCurrent(binding)) return
-                val page = PagedDataTransport.decode(binding.service.getSecurityAuditNetworks(taskId, records.size), SecurityAuditNetworkPage::class.java)
-                if (revision != null && revision != page.revision) { changed = true; break }
-                revision = page.revision
+                val page = PagedDataTransport.decode(
+                    binding.service.getSecurityAuditNetworks(taskId, records.size),
+                    AuditRecordPage::class.java,
+                )
+                if (pageRevision != null && pageRevision != page.revision) { changed = true; break }
+                pageRevision = page.revision
                 total = page.totalCount
                 require(page.fromIndex == records.size) { "安全测试分页不连续" }
-                require(page.networks.isNotEmpty() || total == records.size) { "安全测试分页为空" }
-                records.addAll(page.networks)
+                require(page.records.isNotEmpty() || total == records.size) { "安全测试分页为空" }
+                records.addAll(page.records)
             } while (records.size < total)
             if (!changed) {
                 if (!isCurrent(binding)) return
@@ -361,7 +416,7 @@ class TaskController(
                     state.copy(tasks = state.tasks + (taskId to old.copy(auditNetworks = records.toList())))
                 }
                 auditStore.merge(records)
-                binding.auditRevisions[taskId] = revision ?: 0
+                binding.auditRevisions[taskId] = pageRevision ?: 0
                 return
             }
         }

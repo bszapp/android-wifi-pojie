@@ -179,6 +179,8 @@ fun DefaultUI(
 
                     io.github.bszapp.wifitoolbox.uidefault.securityaudit.SecurityAuditSheets(viewModel.securityAudit)
 
+                    io.github.bszapp.wifitoolbox.uidefault.securityaudit.WpsAuditSheets(viewModel.securityAudit)
+
                     confirmationDialogs.forEach { dialog ->
                         key(dialog.id) {
                             CommonConfirmationDialog(

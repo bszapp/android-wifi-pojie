@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.bszapp.wifitoolbox.contract.task.AuditRecord
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
@@ -68,6 +70,7 @@ import io.github.bszapp.wifitoolbox.uidefault.component.TagStyle
 import io.github.bszapp.wifitoolbox.uidefault.component.WifiIcon
 import io.github.bszapp.wifitoolbox.uidefault.model.DefaultViewModel
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
+import io.github.bszapp.wifitoolbox.uidefault.model.WifiDeviceAssessment
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetContent
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiSheetSubmission
 import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.ConnectWifiTaskSheet
@@ -93,6 +96,7 @@ fun WifiList(
     onInlineConnectTaskChanged: (Long?) -> Unit = {},
 ) {
     val wifiState by vm.wifiList.state.collectAsStateWithLifecycle()
+    val deviceAssessments by vm.wifiList.deviceAssessments.collectAsStateWithLifecycle()
     val savedWifiList by vm.wifiList.savedWifiList.collectAsStateWithLifecycle()
     val modeState by vm.wifiList.modeState.collectAsStateWithLifecycle()
     val handshakeTest by vm.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
@@ -101,7 +105,12 @@ fun WifiList(
     val submode by vm.securityAudit.submode.collectAsStateWithLifecycle()
     val auditBatch by vm.securityAudit.batch.collectAsStateWithLifecycle()
     val auditHistory by vm.securityAudit.history.collectAsStateWithLifecycle()
-    val auditMode = modeState?.mode == WifiMode.NORMAL && submode == io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode.SECURITY_AUDIT
+    val wpsAuditMode = modeState?.mode == WifiMode.NORMAL &&
+        submode == io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode.WPS_SECURITY_AUDIT
+    val auditMode = modeState?.mode == WifiMode.NORMAL &&
+        submode != io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode.SCAN
+    val auditKind = if (wpsAuditMode) io.github.bszapp.wifitoolbox.contract.task.AuditRecordKind.WPS
+        else io.github.bszapp.wifitoolbox.contract.task.AuditRecordKind.DICTIONARY
     val displayedTask by vm.displayedTask.collectAsStateWithLifecycle()
     val connectWifiSheetCloseRequest by
         vm.connectWifiSheetCloseRequest.collectAsStateWithLifecycle()
@@ -150,7 +159,7 @@ fun WifiList(
     val capturedMetadata = remember(capturedAccessPoints) {
         capturedAccessPoints.map { it.copy(devices = emptyList()) }
     }
-    val runningAuditNetworks = auditBatch?.auditNetworks.orEmpty().filter { it.active }
+    val runningAuditNetworks = auditBatch?.auditNetworks.orEmpty().filter { it.active && it.kind == auditKind }
     val groups = remember(scanResults, savedNetworks, connection, capturedMetadata, modeState?.mode, auditMode, runningAuditNetworks) {
         val scanned = MergedWifiGroup.buildFrom(
             results = scanResults,
@@ -159,12 +168,12 @@ fun WifiList(
             capturedAccessPoints = if (modeState?.mode == WifiMode.MONITOR) capturedMetadata else emptyList(),
         )
         if (!auditMode) scanned else {
-            val missing = runningAuditNetworks.filter { entry -> scanned.none { it.ssid == entry.input.ssid } }.map { entry ->
-                MergedWifiGroup(entry.input.ssid, emptyList(), savedNetworks.filter { it.SSID?.removeSurrounding("\"") == entry.input.ssid }, null, null)
+            val missing = runningAuditNetworks.filter { entry -> scanned.none { it.ssid == entry.ssid } }.map { entry ->
+                MergedWifiGroup(entry.ssid, emptyList(), savedNetworks.filter { it.SSID?.removeSurrounding("\"") == entry.ssid }, null, null)
             }
             val all = scanned + missing
-            runningAuditNetworks.mapNotNull { entry -> all.firstOrNull { it.ssid == entry.input.ssid } } +
-                scanned.filter { group -> runningAuditNetworks.none { it.input.ssid == group.ssid } }
+            runningAuditNetworks.mapNotNull { entry -> all.firstOrNull { it.ssid == entry.ssid } } +
+                scanned.filter { group -> runningAuditNetworks.none { it.ssid == group.ssid } }
         }
     }
     LaunchedEffect(auditMode, runningAuditNetworks.size) {
@@ -236,6 +245,7 @@ fun WifiList(
                                 is TaskProgress.UsbMonitor -> "电脑控制"
                                 is TaskProgress.WpsPin -> "WPS PIN · 已获取 ${progress.networkCount} 个网络"
                                 is TaskProgress.SecurityAudit -> "网络安全测试 · ${progress.networkCount} 个网络"
+                                is TaskProgress.WpsSecurityAudit -> "WPS 安全测试 · ${progress.networkCount} 个网络"
                                 null -> "加载中"
                             },
                             onClick = {
@@ -260,11 +270,12 @@ fun WifiList(
                 }
                 groups.forEach { group ->
                     item(key = group.ssid) {
-                        val auditRecord = auditBatch?.auditNetworks?.lastOrNull { it.input.ssid == group.ssid }
+                        val auditRecord = auditBatch?.auditNetworks?.lastOrNull { it.ssid == group.ssid && it.kind == auditKind }
                         Column(Modifier.animateItem()) {
                         WifiGroupCard(
                                 vm = vm,
                                 group = group,
+                                assessments = group.networks.mapNotNull { deviceAssessments[it.BSSID?.lowercase()] },
                                 handshakeDeviceCount = handshakeDevicesBySsid[group.ssid] ?: 0,
                                 discoveredHiddenNameCount =
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
@@ -278,6 +289,9 @@ fun WifiList(
                                 onConnect = {
                                     if (auditMode) {
                                         if (auditRecord?.active == true) vm.securityAudit.stopNetwork(group.ssid)
+                                        else if (wpsAuditMode) vm.securityAudit.openWpsNetwork(
+                                            group.ssid, group.savedWifiList.isNotEmpty(),
+                                            group.networks.any { it.supportsWps() })
                                         else vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
                                         return@WifiGroupCard
                                     }
@@ -297,13 +311,21 @@ fun WifiList(
                                 },
                         )
                         if (auditMode) {
-                            val previous = auditHistory.firstOrNull { it.input.ssid == group.ssid }
+                            val previous = auditHistory.firstOrNull { it.ssid == group.ssid && it.kind == auditKind }
                             if (previous != null) Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                                TagItem("有历史", style = TagStyle.Secondary)
+                                TagItem(if (wpsAuditMode) "WPS 有历史" else "有历史", style = TagStyle.Secondary)
                                 if (auditRecord?.active != true && !previous.active) Text(previous.message, style = MiuixTheme.textStyles.footnote1)
                             }
-                            io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(auditRecord?.takeIf { it.active }) {
-                                vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
+                            if (wpsAuditMode) {
+                                io.github.bszapp.wifitoolbox.uidefault.securityaudit.WpsAuditNetworkProgress(
+                                    (auditRecord as? AuditRecord.Wps)?.takeIf { it.active }) {
+                                    vm.securityAudit.stopNetwork(group.ssid)
+                                }
+                            } else {
+                                io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(
+                                    (auditRecord as? AuditRecord.Dictionary)?.takeIf { it.active }) {
+                                    vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
+                                }
                             }
                         }
                         }
@@ -321,6 +343,7 @@ fun WifiList(
         WifiDetailSheet(
             show = showWifiDetailSheet,
             group = group,
+            deviceAssessments = deviceAssessments,
             onDismiss = { showWifiDetailSheet = false },
             onDismissFinished = {
                 showWifiDetailSheet = false
@@ -621,6 +644,7 @@ private fun WifiErrorContent(message: String) {
 private fun WifiGroupCard(
     vm: DefaultViewModel,
     group: MergedWifiGroup,
+    assessments: List<WifiDeviceAssessment>,
     handshakeDeviceCount: Int,
     discoveredHiddenNameCount: Int,
     auditMode: Boolean = false,
@@ -710,6 +734,9 @@ private fun WifiGroupCard(
                         if (group.networks.any { it.supportsWps() }) {
                             add(Triple("WPS", TagStyle.Secondary, null))
                         }
+                        if (assessments.any { it.potentiallyVulnerable }) {
+                            add(Triple("WPS 潜在风险", TagStyle.Tertiary, Icons.Rounded.WarningAmber))
+                        }
                         if (group.accessPointCount > 1) {
                             add(Triple(group.accessPointCount.toString(), TagStyle.Tertiary, Icons.Default.Layers))
                         }
@@ -748,6 +775,10 @@ private fun WifiGroupCard(
                     lineHeight = 16.sp,
                     color = contentColor.copy(alpha = 0.7f),
                 )
+                assessments.mapNotNull { it.summary }.distinct().joinToString(" / ").takeIf { it.isNotEmpty() }?.let { summary ->
+                    Text(summary, style = MiuixTheme.textStyles.footnote1, color = contentColor.copy(alpha = 0.7f),
+                        softWrap = true)
+                }
             }
 
             Spacer(Modifier.width(12.dp))

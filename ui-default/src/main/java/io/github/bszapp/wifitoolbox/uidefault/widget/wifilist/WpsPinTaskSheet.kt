@@ -125,7 +125,7 @@ private fun WpsPinNetworkPage(task: TrackedTaskState, onConnect: (WpsCapturedNet
     }
 }
 
-private fun WpsHandshakeProgress.displayStage(): String = when (stage) {
+internal fun WpsHandshakeProgress.displayStage(): String = when (stage) {
     WpsHandshakeStage.PREPARING -> "准备 WPS 会话"
     WpsHandshakeStage.SCANNING -> "寻找目标接入点"
     WpsHandshakeStage.AUTHENTICATING -> "进行无线认证"

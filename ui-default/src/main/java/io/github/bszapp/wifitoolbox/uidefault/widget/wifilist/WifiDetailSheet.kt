@@ -74,6 +74,7 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeCaptureQua
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
+import io.github.bszapp.wifitoolbox.uidefault.model.WifiDeviceAssessment
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -163,6 +164,7 @@ fun WifiDetailSheet(
     onDismiss: () -> Unit,
     onDismissFinished: () -> Unit,
     capturedAccessPoints: List<MonitorAccessPoint> = emptyList(),
+    deviceAssessments: Map<String, WifiDeviceAssessment> = emptyMap(),
     deviceDetailContent: @Composable (MonitorAccessPoint, MonitorDevice) -> Unit = { _, _ -> },
 ) {
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
@@ -264,6 +266,7 @@ fun WifiDetailSheet(
                     WifiDetailStage.LIST -> WifiNetworkDetailContent(
                         group = group,
                         accessPoints = mergedAccessPoints,
+                        deviceAssessments = deviceAssessments,
                         pagerState = networkPagerState,
                         gridState = accessPointGridState,
                         onAccessPointClick = { entry ->
@@ -275,6 +278,7 @@ fun WifiDetailSheet(
 
                     WifiDetailStage.ACCESS_POINT -> AccessPointCaptureContent(
                         entry = selectedAccessPoint,
+                        assessment = deviceAssessments[selectedAccessPoint?.stableKey],
                         deviceListState = deviceListState,
                         onDeviceClick = { device ->
                             selectedDeviceMac = device.mac
@@ -301,6 +305,7 @@ fun WifiDetailSheet(
 private fun WifiNetworkDetailContent(
     group: MergedWifiGroup,
     accessPoints: List<MergedAccessPoint>,
+    deviceAssessments: Map<String, WifiDeviceAssessment>,
     pagerState: androidx.compose.foundation.pager.PagerState,
     gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     onAccessPointClick: (MergedAccessPoint) -> Unit,
@@ -346,6 +351,7 @@ private fun WifiNetworkDetailContent(
                     0 -> WifiAccessPointGridPage(
                         group = group,
                         accessPoints = accessPoints,
+                        deviceAssessments = deviceAssessments,
                         gridState = gridState,
                         onAccessPointClick = onAccessPointClick,
                     )
@@ -356,6 +362,7 @@ private fun WifiNetworkDetailContent(
             WifiAccessPointGridPage(
                 group = group,
                 accessPoints = accessPoints,
+                deviceAssessments = deviceAssessments,
                 gridState = gridState,
                 onAccessPointClick = onAccessPointClick,
             )
@@ -367,6 +374,7 @@ private fun WifiNetworkDetailContent(
 private fun WifiAccessPointGridPage(
     group: MergedWifiGroup,
     accessPoints: List<MergedAccessPoint>,
+    deviceAssessments: Map<String, WifiDeviceAssessment>,
     gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     onAccessPointClick: (MergedAccessPoint) -> Unit,
 ) {
@@ -403,6 +411,7 @@ private fun WifiAccessPointGridPage(
             when {
                 entry.scanned != null -> ApCard(
                     ap = entry.scanned,
+                    assessment = deviceAssessments[entry.stableKey],
                     isCurrent = group.isCurrentAccessPoint(entry.scanned),
                     captured = entry.captured,
                     onClick = { onAccessPointClick(entry) },
@@ -457,6 +466,7 @@ private fun WifiAccessPointGridPage(
 @Composable
 private fun AccessPointCaptureContent(
     entry: MergedAccessPoint?,
+    assessment: WifiDeviceAssessment?,
     deviceListState: androidx.compose.foundation.lazy.LazyListState,
     onDeviceClick: (MonitorDevice) -> Unit,
 ) {
@@ -475,7 +485,7 @@ private fun AccessPointCaptureContent(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item(key = "access-point-overview") {
-                AccessPointOverviewCard(entry = entry, captured = captured)
+                AccessPointOverviewCard(entry = entry, captured = captured, assessment = assessment)
             }
 
             if (captured == null) {
@@ -520,6 +530,7 @@ private fun AccessPointCaptureContent(
 private fun AccessPointOverviewCard(
     entry: MergedAccessPoint?,
     captured: MonitorAccessPoint?,
+    assessment: WifiDeviceAssessment?,
 ) {
     val scanned = entry?.scanned
     val virtual = entry?.virtual
@@ -530,6 +541,13 @@ private fun AccessPointOverviewCard(
         scanned?.SSID?.takeIf { it.isNotBlank() }?.let { add("网络名称" to it) }
         captured?.ssid?.takeIf { it.isNotBlank() }?.let { add("抓包网络名称" to it) }
         bssid?.takeIf { it.isNotBlank() }?.let { add("接入点 MAC" to it) }
+        assessment?.manufacturer?.let { add("厂商" to it) }
+        assessment?.wps?.deviceName?.takeIf { it.isNotBlank() }?.let { add("设备名称" to it) }
+        assessment?.wps?.model?.takeIf { it.isNotBlank() }?.let { add("型号" to it) }
+        assessment?.wps?.modelNumber?.takeIf { it.isNotBlank() }?.let { add("型号编号" to it) }
+        if (assessment?.potentiallyVulnerable == true) {
+            add("风险提示" to "型号已命中 WPS 潜在风险名单。此提示基于广播型号匹配，未验证当前设备或固件存在漏洞。")
+        }
         scanned?.frequency?.takeIf { it > 0 }?.let { frequency ->
             add("频率" to "$frequency MHz · ${frequencyBand(frequency)} · 信道 ${frequencyToChannel(frequency) ?: "未知"}")
         }
@@ -785,6 +803,7 @@ private fun SectionHeader(
 @Composable
 private fun ApCard(
     ap: ScanResult,
+    assessment: WifiDeviceAssessment?,
     isCurrent: Boolean,
     captured: MonitorAccessPoint?,
     onClick: () -> Unit,
@@ -939,6 +958,10 @@ private fun ApCard(
             }
 
             // 频率
+            assessment?.summary?.let {
+                Text(it, style = MiuixTheme.textStyles.footnote2, color = contentColor.copy(alpha = 0.75f), softWrap = true)
+            }
+            if (assessment?.potentiallyVulnerable == true) ApChip(text = "WPS 潜在风险")
             ApChip(text = "${ap.frequency} MHz")
             if (handshakeDeviceCount > 0) {
                 ApChip(text = "成功握手${handshakeDeviceCount}台")

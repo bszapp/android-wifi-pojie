@@ -37,8 +37,16 @@ internal class TaskContext(
         TaskContext(taskId, manager, onProgress, check, "[$ssid] ", configuration)
 
     fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.SecurityAuditConfig,
-        networks: List<io.github.bszapp.wifitoolbox.contract.task.SecurityAuditNetworkRecord>) =
-        manager.updateAuditNetworks(taskId, config, networks)
+        networks: List<io.github.bszapp.wifitoolbox.contract.task.AuditRecord>) =
+        manager.updateAuditNetworks(taskId, networks) { revision, active ->
+            TaskProgress.SecurityAudit(revision, active, config)
+        }
+
+    fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.WpsSecurityAuditConfig,
+        networks: List<io.github.bszapp.wifitoolbox.contract.task.AuditRecord>) =
+        manager.updateAuditNetworks(taskId, networks) { revision, active ->
+            TaskProgress.WpsSecurityAudit(revision, active, config)
+        }
 
     fun ensureRunning() {
         if (manager.isStopRequested(taskId) || Thread.currentThread().isInterrupted) {
