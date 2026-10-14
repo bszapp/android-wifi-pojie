@@ -1,5 +1,6 @@
 package io.github.bszapp.wifitoolbox.service.task
 
+import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructPollfd
@@ -87,6 +88,8 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
         val handshake: WpsHandshake?,
         /** 脚本回传的状态（GOT_PSK / WSC_NACK / WPS_FAIL / WPS_SUCCESS 等）。 */
         val status: String,
+        /** 本次尝试被单次用时上限掐掉；握手走到哪都不影响，按一次异常处理。 */
+        val timedOut: Boolean = false,
     )
 
     /**
@@ -98,15 +101,28 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
      */
     data class Failure(val code: String, val detail: String, val maxMMessage: Int)
 
-    fun run(request: JSONObject, changed: () -> Boolean = { false }): Result {
+    /**
+     * 执行一轮 WPS 尝试。
+     *
+     * [timeoutMillis] 大于 0 时是单次尝试的用时上限：到点后向 FIFO 发既有的 `cancel` 命令，
+     * wps.py 在当前进度（扫描、发 M2、等回包都一样）抛出中断，**只掐这一次尝试**，
+     * 持久会话继续服务下一条命令；结果里 [Result.timedOut] 为 true。
+     */
+    fun run(request: JSONObject, timeoutMillis: Long = 0, changed: () -> Boolean = { false }): Result {
         val requestId = UUID.randomUUID().toString()
         send(request.put("type", "run").put("requestId", requestId))
         var cancelledForUpdate = false
+        var timedOut = false
+        val startedAt = SystemClock.elapsedRealtime()
         while (true) {
             context.ensureRunning()
             if (!cancelledForUpdate && changed()) {
                 send(JSONObject().put("type", "cancel").put("requestId", requestId))
                 cancelledForUpdate = true
+            }
+            if (!timedOut && timeoutMillis > 0 && SystemClock.elapsedRealtime() - startedAt >= timeoutMillis) {
+                send(JSONObject().put("type", "cancel").put("requestId", requestId))
+                timedOut = true
             }
             when (val event = nextEvent()) {
                 is Event.Pipe -> when (event.value.optString("type")) {
@@ -125,9 +141,11 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                             WpsCapturedNetwork(it.getString("ssid"), it.getString("mac"), it.getString("password"))
                         }
                         val failure = readFailure(event.value.optJSONObject("failure"))
-                        context.log("WPS 本轮结束：${event.value.optString("message")}" + (failure?.let {
-                            "，原因=${it.code}${if (it.detail.isEmpty()) "" else " · ${it.detail}"}"
-                        } ?: ""))
+                        context.log("WPS 本轮结束：${event.value.optString("message")}" + when {
+                            timedOut -> "，原因=单次尝试超时（${timeoutMillis}ms）被中断"
+                            failure == null -> ""
+                            else -> "，原因=${failure.code}${if (failure.detail.isEmpty()) "" else " · ${failure.detail}"}"
+                        })
                         return Result(
                             network = network,
                             success = event.value.optBoolean("success"),
@@ -137,6 +155,7 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                             failure = failure,
                             handshake = readHandshake(event.value.optJSONObject("handshake")),
                             status = event.value.optString("message"),
+                            timedOut = timedOut,
                         )
                     }
                     "error" -> error(event.value.optString("message"))

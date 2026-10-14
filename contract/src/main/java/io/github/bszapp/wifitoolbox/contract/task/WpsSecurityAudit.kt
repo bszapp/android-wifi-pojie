@@ -22,13 +22,22 @@ import kotlinx.parcelize.Parcelize
  * 3. [WpsSecurityAuditPhase.SECOND_HALF]：已知前四位后逐个尝试后三位（同样补校验位），
  *    取到密码即完成。
  *
- * 任意阶段取得密码即结束该网络。未取得密码时只记录本次实际事件，不根据消息编号推断错误。
+ * 任意阶段取得密码即结束该网络。未取得密码时只记录本次实际事件。
  *
- * 未推进到 M5 的结果一律算单次异常，包括 WSC_NACK、WPS-FAIL、超时与未进入握手，
- * 全部按 [WpsSecurityAuditConfig.retryCount] / [WpsSecurityAuditConfig.cooldownBaseMillis]
- * 重试当前 PIN 并指数冷却，重试用尽后才推进游标。脚本会把 NACK 的具体原因
- * （前/后半段不匹配、CONFIG_ERROR）随结果回传，仅用于日志与展示，不参与游标推进判断。
- * MAC 策略复用 [SecurityAuditMacMode]。
+ * 单次 PIN 尝试的结果按"是否走完 M3/M4"分两类，两者互斥：NACK 一出现会话即终止，
+ * 所以有 NACK 就必然没到 M3/M4，走完 M3/M4 就必然没有 NACK。
+ *
+ * - **错误**（结果已知，直接推进游标，不重试不冷却）：走完 M3/M4 却没有 M5，
+ *   说明 AP 校验了我们 M4 里的前半段并判了不通过——就是这个 PIN 不对。
+ * - **异常**（结果未知，按 [WpsSecurityAuditConfig.retryCount] / [WpsSecurityAuditConfig.cooldownBaseMillis]
+ *   重试同一个 PIN 并指数冷却，用尽后假装已试完再推进）：还没走到 M3 就结束的握手，
+ *   典型是收到 M2 后被 NACK（路由器防护已开启）、未关联、超时、supplicant 拒绝命令、脚本异常。
+ *
+ * [WpsSecurityAuditConfig.retryCount] 为 6 表示无限重试：防护期内握手一直进不去 M3，
+ * 就一直重试同一个 PIN，直到防护解除、握手重新走完 M3/M4，那一次的"错误"才把游标推到下一个。
+ *
+ * 脚本会把 NACK 的具体原因（前/后半段不匹配、CONFIG_ERROR）随结果回传，仅用于日志与展示，
+ * 不参与游标推进判断。MAC 策略复用 [SecurityAuditMacMode]。
  *
  * 字典内容不涉及本任务；凭据与安全测试历史使用同一数据源，按
  * [AuditRecordKind] 区分。
@@ -62,6 +71,8 @@ data class WpsSecurityAuditConfig(
     /** 超时/异常的重试次数；6 表示无限，与字典安全测试一致。 */
     val retryCount: Int = 6,
     val cooldownBaseMillis: Long = 1000,
+    /** 单次尝试最大用时，到点中断本次尝试（不论走到哪一步）并按一次异常处理；范围同字典安全测试。 */
+    val attemptTimeoutMillis: Long = 5000,
     /** 单网络握手次数上限，0 表示不限。达到上限只记录测试已结束，不推断防护结论。 */
     val maxAttemptsPerNetwork: Int = 0,
 ) : Parcelable

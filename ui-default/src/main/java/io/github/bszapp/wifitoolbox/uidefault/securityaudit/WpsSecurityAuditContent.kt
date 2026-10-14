@@ -181,13 +181,22 @@ internal fun WpsAuditConfiguration(config: WpsSecurityAuditConfig, onChange: (Wp
             }
         }
         Text("异常重试", style = MiuixTheme.textStyles.subtitle, color = MiuixTheme.colorScheme.primary)
-        Text("只要未推进到 M5 就算一次异常：WPS NACK、WPS-FAIL、超时、未进入握手都会重试当前 PIN 并按冷却时间翻倍。" +
-            "NACK 的具体原因（前/后半段不匹配或路由器配置错误）会写进任务日志。", style = MiuixTheme.textStyles.footnote1)
+        Text("走完 M3/M4 却没收到 M5，算一次 PIN 错误，直接试下一个。" +
+            "没走到 M3 就结束的（收到 M2 后被 NACK、未关联、超时、脚本异常）算异常：重试同一个 PIN、" +
+            "冷却时间翻倍，用尽后假装已试完继续下一个；6 表示无限重试，直到握手能重新走完 M3/M4。" +
+            "失败原因会写进任务日志。", style = MiuixTheme.textStyles.footnote1)
         AuditSlider("重试次数", config.retryCount.toLong(), 0, 6, 1, "次",
             valueText = if (config.retryCount == 6) "无限" else null) { onChange(config.copy(retryCount = it.toInt())) }
         AnimatedVisibility(config.retryCount != 0) {
             AuditSlider("冷却翻倍基数", config.cooldownBaseMillis, 0, 8000, 500, "ms",
                 valueText = if (config.cooldownBaseMillis == 0L) "不冷却" else null) { onChange(config.copy(cooldownBaseMillis = it)) }
+        }
+        Text("单次尝试", style = MiuixTheme.textStyles.subtitle, color = MiuixTheme.colorScheme.primary)
+        Text("超过用时就中断本次尝试，无论当时正处在扫描还是发 M2；只掐这一次，wps.py 会话继续服务下一个。" +
+            "中断计为一次异常，按上面的重试次数与冷却处理。范围与密码字典破解的最大尝试时间一致（1000~10000ms）。",
+            style = MiuixTheme.textStyles.footnote1)
+        AuditSlider("单次尝试最大用时", config.attemptTimeoutMillis, 1000L, 10000L, 500L, "ms") {
+            onChange(config.copy(attemptTimeoutMillis = it))
         }
     }
 }

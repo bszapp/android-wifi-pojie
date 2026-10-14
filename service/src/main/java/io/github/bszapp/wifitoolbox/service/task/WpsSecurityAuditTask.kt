@@ -19,10 +19,17 @@ import java.util.concurrent.TimeUnit
  * 串行执行，进度在每次尝试后写回历史。PIN 生成方式见 [WpsSecurityAuditTaskInput]。
  *
  * 结果分类：任何阶段取得网络密码即视为路由器失守并结束该网络，不要求完整协议结束。
- * 收到 M5 的事实用于确认前半段并转入后三位枚举；除此之外的结果一律算单次异常，
- * 包括 WSC_NACK、WPS-FAIL、超时与未进入握手，全部按配置重试当前 PIN 并指数冷却，
- * 重试用尽后才推进游标。脚本会把 NACK 的具体原因（前/后半段不匹配、CONFIG_ERROR）
- * 一并回传，仅用于日志与展示，不参与游标推进判断。
+ *
+ * 单次 PIN 尝试的结果按"是否走完 M3/M4"分两类，两者互斥：NACK 一出现会话即终止，
+ * 所以有 NACK 就必然没到 M3/M4，走完 M3/M4 就必然没有 NACK。
+ * - **错误**（结果已知，直接推进游标，不重试不冷却）：走完 M3/M4 却没有 M5，
+ *   说明 AP 校验了我们 M4 里的前半段并判了不通过——就是这个 PIN 不对。见 [isPinRejected]。
+ * - **异常**（结果未知，按配置重试同一个 PIN 并指数冷却，用尽后假装已试完再推进）：
+ *   还没走到 M3 就结束的握手——典型是收到 M2 后被 NACK（路由器防护已开启）、未关联、超时、
+ *   supplicant 拒绝命令、脚本异常。见 [retryOrAdvance]。
+ *
+ * 脚本会把 NACK 的具体原因（前/后半段不匹配、CONFIG_ERROR）随结果回传，仅用于日志与展示，
+ * 不参与游标推进判断。
  */
 internal class WpsSecurityAuditTask(
     input: WpsSecurityAuditTaskInput,
@@ -159,7 +166,8 @@ internal class WpsSecurityAuditTask(
         val result = try {
             session.run(JSONObject().put("mode", "pin").put("mac", targetMac).put("pin", pin)
                 .put("localMac", localMac ?: JSONObject.NULL).put("completeProtocol", true),
-                changed = { entry.key in stoppedNetworks })
+                changed = { entry.key in stoppedNetworks },
+                timeoutMillis = selectedConfig.attemptTimeoutMillis)
         } catch (stop: InterruptedException) {
             throw stop
         } catch (error: Exception) {
@@ -176,9 +184,14 @@ internal class WpsSecurityAuditTask(
             handshakeProgress = null,
             averageAttemptMillis = if (entry.costs.size >= 5) entry.costs.sum() / entry.costs.size else null,
         )
-        context.log("[${entry.record.ssid}] 本轮结果=${result.status}，M 消息进度=M${result.maxMMessage}" + result.failure?.let {
-            "，原因=${it.code}${if (it.detail.isEmpty()) "" else " · ${it.detail}"}"
-        }.orEmpty())
+        // wps.py 收到 WSC_NACK 一定会回传原因码；连码都没有时如实标注，别让日志看起来像没检查过。
+        val failure = result.failure
+        context.log("[${entry.record.ssid}] 本轮结果=${result.status}，M 消息进度=M${result.maxMMessage}" +
+            when {
+                result.timedOut -> "，原因=单次尝试超时（${selectedConfig.attemptTimeoutMillis}ms）被中断"
+                failure != null -> "，原因=${failure.code}${if (failure.detail.isEmpty()) "" else " · ${failure.detail}"}"
+                else -> "，原因=无（脚本未回传失败原因码）"
+            })
         // success 表示完整协议结果；已取得密码的安全结论独立于协议是否正常结束。
         result.network?.let { network ->
             entry.pendingPin = null
@@ -198,7 +211,8 @@ internal class WpsSecurityAuditTask(
         checkNetworkRunning(entry, context)
         // 仙尘阶段先抓握手数据，再交给 pixiewps 离线计算随机数缺陷漏洞 PIN。
         if (entry.record.phase == WpsSecurityAuditPhase.FAIRY_DUST) captureHandshake(entry, result, context)
-        val reason = failureLabel(result.failure)
+        val reason = if (result.timedOut) "单次尝试超时（${selectedConfig.attemptTimeoutMillis}ms）"
+        else failureLabel(result)
         when {
             // 收到 M5 即前半段正确，前四位确定后转入后三位枚举。
             result.firstHalfValid && entry.record.firstHalf == null -> {
@@ -210,26 +224,60 @@ internal class WpsSecurityAuditTask(
                     nextAttemptAt = null, message = "排队中")
                 context.log("[${entry.record.ssid}] 前四位已确定：${pin.take(4)}")
             }
-            // 未推进到 M5 的结果（含 WSC_NACK）一律算单次异常：重试当前 PIN 并指数冷却。
+            // 单次用时上限：不管掐在哪一步，这次都只算没跑完，按一次异常走重试与冷却。
+            result.timedOut -> retryOrAdvance(entry, context, selectedConfig, reason)
+            // 错误：握手走到 M3/M4 后路由器没给有效答复，结果已知就是这个 PIN 不对，直接推进。
+            isPinRejected(result) -> {
+                context.log("[${entry.record.ssid}] $reason，判定为 PIN 错误，推进游标")
+                advance(entry)
+            }
+            // 异常：握手没走到 M3（收到 M2 后被 NACK、未关联、超时、脚本异常），重试当前 PIN 并指数冷却。
             else -> retryOrAdvance(entry, context, selectedConfig, reason)
         }
         publish(context)
     }
 
-    /** 把脚本回传的失败短码翻译成展示用的异常类型。 */
-    private fun failureLabel(failure: WpsFifoSession.Failure?): String = when {
-        failure == null -> "未进入握手"
-        failure.code == "WSC_NACK_FIRST_HALF" -> "NACK：PIN 前半段不匹配"
-        failure.code == "WSC_NACK_SECOND_HALF" -> "NACK：PIN 后半段不匹配"
-        failure.code.startsWith("WSC_NACK_CONFIG_") ->
-            "NACK：路由器返回配置错误 ${failure.code.removePrefix("WSC_NACK_CONFIG_")}"
-        failure.code == "WPS_TIMEOUT" -> "WPS 超时"
-        failure.code == "WPS_OVERLAP" -> "WPS 重叠冲突"
-        failure.code == "WPS_FAIL" -> "WPS-FAIL"
-        failure.code == "SUPPPLICANT_REJECT" -> "supplicant 拒绝命令"
-        failure.code == "EXCLUDED_AP" -> "目标在排除名单"
-        failure.code == "EXCEPTION" -> "执行异常"
-        else -> failure.code
+    /**
+     * 这次握手是否已经拿到路由器的答复——就是这个 PIN 不对。
+     *
+     * Registrar 流程里收到的是奇数 M1/M3/M5/M7、发出的是偶数 M2/M4/M6/M8。
+     * [WpsFifoSession.Result.maxMMessage] 达到 [REACHED_PIN_CHECK_M_MESSAGE] 即收到过 M3（并发出 M4），
+     * 说明 AP 的 WPS 栈正常工作、没有 lock、也没有拒连。它随后不管是不回 M5、直接回 NACK 还是掐掉会话，
+     * 都是它在校验我们 M4 里的 R-Hash1 时判了不通过——答复已经拿到，重跑一遍同样的握手只会得到同样的答案，
+     * 所以算错误，直接推进游标。
+     *
+     * 反过来，连 M3 都没收到（未关联、没启动 WPS、超时、supplicant 拒绝命令、脚本异常）才是异常：
+     * 拿不到 PIN 的结论，交给 [retryOrAdvance] 重跑同一次握手。
+     */
+    private fun isPinRejected(result: WpsFifoSession.Result): Boolean =
+        result.maxMMessage >= REACHED_PIN_CHECK_M_MESSAGE
+
+    /**
+     * 把脚本回传的失败原因翻译成日志文案。
+     *
+     * wps.py 收到 WSC_NACK 一定会回传原因码（`WSC_NACK_FIRST_HALF` / `WSC_NACK_SECOND_HALF` /
+     * `WSC_NACK_CONFIG_<n>`），先看有没有这个码，有就照实展开。一个码都没有时按实际走到的
+     * M 消息位置描述——M2 之后没有后文就结束属于异常，要说"M2 后无响应"，不能笼统写成"未进入握手"。
+     */
+    private fun failureLabel(result: WpsFifoSession.Result): String {
+        val failure = result.failure ?: return when {
+            result.maxMMessage >= REACHED_PIN_CHECK_M_MESSAGE -> "已走完 M3/M4 但脚本未回传原因码"
+            result.maxMMessage > 0 -> "M${result.maxMMessage} 后无响应，脚本未回传原因码"
+            else -> "未进入握手"
+        }
+        return when {
+            failure.code == "WSC_NACK_FIRST_HALF" -> "NACK：PIN 前半段不匹配"
+            failure.code == "WSC_NACK_SECOND_HALF" -> "NACK：PIN 后半段不匹配"
+            failure.code.startsWith("WSC_NACK_CONFIG_") ->
+                "NACK：路由器返回配置错误 ${failure.code.removePrefix("WSC_NACK_CONFIG_")}"
+            failure.code == "WPS_TIMEOUT" -> "WPS 超时"
+            failure.code == "WPS_OVERLAP" -> "WPS 重叠冲突"
+            failure.code == "WPS_FAIL" -> "WPS-FAIL"
+            failure.code == "SUPPPLICANT_REJECT" -> "supplicant 拒绝命令"
+            failure.code == "EXCLUDED_AP" -> "目标在排除名单"
+            failure.code == "EXCEPTION" -> "执行异常"
+            else -> failure.code
+        }
     }
 
     /** 仙尘阶段：用第一次握手的完整数据离线计算漏洞 PIN，只算一次。 */
@@ -250,6 +298,12 @@ internal class WpsSecurityAuditTask(
         )
     }
 
+    /**
+     * 异常重试：重跑同一次握手，冷却时间按次数翻倍；用尽后假装这个 PIN 已试完、推进游标。
+     *
+     * [WpsSecurityAuditConfig.retryCount] 为 6 表示无限重试——异常状态下握手根本没跑起来，
+     * 重跑多少次都不会改变 PIN 的结论，卡在这里等于没测。
+     */
     private fun retryOrAdvance(entry: Entry, context: TaskContext, selectedConfig: WpsSecurityAuditConfig, reason: String) {
         val count = entry.record.retryCount + 1
         if (SecurityAuditQueue.retryExhausted(selectedConfig.retryCount, count)) {
@@ -466,5 +520,7 @@ internal class WpsSecurityAuditTask(
         const val FAIRY_PIN = "76970009"//TODO:12345670
         const val FIRST_HALF_COUNT = 10000
         const val SECOND_HALF_COUNT = 1000
+        /** 收到 M3（并发出 M4），即 AP 已给出答复；此后失败可判定为这个 PIN 不对。 */
+        const val REACHED_PIN_CHECK_M_MESSAGE = 3
     }
 }
