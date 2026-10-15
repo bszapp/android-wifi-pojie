@@ -23,6 +23,7 @@ internal class MonitorCommunicationStore(private val directory: File) : java.io.
     private val updatedIds = linkedSetOf<Long>()
     private var closed = false
     private val summaries = mutableMapOf<Pair<String, String>, Pair<Long, Long>>()
+    private val parsedCounts = mutableMapOf<Pair<String, String>, Long>()
     private val identities = mutableMapOf<Pair<String, String>, Pair<String, String>>()
 
     init {
@@ -81,7 +82,7 @@ internal class MonitorCommunicationStore(private val directory: File) : java.io.
         dhcpBody = RandomAccessFile(File(directory, "dhcp.bin"), "rw").also { if (!retainDhcpNames) it.setLength(0) }
         closed = false
         schema()
-        revision = 0; nextId = 0; updatedIds.clear(); summaries.clear()
+        revision = 0; nextId = 0; updatedIds.clear(); summaries.clear(); parsedCounts.clear()
         if (!retainDhcpNames) identities.clear()
         if (retainDhcpNames) {
             db.execSQL("ATTACH DATABASE ? AS previous", arrayOf(previous.path))
@@ -109,6 +110,7 @@ internal class MonitorCommunicationStore(private val directory: File) : java.io.
                     val key = records.getString(1) to records.getString(2)
                     val old = summaries[key] ?: (0L to 0L)
                     summaries[key] = (old.first + 1) to maxOf(old.second, records.getLong(4))
+                    if (isParsedCommunication(metadata)) parsedCounts[key] = (parsedCounts[key] ?: 0L) + 1L
                     index(id, metadata.toString())
                     db.rawQuery("SELECT channel,offset,size FROM chunks WHERE id=? ORDER BY channel,part", arrayOf(id.toString())).use { chunks ->
                         while (chunks.moveToNext()) {
@@ -127,6 +129,11 @@ internal class MonitorCommunicationStore(private val directory: File) : java.io.
     }
 
     @Synchronized fun summary(bssid: String, mac: String) = summaries[bssid to mac] ?: (0L to 0L)
+
+    @Synchronized fun parsedCount(bssid: String, mac: String): Long = parsedCounts[bssid to mac] ?: 0L
+
+    private fun isParsedCommunication(value: JSONObject?): Boolean = value != null &&
+        value.optString("kind") != "wpa_handshake" && !value.optBoolean("streamContainer")
 
     @Synchronized fun identity(bssid: String, mac: String, ssid: String?, name: String?) {
         val key = bssid to mac
@@ -176,6 +183,9 @@ internal class MonitorCommunicationStore(private val directory: File) : java.io.
         if (existingId == null) nextId = id
         updatedIds.add(id)
         if (previous == null) index(id, event.optString("summary") + " " + event.optString("sourceAddress") + " " + event.optString("destinationAddress"))
+        val parsedDelta = (if (isParsedCommunication(metadata)) 1L else 0L) -
+            (if (isParsedCommunication(previous)) 1L else 0L)
+        if (parsedDelta != 0L) parsedCounts[bssid to mac] = parsedCount(bssid, mac) + parsedDelta
         bump(bssid, mac, previous == null)
     }
 

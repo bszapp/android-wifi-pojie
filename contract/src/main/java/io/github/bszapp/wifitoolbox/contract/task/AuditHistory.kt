@@ -54,6 +54,14 @@ sealed class AuditRecord : Parcelable {
         override val message: String = "排队中",
         override val password: String? = null,
         val dictionaryPosition: Int? = null,
+        /** 首次共享时取发起共享的记录 ID；独立记录保持 null。 */
+        val groupId: String? = null,
+        /** 服务拥有的共享候选池游标；独立记录保持 null。 */
+        val poolCompleted: Int? = null,
+        /** 正受理本条记录的网卡（调度里的窗口）；排队、冷却或已结束时为 null。 */
+        val window: String? = null,
+        /** 本轮正在尝试的密码；非运行中为 null。 */
+        val attemptPassword: String? = null,
     ) : AuditRecord() {
         override val kind: AuditRecordKind get() = AuditRecordKind.DICTIONARY
         override val ssid: String get() = input.ssid
@@ -121,6 +129,8 @@ sealed class AuditHistoryRecord {
         val elapsedMillis: Long,
         val averageAttemptMillis: Long?,
         val dictionaryPosition: Int?,
+        val groupId: String? = null,
+        val poolCompleted: Int? = null,
     ) : AuditHistoryRecord() {
         override val kind get() = AuditRecordKind.DICTIONARY
         val total get() = passwords.size

@@ -236,17 +236,25 @@ internal fun MonitorDeviceDetailSheet(
                         SmallTitle(text = "通信数据")
                         Card {
                             BasicComponent(
-                                title = if (device.decryptionStatus == MonitorDecryptionStatus.READY && device.communicationCount == 0L) {
-                                    "暂未捕获到通信数据"
-                                } else decryptionStatusText(device.decryptionStatus),
-                                summary = deviceProtocolText(device.protocol) +
+                                title = when {
+                                    device.parsedCommunicationCount > 0L -> "已解析 ${device.parsedCommunicationCount} 条通信数据"
+                                    device.decryptionStatus == MonitorDecryptionStatus.READY ||
+                                        device.decryptionStatus == MonitorDecryptionStatus.PLAINTEXT -> "暂未捕获到可解析的通信数据"
+                                    else -> decryptionStatusText(device.decryptionStatus)
+                                },
+                                summary = buildString {
+                                    append(deviceProtocolText(device.protocol))
+                                    if (device.parsedCommunicationCount > 0L || device.decryptionStatus == MonitorDecryptionStatus.PLAINTEXT) {
+                                        append('\n')
+                                        append(decryptionStatusText(device.decryptionStatus))
+                                    }
                                     if (device.decryptionStatus == MonitorDecryptionStatus.SECURE) {
-                                        "\n此提示表示当前功能无法凭已保存密码被动解密该协议，不代表应用层与网络具有绝对安全性。"
-                                    } else "",
+                                        append("\n此提示表示当前功能无法凭已保存密码被动解密该协议，不代表应用层与网络具有绝对安全性。")
+                                    }
+                                },
                             )
-                            if (device.decryptionStatus != MonitorDecryptionStatus.SECURE &&
-                                (device.decryptionStatus == MonitorDecryptionStatus.READY || device.communicationCount > 0)) {
-                                BasicComponent(title = "通信数据", summary = "${device.communicationCount} 条记录 · 按需读取详情",
+                            if (device.parsedCommunicationCount > 0L) {
+                                BasicComponent(title = "通信数据", summary = "按此接入点和设备筛选 · 按需读取详情",
                                     onClick = {
                                         onDismiss()
                                         navigator.push(Route.Capture(accessPoint.bssid, device.mac))

@@ -37,9 +37,10 @@ internal class TaskContext(
         TaskContext(taskId, manager, onProgress, check, "[$ssid] ", configuration)
 
     fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.SecurityAuditConfig,
-        networks: List<io.github.bszapp.wifitoolbox.contract.task.AuditRecord>) =
+        networks: List<io.github.bszapp.wifitoolbox.contract.task.AuditRecord>,
+        windows: List<String> = emptyList()) =
         manager.updateAuditNetworks(taskId, networks) { revision, active ->
-            TaskProgress.SecurityAudit(revision, active, config)
+            TaskProgress.SecurityAudit(revision, active, config, windows)
         }
 
     fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.WpsSecurityAuditConfig,

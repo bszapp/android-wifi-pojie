@@ -27,6 +27,8 @@ interface IWifiListController {
     /** 请求 Service 切换网卡模式；实际模式由 Service 读取并发布。 */
     fun setMode(mode: WifiMode)
     fun setWifiListDataSource(source: WifiListDataSource)
+    /** 服务先核对带标记的实际网卡，再决定新增或撤销。 */
+    fun toggleSmartInterfaces()
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false)
     fun clearMonitorCapture(handshakesOnly: Boolean)
     fun interruptModeSwitch(operationId: Long)

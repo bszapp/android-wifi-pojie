@@ -75,6 +75,8 @@ import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorHandshakeStatus
 import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.model.MergedWifiGroup
 import io.github.bszapp.wifitoolbox.uidefault.model.WifiDeviceAssessment
+import io.github.bszapp.wifitoolbox.uidefault.navigation.LocalNavigator
+import io.github.bszapp.wifitoolbox.uidefault.navigation.Route
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -168,6 +170,7 @@ fun WifiDetailSheet(
     deviceDetailContent: @Composable (MonitorAccessPoint, MonitorDevice) -> Unit = { _, _ -> },
 ) {
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
+    val navigator = LocalNavigator.current
 
     // 动画状态：只记录当前是三个页面中的哪一个
     var stage by remember(group.ssid) { mutableStateOf(WifiDetailStage.LIST) }
@@ -283,6 +286,12 @@ fun WifiDetailSheet(
                         onDeviceClick = { device ->
                             selectedDeviceMac = device.mac
                             stage = WifiDetailStage.DEVICE
+                        },
+                        onCommunicationClick = { device ->
+                            selectedAccessPoint?.captured?.bssid?.let { bssid ->
+                                onDismiss()
+                                navigator.push(Route.Capture(bssid, device.mac))
+                            }
                         },
                     )
 
@@ -469,6 +478,7 @@ private fun AccessPointCaptureContent(
     assessment: WifiDeviceAssessment?,
     deviceListState: androidx.compose.foundation.lazy.LazyListState,
     onDeviceClick: (MonitorDevice) -> Unit,
+    onCommunicationClick: (MonitorDevice) -> Unit,
 ) {
     val captured = entry?.captured
     val devices = captured?.devices.orEmpty().sortedWith(
@@ -518,6 +528,7 @@ private fun AccessPointCaptureContent(
                         DeviceCard(
                             device = devices[index],
                             onClick = { onDeviceClick(devices[index]) },
+                            onCommunicationClick = { onCommunicationClick(devices[index]) },
                         )
                     }
                 }
@@ -563,6 +574,10 @@ private fun AccessPointOverviewCard(
         if (captured != null) {
             add("设备数量" to "${captured.devices.size} 台")
             add("成功握手" to "${captured.devices.sumOf(::successfulHandshakeCount)} 次")
+            val parsedCount = captured.devices.sumOf { it.parsedCommunicationCount }
+            add("通信解析" to if (parsedCount > 0L) {
+                "已解析 $parsedCount 条 · ${captured.devices.count { it.parsedCommunicationCount > 0L }} 台设备"
+            } else "暂无可解析的通信数据")
         }
     }
 
@@ -588,6 +603,7 @@ private fun AccessPointOverviewCard(
 private fun DeviceCard(
     device: MonitorDevice,
     onClick: () -> Unit,
+    onCommunicationClick: () -> Unit,
 ) {
     val handshakeCount = successfulHandshakeCount(device)
     Card(
@@ -618,6 +634,13 @@ private fun DeviceCard(
                 }
             },
             onClick = onClick,
+        )
+        BasicComponent(
+            title = if (device.parsedCommunicationCount > 0L) "查看通信数据" else "暂无可解析的通信数据",
+            summary = if (device.parsedCommunicationCount > 0L) {
+                "已解析 ${device.parsedCommunicationCount} 条 · 按此设备和接入点筛选"
+            } else decryptionStatusText(device.decryptionStatus),
+            onClick = if (device.parsedCommunicationCount > 0L) onCommunicationClick else null,
         )
     }
 }

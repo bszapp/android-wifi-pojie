@@ -280,7 +280,7 @@ fun WifiList(
                                 discoveredHiddenNameCount =
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
                                 auditMode = auditMode,
-                                 auditRunning = auditRecord?.active == true && !(wpsAuditMode && group.ssid.isEmpty()),
+                                auditRunning = wpsAuditMode && auditRecord?.active == true && group.ssid.isNotEmpty(),
                                 allowWpsPin = modeState?.mode == WifiMode.NORMAL,
                                 onClick = {
                                     selectedSsid = group.ssid
@@ -288,7 +288,7 @@ fun WifiList(
                                 },
                                 onConnect = {
                                     if (auditMode) {
-                                        if (auditRecord?.active == true && !(wpsAuditMode && group.ssid.isEmpty())) vm.securityAudit.stopNetwork(group.ssid, (auditRecord as? AuditRecord.Wps)?.mac)
+                                        if (wpsAuditMode && auditRecord?.active == true && group.ssid.isNotEmpty()) vm.securityAudit.stopNetwork(group.ssid, (auditRecord as? AuditRecord.Wps)?.mac)
                                         else if (wpsAuditMode) vm.securityAudit.openWpsNetwork(
                                             group.ssid, group.savedWifiList.isNotEmpty(),
                                             group.networks.any { it.supportsWps() }, group.networks)
@@ -324,10 +324,12 @@ fun WifiList(
                                 }
                                 }
                             } else {
-                                io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(
-                                    (auditRecord as? AuditRecord.Dictionary)?.takeIf { it.active }) {
-                                     vm.securityAudit.stopNetwork(group.ssid)
-                                }
+                                auditBatch?.auditNetworks?.filterIsInstance<AuditRecord.Dictionary>()
+                                    ?.filter { it.ssid == group.ssid && it.active }?.forEach { record ->
+                                        io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(record) {
+                                            vm.securityAudit.stopRecord(record.id)
+                                        }
+                                    }
                             }
                         }
                         }

@@ -5,6 +5,7 @@ import android.system.OsConstants
 import android.system.StructTimeval
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiMode
 import java.net.NetworkInterface
+import java.io.File
 import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -13,6 +14,18 @@ import java.nio.ByteOrder
 internal object WirelessInterfaceNetlink {
     fun readMode(): WifiMode {
         val index = NetworkInterface.getByName("wlan0")?.index ?: error("wlan0 不存在")
+        return if (readInterfaceType(index) == 6) WifiMode.MONITOR else WifiMode.NORMAL
+    }
+
+    /** P2P 接口即使被厂商驱动标为 managed，也不计作普通连接网卡。 */
+    fun managedInterfaceNames(): List<String> =
+        NetworkInterface.getNetworkInterfaces()?.toList().orEmpty().mapNotNull { device ->
+            val name = device.name
+            if (name.startsWith("p2p") || !File("/sys/class/net/$name/phy80211").exists()) null
+            else if (readInterfaceType(device.index) == 2) name else null
+        }.sorted()
+
+    private fun readInterfaceType(index: Int): Int {
         val fd = Os.socket(16, OsConstants.SOCK_RAW, 16)
         try {
             val addressClass = Class.forName("android.system.NetlinkSocketAddress")
@@ -62,7 +75,7 @@ internal object WirelessInterfaceNetlink {
             val familyId = ByteBuffer.wrap(family).order(ByteOrder.nativeOrder()).short.toInt() and 65535
             val mode = request(familyId, 5, 2, attribute(3, ByteBuffer.allocate(4).order(ByteOrder.nativeOrder()).putInt(index).array()))
                 .first { it.first == 5 }.second
-            return if (ByteBuffer.wrap(mode).order(ByteOrder.nativeOrder()).int == 6) WifiMode.MONITOR else WifiMode.NORMAL
+            return ByteBuffer.wrap(mode).order(ByteOrder.nativeOrder()).int
         } finally {
             Os.close(fd)
         }

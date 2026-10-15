@@ -114,6 +114,8 @@ sealed class TaskProgress : Parcelable {
         val revision: Long,
         val networkCount: Int,
         val config: SecurityAuditConfig,
+        /** 当前可分配的网卡窗口；仅多线程模式下发，串行模式为空列表。 */
+        val windows: List<String> = emptyList(),
     ) : TaskProgress()
 
     data class WpsSecurityAudit(
@@ -274,8 +276,12 @@ sealed class TaskRequestPayload : Parcelable {
 
 @Parcelize
 sealed class TaskUpdatePayload : Parcelable {
-    /** 仅追加新网络，已有运行网络的字典不可更新。 */
+    /** 追加一条独立运行记录；允许 SSID 重复，已提交记录的字典不可更换。 */
     data class SecurityAuditAdd(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
+    /** 从现有记录的公共候选池追加成员，不再次传输字典。 */
+    data class SecurityAuditJoin(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
+    /** 停止指定安全测试运行记录；同一 SSID 的其他记录保持运行。 */
+    data class SecurityAuditStop(val recordId: String) : TaskUpdatePayload()
     data class SecurityAuditRemove(val ssid: String, val mac: String? = null) : TaskUpdatePayload()
     data class SecurityAuditConfigure(val config: SecurityAuditConfig) : TaskUpdatePayload()
 

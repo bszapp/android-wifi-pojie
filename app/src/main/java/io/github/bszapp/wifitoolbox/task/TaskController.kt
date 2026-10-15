@@ -223,6 +223,30 @@ class TaskController(
         }
     }
 
+    override suspend fun joinSecurityAuditPool(input: SecurityAuditTaskInput): Long = withContext(Dispatchers.IO) {
+        val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
+        try {
+            check(isCurrent(binding)) { "服务未连接" }
+            val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
+            require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "共享候选池请求元数据过大" }
+            val id = binding.service.joinSecurityAuditPool(request)
+            val snapshot = binding.service.getTaskSnapshot(id)
+            val currentTaskId = synchronized(binding.pendingLock) {
+                binding.service.getCurrentTaskId().takeIf { it > 0L }.also { binding.currentTaskId = it }
+            }
+            updateState(binding) { current ->
+                current.copy(currentTaskId = currentTaskId, tasks = current.tasks +
+                    (id to (current.tasks[id]?.copy(snapshot = snapshot) ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))))
+            }
+            synchronized(binding.pendingLock) { binding.pendingTaskIds += id; binding.pendingLogIds += id }
+            binding.signal.trySend(Unit)
+            id
+        } catch (error: Throwable) {
+            if (isCurrent(binding)) reportError("App.TaskController", "加入共享候选池", error, null)
+            throw error
+        }
+    }
+
     override suspend fun runWpsSecurityAudit(input: WpsSecurityAuditTaskInput): Long =
         withContext(Dispatchers.IO) {
             val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")

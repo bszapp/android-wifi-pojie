@@ -4,11 +4,11 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 /** 仅由该设备的认证、关联和 EAPOL 证据确定，不使用 AP 广播能力推断。 */
-enum class MonitorDeviceProtocol { UNKNOWN, WPA_PSK, WPA2_PSK, WPA2_PSK_SHA256, SAE, OWE, OTHER }
+enum class MonitorDeviceProtocol { UNKNOWN, WPA_PSK, WPA2_PSK, WPA2_PSK_SHA256, SAE, OWE, OTHER, OPEN }
 
 enum class MonitorDecryptionStatus {
     PROTOCOL_UNKNOWN, NO_PASSWORD, PASSWORD_MISMATCH, INCOMPLETE_HANDSHAKE,
-    READY, SECURE, UNSUPPORTED, LOADING,
+    READY, SECURE, UNSUPPORTED, LOADING, PLAINTEXT,
 }
 
 enum class MonitorCommunicationType { DNS, HTTP, HTTPS, DHCP, TCP, UDP, ARP, ICMP, OTHER, WPA_HANDSHAKE }

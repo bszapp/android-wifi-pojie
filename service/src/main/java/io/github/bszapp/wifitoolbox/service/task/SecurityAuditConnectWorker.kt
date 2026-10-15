@@ -8,20 +8,26 @@ import io.github.bszapp.wifitoolbox.service.TerminalManager
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogEvent
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogObservation
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
  * 安全测试专用单次执行器，移植旧版 ConnectWorker 的系统连接及结果判定。
  * 调度器在取得结果后调用 cleanConnection；只有网络移出队列才调用 forgetNetwork。
- * 网卡方式拥有独立执行器，两个分支均不创建普通连通性测试任务。
+ * 网卡方式按网卡分执行器，每个执行器持有一个脚本 FIFO 会话，同一张网卡同一时刻只跑一次连接；
+ * 系统方式共用 supplicant，始终串行。两个分支均不创建普通连通性测试任务。
  */
 internal class SecurityAuditConnectWorker(
     private val androidApi: AndroidApi,
     private val wifiLogAnalyzer: WifiLogAnalyzer,
-    terminalManager: TerminalManager,
+    private val terminalManager: TerminalManager,
 ) {
-    private val networkCardWorker = SecurityAuditNetworkCardWorker(terminalManager, androidApi::getDeviceName)
+    /**
+     * 每张网卡一个执行器，各持各的 Python/FIFO 会话；键为网卡名。
+     * 多线程下调度器保证同一网卡同一时刻只有一个任务在跑，因此懒创建是安全的。
+     */
+    private val networkCardWorkers = ConcurrentHashMap<String, SecurityAuditNetworkCardWorker>()
     private var systemAttempt: SystemAttempt? = null
     var rejectionDescription: String? = null
         private set
@@ -31,22 +37,45 @@ internal class SecurityAuditConnectWorker(
         password: String,
         mac: String?,
         config: SecurityAuditConfig,
+        interfaceName: String,
         context: TaskContext,
+        onSystemConfigurationPrepared: () -> Unit,
     ): ConnectionAttemptResult {
         rejectionDescription = null
         return when (config.connectionMethod) {
             SecurityAuditConnectionMethod.SYSTEM -> {
                 // 系统连接开始前结束可能仍存活的网卡脚本会话，确保其先恢复系统 supplicant。
-                networkCardWorker.closeSession(context)
-                performSystemConnection(ssid, password, config, context)
+                closeNetworkCardSession(context)
+                performSystemConnection(ssid, password, config, context, onSystemConfigurationPrepared)
             }
-            SecurityAuditConnectionMethod.NETWORK_CARD -> networkCardWorker.performTaskLogic(ssid, password, mac, config, context)
+            SecurityAuditConnectionMethod.NETWORK_CARD ->
+                networkCardWorker(interfaceName).performTaskLogic(ssid, password, mac, config, context)
         }
     }
 
-    fun closeNetworkCardSession(context: TaskContext) = networkCardWorker.closeSession(context)
+    private fun networkCardWorker(interfaceName: String) =
+        networkCardWorkers.computeIfAbsent(interfaceName) {
+            SecurityAuditNetworkCardWorker(terminalManager, androidApi::getDeviceName, it)
+        }
 
-    fun cleanConnection(method: SecurityAuditConnectionMethod, context: TaskContext) {
+    /** 任务结束或切回系统连接方式时调用；必须等所有窗口的会话都收干净。 */
+    fun closeNetworkCardSession(context: TaskContext) {
+        val pending = networkCardWorkers.values.toList()
+        networkCardWorkers.clear()
+        val failures = mutableListOf<Throwable>()
+        pending.forEach { card ->
+            runCatching { card.closeSession(context) }.onFailure { error ->
+                context.log("关闭网卡会话失败：iface=${card.interfaceName} ${error.message ?: error.javaClass.name}")
+                failures += error
+            }
+        }
+        failures.firstOrNull()?.let { error ->
+            failures.drop(1).forEach(error::addSuppressed)
+            throw error
+        }
+    }
+
+    fun cleanConnection(method: SecurityAuditConnectionMethod, interfaceName: String, context: TaskContext) {
         if (method == SecurityAuditConnectionMethod.SYSTEM) {
             val attempt = systemAttempt ?: return
             // 停止指令只中断判定，实际断开确认仍须完成，才能交还连接执行权。
@@ -96,17 +125,20 @@ internal class SecurityAuditConnectWorker(
         }
         if (method == SecurityAuditConnectionMethod.NETWORK_CARD) {
             // 完成或撤销本轮连接后仍保留脚本会话，直到任务生命周期结束。
-            networkCardWorker.cleanConnection(context)
+            networkCardWorker(interfaceName).cleanConnection(context)
         }
     }
 
     fun forgetNetwork(ssid: String): Boolean = androidApi.forgetSecurityAuditNetwork(ssid)
+
+    fun retainSuccessfulNetwork(ssid: String, password: String): Int = androidApi.saveWifiNetwork(ssid, password)
 
     private fun performSystemConnection(
         ssid: String,
         password: String,
         config: SecurityAuditConfig,
         context: TaskContext,
+        onSystemConfigurationPrepared: () -> Unit,
     ): ConnectionAttemptResult {
         context.ensureRunning()
         check(systemAttempt == null) { "上一轮连接尚未清理" }
@@ -117,6 +149,7 @@ internal class SecurityAuditConnectWorker(
         context.log("进入阶段：与路由器建立通信")
         val apiStarted = SystemClock.elapsedRealtime()
         val submission = androidApi.connectSecurityAuditNetwork(ssid, password) { networkId ->
+            onSystemConfigurationPrepared()
             context.ensureRunning()
             attempt.networkId = networkId
             attempt.submittedAfterId = wifiLogAnalyzer.latestId()

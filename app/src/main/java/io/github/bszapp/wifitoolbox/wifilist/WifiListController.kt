@@ -578,6 +578,9 @@ class WifiListController(
             it.setWifiListDataSource(source.wireValue)
         }
     }
+    override fun toggleSmartInterfaces() {
+        callService("智能增加网卡") { it.toggleSmartInterfaces() }
+    }
     //TODO:这啥玩意有用吗
     override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) {
         callService(if (enabled) "开始持续抓取" else "停止持续抓取") { it.setMonitorCapture(enabled, frequencyMhz, hopping) }

@@ -1021,11 +1021,22 @@ def read_control():
     stop_requested.set()
 
 
-def _arguments_from_request(request):
+def _validate_interface(interface):
+    # IFNAMSIZ 为 16 字节，含结尾 NUL；名称里出现空格会让下面的 struct 打包直接失败。
+    if not isinstance(interface, str) or not interface:
+        raise ValueError('interface must be a non-empty interface name')
+    if len(interface) > 15:
+        raise ValueError('interface name is limited to 15 characters: %r' % interface)
+    if any(character.isspace() for character in interface):
+        raise ValueError('interface name must not contain whitespace: %r' % interface)
+    return interface
+
+
+def _arguments_from_request(request, interface='wlan0'):
     if not isinstance(request, dict):
         raise ValueError('Configuration must be a JSON object')
     return SimpleNamespace(
-        interface='wlan0', ssid=request['ssid'], passwords=request['passwords'],
+        interface=_validate_interface(interface), ssid=request['ssid'], passwords=request['passwords'],
         mac=request.get('mac'), hostname=request['hostname'],
         hostname_encoding=request.get('hostnameEncoding', 'gbk'),
         timeout_millis=request['timeoutMillis'], handshake_timeout=request.get('handshakeTimeoutMillis'),
@@ -1089,7 +1100,7 @@ def _read_fifo_commands(command_pipe, requests, session_state):
         _close_fifo_session(requests, session_state)
 
 
-def persistent_fifo_main(command_pipe, event_pipe):
+def persistent_fifo_main(command_pipe, event_pipe, interface='wlan0'):
     global supplicant_guard, fifo_log_sink, overall_deadline, handshake_deadline
     requests = queue.Queue()
     session_state = dict(lock=threading.Lock(), active=threading.Event(), closing=threading.Event(),
@@ -1156,7 +1167,7 @@ def persistent_fifo_main(command_pipe, event_pipe):
             try:
                 if cancelled:
                     raise InterruptedError('Request cancelled before execution')
-                args = _arguments_from_request(request)
+                args = _arguments_from_request(request, interface)
                 exit_code = run(args, session_guard=supplicant_guard)
             except BaseException as error:
                 report('failed', error=repr(error), trace=traceback.format_exc())
@@ -1210,11 +1221,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--command-pipe')
     parser.add_argument('--event-pipe')
+    # 一个脚本进程固定占一张网卡；多线程即由上层多开进程、各配各的 FIFO 通道。
+    parser.add_argument('--interface', default='wlan0')
     options = parser.parse_args()
     if bool(options.command_pipe) != bool(options.event_pipe):
         raise ValueError('Both --command-pipe and --event-pipe are required for FIFO mode')
+    interface = _validate_interface(options.interface)
     if options.command_pipe:
-        return persistent_fifo_main(options.command_pipe, options.event_pipe)
+        return persistent_fifo_main(options.command_pipe, options.event_pipe, interface)
 
     report('ready', protocol=1)
     line = sys.stdin.readline()
@@ -1226,7 +1240,7 @@ def main():
     if request.get('type') == 'stop':
         report('end', success=False, cleanupCompleted=True, message='Stopped during preparation')
         return 1
-    args = _arguments_from_request(request)
+    args = _arguments_from_request(request, interface)
     threading.Thread(target=read_control, daemon=True).start()
     return run(args)
 

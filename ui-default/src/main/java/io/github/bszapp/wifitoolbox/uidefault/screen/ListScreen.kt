@@ -280,6 +280,25 @@ fun ListScreen(
                                                     showMore.value = false
                                                 })
                                         }
+                                        HorizontalDivider()
+                                        val smart = modeState?.smartInterfaces
+                                        val smartEnabled = smart?.isRunning == false
+                                        val smartOn = smart?.enabled == true
+                                        val smartCount = smart?.interfaceCount ?: 0
+                                        DropdownImpl(
+                                            item = DropdownItem(
+                                                text = if (smartOn) "智能增加网卡（已有${smartCount}个）"
+                                                else "智能增加网卡",
+                                                summary = if (smart?.isRunning == true) "脚本执行中" else null,
+                                                selected = smartOn,
+                                                enabled = smartEnabled,
+                                            ),
+                                            optionSize = 1,
+                                            index = 0,
+                                            isSelected = smartOn,
+                                            enabled = smartEnabled,
+                                            onSelectedIndexChange = { viewModel.wifiList.toggleSmartInterfaces() },
+                                        )
                                     }
                                 }
                                 IconButton(onClick = { showMore.value = true }) {
@@ -459,7 +478,8 @@ private fun DisplayedTaskSheet(
             viewModel::closeDisplayedTask, viewModel::connectCapturedWpsNetwork)
         is TaskRequestPayload.SecurityAudit -> SecurityAuditTaskSheet(task,
             onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
-            onInspect = viewModel.securityAudit::inspect)
+            onInspect = viewModel.securityAudit::inspect,
+            onStopRecord = viewModel.securityAudit::stopRecord)
         is TaskRequestPayload.WpsSecurityAudit -> WpsSecurityAuditTaskSheet(task,
             onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
             onInspect = viewModel.securityAudit::inspectWps)

@@ -39,7 +39,18 @@ data class WifiModeState(
     val monitorStatistics: MonitorModeStatistics? = null,
     val modeSwitch: WifiModeSwitch? = null,
     val captureClearProgress: MonitorCaptureClearProgress? = null,
+    val smartInterfaces: SmartInterfacesState = SmartInterfacesState(),
 ) : Parcelable
+
+/** 由服务读取实际网卡得到；运行标记只表示创建/撤销脚本尚未退出。 */
+@Parcelize
+data class SmartInterfacesState(
+    val addedInterfaces: List<String> = emptyList(),
+    val interfaceCount: Int = 0,
+    val isRunning: Boolean = false,
+) : Parcelable {
+    val enabled: Boolean get() = addedInterfaces.isNotEmpty()
+}
 
 enum class MonitorCaptureClearStage { PREPARING, SWITCHING, FINISHED }
 
@@ -116,6 +127,8 @@ data class MonitorDevice(
     val decryptionStatus: MonitorDecryptionStatus = MonitorDecryptionStatus.PROTOCOL_UNKNOWN,
     val communicationCount: Long = 0L,
     val communicationRevision: Long = 0L,
+    /** 已解析的通信记录数，排除握手记录和仅保存原始流的 TCP 容器。 */
+    val parsedCommunicationCount: Long = 0L,
 ) : Parcelable
 
 @Parcelize

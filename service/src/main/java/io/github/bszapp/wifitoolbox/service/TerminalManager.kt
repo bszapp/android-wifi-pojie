@@ -70,17 +70,24 @@ internal class TerminalManager(
     fun isContainerSystemInstalled(): Boolean =
         isContainerSystemInstalled(File(requireRootfsPath()))
 
-    fun hasRootfsFile(relativePath: String): Boolean {
+    fun hasRootfsFile(relativePath: String): Boolean = resolveRootfsFile(relativePath).isFile
+
+    /** 容器内文件是否包含某段源码；用于开跑前识别尚未更新的容器系统。 */
+    fun rootfsFileContains(relativePath: String, needle: String): Boolean =
+        resolveRootfsFile(relativePath).let { file ->
+            file.isFile && runCatching { file.readText().contains(needle) }.getOrDefault(false)
+        }
+
+    private fun resolveRootfsFile(relativePath: String): File {
         require(relativePath.isNotBlank() && !File(relativePath).isAbsolute) {
             "rootfs 相对路径无效"
         }
         val rootfs = File(requireRootfsPath()).canonicalFile
         val target = File(rootfs, relativePath).canonicalFile
-        val rootPath = rootfs.path
-        require(target.path == rootPath || target.path.startsWith(rootPath + File.separator)) {
+        require(target.path == rootfs.path || target.path.startsWith(rootfs.path + File.separator)) {
             "rootfs 文件路径越界"
         }
-        return target.isFile
+        return target
     }
 
     /** 容器挂载器通过该入口启动挂载进程，不接触库路径或 rootfs 路径。 */

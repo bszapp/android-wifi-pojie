@@ -141,6 +141,7 @@ class WifiListUiState(
 
     fun setWifiListDataSource(source: WifiListDataSource) =
         controller.wifiList.setWifiListDataSource(source)
+    fun toggleSmartInterfaces() = controller.wifiList.toggleSmartInterfaces()
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false) =
         controller.wifiList.setMonitorCapture(enabled, frequencyMhz, hopping)
     fun clearMonitorCapture(handshakesOnly: Boolean) = controller.wifiList.clearMonitorCapture(handshakesOnly)

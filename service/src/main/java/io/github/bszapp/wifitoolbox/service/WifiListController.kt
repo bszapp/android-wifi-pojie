@@ -128,6 +128,15 @@ internal class WifiListController(
 
     )
 
+    private val smartInterfaces: SmartInterfacesController = SmartInterfacesController(
+        terminalManager = terminalManager,
+        canChange = ::isNormalModeTaskReady,
+        onStateChanged = { state -> execute("smartInterfacesState") {
+            publishModeState(modeState.copy(smartInterfaces = state))
+        } },
+        onError = ::reportError,
+    )
+
     private val normalScanner: NormalWifiScanner = NormalWifiScanner(
         androidApi = ::requireAndroidApi,
         hybridScanner = hybridWifiScanner,
@@ -171,7 +180,9 @@ internal class WifiListController(
 
     fun getSavedWifiList(): SavedWifiList? = savedWifiList
 
-    fun getModeState(): WifiModeState = modeState
+    fun getModeState(): WifiModeState = modeState.copy(smartInterfaces = smartInterfaces.refresh())
+
+    fun toggleSmartInterfaces() = smartInterfaces.toggle()
 
     fun isNormalModeTaskReady(): Boolean = environmentConfigured &&
         modeState.mode == WifiMode.NORMAL && !modeOperationInProgress
@@ -1103,7 +1114,8 @@ internal class WifiListController(
             interruptedModeOperation.get() != generation &&
             modeState.mode == mode
 
-    private fun publishModeState(next: WifiModeState) {
+    private fun publishModeState(requested: WifiModeState) {
+        val next = requested.copy(smartInterfaces = smartInterfaces.snapshot())
         val previous = modeState
         modeState = next
         syncNormalScanSelection()
@@ -1145,6 +1157,7 @@ internal class WifiListController(
                     interfaceModePollingFuture = null
                     interfaceModePollingExecutor.shutdownNow()
                     interruptionExecutor.shutdownNow()
+                    smartInterfaces.close()
                     stopped = true
                     executor.shutdown()
                 }
@@ -1160,6 +1173,8 @@ internal class WifiListController(
         if (stopped || interfaceModePollingFuture != null) return
         interfaceModePollingFuture = interfaceModePollingExecutor.scheduleAtFixedRate(
             {
+                if (!stopped) runCatching { smartInterfaces.refresh() }
+                    .onFailure { Log.w(TAG, "检查智能新增网卡失败", it) }
                 if (!stopped && !modeOperationInProgress) {
                     val generation = modeGeneration
                     val detected = runCatching { WirelessInterfaceNetlink.readMode() }

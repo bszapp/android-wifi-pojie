@@ -15,6 +15,7 @@ import io.github.bszapp.wifitoolbox.contract.task.TaskUpdatePayload
 import io.github.bszapp.wifitoolbox.service.AndroidApi
 import io.github.bszapp.wifitoolbox.service.ITaskManagerCallback
 import io.github.bszapp.wifitoolbox.service.TerminalManager
+import io.github.bszapp.wifitoolbox.service.WirelessInterfaceNetlink
 import io.github.bszapp.wifitoolbox.service.wifilog.WifiLogAnalyzer
 import io.github.bszapp.wifitoolbox.service.wifilog.decodeHexSsid
 import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork
@@ -121,6 +122,7 @@ internal class TaskManager(
         val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
             ?: error("安全测试请求类型不正确")
         validateAudit(input)
+        require(input.network.sharedWithRecordId == null) { "共享候选池不能重复提交字典" }
         require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大" }
         val passwords = SecurityAuditDictionaryTransport.read(fd)
         require(passwords.isNotEmpty()) { "字典为空" }
@@ -128,12 +130,6 @@ internal class TaskManager(
             val running = currentTaskId?.let(records::get)
             if (running != null) {
                 check(running.snapshot.request.payload is TaskRequestPayload.SecurityAudit) { "已有其他任务正在运行" }
-                if (running.activeTask == null) {
-                    val first = (running.snapshot.request.payload as TaskRequestPayload.SecurityAudit).input.network.ssid
-                    check(input.network.ssid != first && running.pendingUpdates.none {
-                        (it.payload as? TaskUpdatePayload.SecurityAuditAdd)?.network?.ssid == input.network.ssid
-                    }) { "网络已在运行，不允许更新字典" }
-                }
                 val key = input.network.dictionaryId
                 check(key !in running.auditDictionaries) { "字典已经给定，不允许更新" }
                 running.auditDictionaries[key] = passwords
@@ -141,13 +137,35 @@ internal class TaskManager(
                 val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
                 if (!accepted) {
                     running.auditDictionaries.remove(key)
-                    error("网络已在运行，不允许更新字典；或本批任务已结束")
+                    error("无法将运行记录加入当前批次；或本批任务已结束")
                 }
                 running.snapshot.taskId
             } else {
                 // start 在同一把可重入锁内分配任务；执行器读取字典前会等待该锁释放。
                 createTask(request, input.network.dictionaryId to passwords)
             }
+        }
+    }
+
+    /** 复用运行中记录的字典；公共游标与成员关系由 SecurityAuditTask 持有。 */
+    fun joinSecurityAuditPool(request: TaskStartRequest): Long {
+        val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
+            ?: error("共享候选池请求类型不正确")
+        validateAudit(input)
+        val sourceId = input.network.sharedWithRecordId ?: error("未指定共享来源记录")
+        require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "共享候选池请求元数据过大" }
+        return synchronized(lock) {
+            val running = currentTaskId?.let(records::get)
+                ?: error("没有可共享的运行中安全测试")
+            check(running.snapshot.request.payload is TaskRequestPayload.SecurityAudit) { "当前运行的是其他类型任务" }
+            val source = running.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
+                .firstOrNull { it.id == sourceId && it.active }
+                ?: error("共享来源记录已结束")
+            require(source.input.dictionaryId == input.network.dictionaryId) { "共享字典标识与来源记录不一致" }
+            val update = TaskUpdateRequest(TaskUpdatePayload.SecurityAuditJoin(input.network))
+            val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
+            check(accepted) { "共享候选池已停止接受新记录" }
+            running.snapshot.taskId
         }
     }
 
@@ -361,6 +379,18 @@ internal class TaskManager(
             return@synchronized null
         }
         val active = record.auditNetworks.filter { it.active }
+        // 多线程：按窗口逐行列出每张网卡此刻在做什么，空闲窗口也占一行。
+        val windows = (record.snapshot.progress as? TaskProgress.SecurityAudit)?.windows.orEmpty()
+        if (windows.isNotEmpty()) {
+            val busy = active.filterIsInstance<AuditRecord.Dictionary>()
+                .mapNotNull { entry -> entry.window?.let { it to entry } }.toMap()
+            val body = windows.joinToString("\n") { window ->
+                val job = busy[window]
+                if (job == null) "$window> IDLE"
+                else "$window> ${job.ssid},${job.attemptPassword ?: "?"}"
+            }
+            return "正在进行密码测试\n$body"
+        }
         val current = active.firstOrNull { it.state == SecurityAuditNetworkState.CONNECTING }
         if (!isDictionary) {
             val label = if (current != null) "${current.ssid} · ${current.message}" else "等待冷却"
@@ -400,7 +430,8 @@ internal class TaskManager(
                     dictionary = { key -> synchronized(lock) {
                         records.getValue(taskId).auditDictionaries.remove(key) ?: error("运行字典不存在：$key")
                     } },
-                    worker = SecurityAuditConnectWorker(androidApi, wifiLogAnalyzer, terminalManager))
+                    worker = SecurityAuditConnectWorker(androidApi, wifiLogAnalyzer, terminalManager),
+                    interfaces = ::managedInterfaces)
                 TaskRequestPayload.UsbMonitor -> UsbMonitorTask(terminalManager, acquireUsbMonitor)
                 is TaskRequestPayload.ConnectWifi -> {
                     createConnectionTask(payload.request, androidApi)
@@ -543,8 +574,10 @@ internal class TaskManager(
         if (request.payload is TaskRequestPayload.SecurityAudit) {
             when (val payload = update.payload) {
                 is TaskUpdatePayload.SecurityAuditConfigure -> validateAuditConfig(payload.config)
-                is TaskUpdatePayload.SecurityAuditRemove -> require(payload.ssid.toByteArray().size in 1..32)
+                is TaskUpdatePayload.SecurityAuditStop -> require(payload.recordId.length in 1..64)
                 is TaskUpdatePayload.SecurityAuditAdd -> error("新增网络需要使用字典流接口")
+                is TaskUpdatePayload.SecurityAuditJoin -> error("共享候选池需要使用专用提交接口")
+                is TaskUpdatePayload.SecurityAuditRemove -> error("安全测试停止需要使用运行记录 ID")
                 else -> error("安全测试不支持此更新")
             }
             return
@@ -605,6 +638,7 @@ internal class TaskManager(
     private fun validateAudit(input: SecurityAuditTaskInput) {
         require(input.network.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
         java.util.UUID.fromString(input.network.dictionaryId)
+        input.network.sharedWithRecordId?.let(java.util.UUID::fromString)
         require(input.network.dictionaryNames.isNotEmpty()) { "未选择字典" }
         require(input.network.startIndex >= 0) { "字典起始位置非法" }
         validateAuditConfig(input.config)
@@ -614,9 +648,17 @@ internal class TaskManager(
         check(normalModeTaskReadyProvider()) { "安全测试只能在普通网卡模式运行" }
         require(config.retryCount in 0..6 && config.cooldownBaseMillis in 0..8000) { "重试/冷却配置非法" }
         require(config.macChangeThreshold in 1..5) { "异常时更换的连续重试次数应为 1～5" }
+        // 多线程要多开脚本各占一张网卡，只有网卡方式具备这个条件。
+        require(!config.multithreaded || config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) {
+            "多线程运行仅在测试连通性（网卡）方式下可用"
+        }
         validateConnectionConfig(config.connection)
         if (config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) validateNetworkCardEnvironment()
     }
+
+    /** 可作为普通 Wi-Fi 客户端的网卡；多线程模式下由任务当作可分配的窗口。 */
+    private fun managedInterfaces(): List<String> =
+        runCatching { WirelessInterfaceNetlink.managedInterfaceNames() }.getOrElse { emptyList() }
 
     private fun validateConnectionConfig(config: ConnectWifiTaskConfig) {
         require(config.timeoutMillis > 0L) { "任务超时时间必须大于 0" }
@@ -634,6 +676,10 @@ internal class TaskManager(
         require(terminalManager.isContainerSystemInstalled()) { "容器系统尚未安装" }
         require(terminalManager.hasRootfsFile("wlantool/managed_connect.py")) {
             "容器缺少 managed_connect.py，请更新容器系统"
+        }
+        // 脚本靠 --interface 指定网卡；旧容器不认识这个参数，直接开跑会以参数错误退出。
+        require(terminalManager.rootfsFileContains("wlantool/managed_connect.py", "'--interface'")) {
+            "容器系统版本过旧，managed_connect.py 尚不支持指定网卡，请更新容器系统"
         }
     }
 

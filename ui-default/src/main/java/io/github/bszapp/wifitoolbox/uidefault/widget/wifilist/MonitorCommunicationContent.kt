@@ -12,6 +12,7 @@ internal fun decryptionStatusText(value: MonitorDecryptionStatus): String = when
     MonitorDecryptionStatus.SECURE -> "该网络传输的数据是安全的"
     MonitorDecryptionStatus.UNSUPPORTED -> "当前不支持解密设备实际使用的协议或密码套件"
     MonitorDecryptionStatus.LOADING -> "加载中"
+    MonitorDecryptionStatus.PLAINTEXT -> "明文通信可直接解析，无需密码或四次握手"
 }
 
 internal fun deviceProtocolText(value: MonitorDeviceProtocol): String = when (value) {
@@ -22,4 +23,5 @@ internal fun deviceProtocolText(value: MonitorDeviceProtocol): String = when (va
     MonitorDeviceProtocol.SAE -> "设备实际协议：SAE（WPA3）"
     MonitorDeviceProtocol.OWE -> "设备实际协议：OWE"
     MonitorDeviceProtocol.OTHER -> "设备实际使用其他认证协议"
+    MonitorDeviceProtocol.OPEN -> "设备实际协议：Open（传统开放式）"
 }

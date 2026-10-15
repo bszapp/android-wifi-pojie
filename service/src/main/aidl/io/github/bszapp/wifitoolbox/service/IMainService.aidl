@@ -120,10 +120,12 @@ interface IMainService {
     long getContainerVersionCode();
     // 字典只走流，事务编号追加；网络快照按最多 100 项分页。
     long runSecurityAudit(in TaskStartRequest request, in ParcelFileDescriptor dictionary);
+    long joinSecurityAuditPool(in TaskStartRequest request);
     ParcelFileDescriptor getSecurityAuditNetworks(long taskId, int fromIndex);
     long[] getSecurityAuditTaskIds(int offset);
     // width / height / sensorOrientation；只传 Surface 句柄，不传视频字节。
     int[] getRearCameraConfiguration();
     void startCameraPreview(String sessionId, in Surface preview, in Surface analysis, ICameraPreviewCallback callback);
     void stopCameraPreview(String sessionId);
+    void toggleSmartInterfaces();
 }

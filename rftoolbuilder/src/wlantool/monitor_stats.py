@@ -1775,10 +1775,17 @@ class CaptureAnalysis:
         return copy.deepcopy(self)
 
     def consume_communication(self, bssid, mac, decoded, direction, timestamp, event_writer):
+        point = self.access_points[bssid]
+        device = point["devices"].setdefault(mac, empty_device(mac))
+        session = self.decoder.sessions.get((bssid, mac))
+        if session is not None:
+            device["protocol"], device["decryptionStatus"] = session["protocol"], session["status"]
+        self.dirty_access_points.add(bssid)
+        self.dirty_devices.add((bssid, mac))
         name = (self.decoder.consume_network(decoded, bssid, mac, direction, timestamp, event_writer)
                 if self.decode_communications else dhcp_device_name(decoded, mac))
         if name:
-            update_device_identity(self.access_points[bssid]["devices"][mac], name, 35)
+            update_device_identity(device, name, 35)
             previous = self.device_identities.get(mac)
             if previous is None or previous[1] < 35:
                 self.device_identities[mac] = (name, 35)
@@ -1791,8 +1798,6 @@ class CaptureAnalysis:
         if relation is not None:
             bssid, mac, direction = relation
             decoded = self.decoder.cleartext(packet, bssid, mac, direction) or ()
-            if packet.haslayer(DHCP):
-                decoded = (packet,)
             return [(bssid, mac, value, direction) for value in decoded if dhcp_device_name(value, mac)]
         dot = packet.getlayer(Dot11)
         transmitter = normalized_unicast_mac(dot.addr2) if dot else None
@@ -1987,8 +1992,6 @@ class CaptureAnalysis:
                 self.decoder.queue_packet(packet, bssid, device_mac, direction, packet_timestamp)
         decoded_packets = ([value for _, _, value, _ in decoded_dhcp] if decoded_dhcp is not None
                            else self.decoder.cleartext(packet, bssid, device_mac, direction) or ())
-        if packet.haslayer(DHCP):
-            decoded_packets = (packet,)
         for decoded in decoded_packets:
             keep_dhcp |= self.consume_communication(bssid, device_mac, decoded, direction, packet_timestamp, event_writer)
         if direction == "upload" and subtype_id != "data.eapol":

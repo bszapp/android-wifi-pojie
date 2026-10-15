@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.cmac import CMAC
 from cryptography.hazmat.decrepit.ciphers.algorithms import ARC4
 from scapy.layers.dhcp import BOOTP, DHCP
 from scapy.layers.dns import DNS
-from scapy.layers.dot11 import Dot11, Dot11Elt, Dot11FCS
+from scapy.layers.dot11 import Dot11, Dot11AssoReq, Dot11ReassoReq, Dot11Elt, Dot11FCS
 from scapy.layers.eap import EAPOL
 from scapy.layers.inet import IP, TCP, UDP, ICMP
 from scapy.layers.inet6 import IPv6
@@ -116,7 +116,20 @@ def selected_security(packet):
     dot = packet.getlayer(Dot11)
     if dot is None or int(dot.type) != 0 or int(dot.subtype) not in (0, 2):
         return None
-    return selected_security_elements(elements(packet))
+    values = tuple(elements(packet))
+    selected = selected_security_elements(values)
+    if selected is not None:
+        return selected
+    association = packet.getlayer(Dot11AssoReq) or packet.getlayer(Dot11ReassoReq)
+    fixed_length = 4 if int(dot.subtype) == 0 else 10
+    raw = bytes(association) if association is not None else b""
+    if (len(raw) >= fixed_length and not int.from_bytes(raw[:2], "little") & 0x10 and
+            sum(2 + len(value) for _, value in values) == len(raw) - fixed_length and
+            any(kind == 0 and len(value) <= 32 for kind, value in values) and
+            not any(kind == 48 or (kind == 221 and value.startswith(b"\x00\x50\xf2\x01"))
+                    for kind, value in values)):
+        return "open", None, None
+    return None
 
 
 def selected_security_elements(values):
@@ -210,7 +223,7 @@ def frame_parts(packet):
         header_len += 2
         if fc & 0x8000:
             header_len += 4
-    if len(raw) < header_len + 8:
+    if len(raw) < header_len + (8 if fc & 0x4000 else 1):
         return None
     destination = raw[16:22] if ds in (1, 3) else raw[4:10]
     source = raw[24:30] if ds == 3 else raw[16:22] if ds == 2 else raw[10:16]
@@ -392,10 +405,16 @@ class CommunicationDecoder:
             if selected:
                 # Association supplies cipher context; M2 confirms the actual AKM.
                 _, session["cipher"], session["groupCipher"] = selected
+                if selected[0] == "open":
+                    session["protocol"] = "open"
+        if eapol or (int(dot.type) == 2 and int(dot.FCfield) & 0x40):
+            session["plaintextObserved"] = False
+            if session["protocol"] == "open":
+                session["protocol"] = "unknown"
         record = device["activeHandshake"]
         if record is None and device["handshakes"]:
             record = device["handshakes"][-1]
-        if record is not None:
+        if record is not None and session["protocol"] != "open":
             if session["handshakeId"] != record["id"]:
                 if session["handshakeId"] is not None:
                     session.update(protocol="unknown", cipher=None, groupCipher=None)
@@ -415,6 +434,9 @@ class CommunicationDecoder:
                     session.update(protocol="unknown", cipher=None)
         if session["protocol"] in ("sae", "owe"):
             session["status"] = "secure"
+        elif int(dot.type) == 2 and not int(dot.FCfield) & 0x40 and not eapol and session["protocol"] == "unknown":
+            # The payload path confirms usable plaintext; no password IPC is needed.
+            session["status"] = "plaintext" if session.get("plaintextObserved") else "protocolUnknown"
         else:
             self.prepare_key(session, access_point.get("ssidBytes"), bssid, mac, credential_store, writer)
         if session["status"] == "ready" and str(dot.addr2).lower() == bssid:
@@ -436,6 +458,11 @@ class CommunicationDecoder:
         return session
 
     def prepare_key(self, session, ssid, bssid, mac, store, writer):
+        if session["protocol"] == "open" or (session["protocol"] == "unknown" and session.get("plaintextObserved")):
+            session["status"] = "plaintext"
+            session["ptk"] = None
+            session["credential"] = None
+            return
         if session["protocol"] == "other":
             session["status"] = "unsupported"
             return
@@ -548,43 +575,54 @@ class CommunicationDecoder:
         except (ValueError, InvalidUnwrap):
             pass
 
+    def observe_plaintext(self, bssid, mac):
+        session = self.session(bssid, mac)
+        if session["protocol"] in ("unknown", "open"):
+            session["plaintextObserved"] = True
+            session["status"] = "plaintext"
+
     def cleartext(self, packet, bssid, mac, direction):
         dot = packet.getlayer(Dot11)
-        if dot is None or int(dot.type) != 2 or not int(dot.FCfield) & 0x40:
-            return None
-        session = self.sessions.get((bssid, mac))
-        if session is None or session["status"] != "ready":
+        if dot is None or int(dot.type) != 2 or int(dot.subtype) & 4:
             return None
         parts = frame_parts(packet)
         if parts is None:
             return None
         raw, fc, offset, priority, amsdu, _, destination, source = parts
-        group = bool(raw[4] & 1)
-        ptk = session["ptk"]
-        cipher, key = session["cipher"], ptk[32:48]
-        mic_key = ptk[48:56] if direction == "download" else ptk[56:64]
-        if group:
-            value = self.group_keys.get((bssid, raw[offset + 3] >> 6))
-            if value is None:
+        protected = bool(fc & 0x4000)
+        cipher, mic_key = None, None
+        if not protected:
+            clear = raw[offset:]
+        else:
+            session = self.sessions.get((bssid, mac))
+            if session is None or session["status"] != "ready":
                 return None
-            cipher, gtk = value
-            key, mic_key = gtk[:16], gtk[16:24]
-        decrypted = None
-        for candidate in (("ccmp", "gcmp") if cipher is None else (cipher,)):
-            try:
-                decrypted = decrypt_frame(packet, key, candidate, mic_key)
-            except (InvalidTag, ValueError, IndexError, struct.error):
-                continue
-            if decrypted is not None:
-                cipher = candidate
-                if not group:
-                    session["cipher"] = candidate
-                break
-        if decrypted is None:
-            return None
-        clear = decrypted[0]
+            group = bool(raw[4] & 1)
+            ptk = session["ptk"]
+            cipher, key = session["cipher"], ptk[32:48]
+            mic_key = ptk[48:56] if direction == "download" else ptk[56:64]
+            if group:
+                value = self.group_keys.get((bssid, raw[offset + 3] >> 6))
+                if value is None:
+                    return None
+                cipher, gtk = value
+                key, mic_key = gtk[:16], gtk[16:24]
+            decrypted = None
+            for candidate in (("ccmp", "gcmp") if cipher is None else (cipher,)):
+                try:
+                    decrypted = decrypt_frame(packet, key, candidate, mic_key)
+                except (InvalidTag, ValueError, IndexError, struct.error):
+                    continue
+                if decrypted is not None:
+                    cipher = candidate
+                    if not group:
+                        session["cipher"] = candidate
+                    break
+            if decrypted is None:
+                return None
+            clear = decrypted[0]
         fragment = int(dot.SC) & 15
-        frag_key = (bssid, mac, raw[10:16], priority, int(dot.SC) >> 4)
+        frag_key = (bssid, mac, raw[10:16], priority, int(dot.SC) >> 4, protected)
         if fragment or fc & 0x400:
             fragments = self.fragments.get(frag_key)
             if fragments is None or time.monotonic() - fragments["lastSeen"] > 2.0:
@@ -609,20 +647,27 @@ class CommunicationDecoder:
             if len(clear) < 8 or len(mic_key) != 8 or not hmac.compare_digest(bytes(michael(mic_key, destination + source + bytes((priority, 0, 0, 0)) + clear[:-8])), clear[-8:]):
                 return None
             clear = clear[:-8]
+        packets = []
         if not amsdu:
-            return [LLC(clear)]
-        packets, offset = [], 0
-        while offset + 14 <= len(clear):
-            size = int.from_bytes(clear[offset + 12:offset + 14], "big")
-            end = offset + 14 + size
-            if end > len(clear):
-                break
-            packets.append(LLC(clear[offset + 14:end]))
-            offset = (end + 3) & ~3
+            packets.append(LLC(clear))
+        else:
+            offset = 0
+            while offset + 14 <= len(clear):
+                size = int.from_bytes(clear[offset + 12:offset + 14], "big")
+                end = offset + 14 + size
+                if end > len(clear):
+                    break
+                packets.append(LLC(clear[offset + 14:end]))
+                offset = (end + 3) & ~3
+        if not protected:
+            # EAPOL, null data and arbitrary payloads do not establish plaintext communication.
+            packets = [value for value in packets if any(value.haslayer(layer) for layer in (ARP, IP, IPv6))]
+            if packets and mac is not None:
+                self.observe_plaintext(bssid, mac)
         return packets
 
     def group_packets(self, packet, access_point):
-        """Decode group DHCP using GTK, then attribute it using BOOTP chaddr."""
+        """Decode plaintext or GTK-protected group DHCP; attribute by BOOTP chaddr."""
         dot = packet.getlayer(Dot11)
         if dot is None or int(dot.type) != 2 or str(dot.addr2).lower() != access_point["bssid"]:
             return ()
@@ -632,18 +677,27 @@ class CommunicationDecoder:
         except (ValueError, IndexError):
             return ()
         bssid = access_point["bssid"]
-        mac = self.group_clients.get(bssid)
-        if not mac:
+        protected = bool(int(dot.FCfield) & 0x40)
+        mac = self.group_clients.get(bssid) if protected else None
+        if protected and not mac:
             return ()
         decoded = self.cleartext(packet, bssid, mac, "download") or ()
         result = []
         for value in decoded:
             bootp = value.getlayer(BOOTP)
-            if bootp is None:
+            if bootp is None or not value.haslayer(DHCP) or int(bootp.htype) != 1 or int(bootp.hlen) != 6:
                 continue
-            target = ":".join(f"{byte:02x}" for byte in bytes(bootp.chaddr)[:6])
+            address = bytes(bootp.chaddr)[:6]
+            if len(address) != 6 or address[0] & 1 or not any(address):
+                continue
+            target = ":".join(f"{byte:02x}" for byte in address)
+            if target == bssid:
+                continue
             session = self.sessions.get((bssid, target))
-            if target in access_point["devices"] and session and session["status"] == "ready":
+            if not protected:
+                self.observe_plaintext(bssid, target)
+                result.append((target, value))
+            elif target in access_point["devices"] and session and session["status"] == "ready":
                 result.append((target, value))
         return result
 

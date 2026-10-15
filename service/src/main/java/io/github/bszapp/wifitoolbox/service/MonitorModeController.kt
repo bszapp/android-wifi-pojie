@@ -457,7 +457,8 @@ internal class MonitorModeController(
             if (point != null && device != null) {
                 store.identity(bssid, mac, point.ssid, device.name)
                 val (count, revision) = store.summary(bssid, mac)
-                val updated = device.copy(communicationCount = count, communicationRevision = revision)
+                val updated = device.copy(communicationCount = count, communicationRevision = revision,
+                    parsedCommunicationCount = store.parsedCount(bssid, mac))
                 point.devices[mac] = updated
                 mirror.changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, updated))
             }
@@ -780,7 +781,8 @@ internal class MonitorModeController(
                     activeMirror.accessPoints.forEach { (bssid, point) ->
                         point.devices.toMap().forEach { (mac, device) ->
                             val (count, revision) = communicationStore?.summary(bssid, mac) ?: (0L to 0L)
-                            val updated = device.copy(communicationCount = count, communicationRevision = revision)
+                            val updated = device.copy(communicationCount = count, communicationRevision = revision,
+                                parsedCommunicationCount = communicationStore?.parsedCount(bssid, mac) ?: 0L)
                             point.devices[mac] = updated
                             activeMirror.changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, updated))
                         }
@@ -921,6 +923,7 @@ internal class MonitorModeController(
                             ),
                             probeOnly = deviceJson.optBoolean("probeOnly", false),
                             protocol = when (deviceJson.optString("protocol")) {
+                                "open" -> MonitorDeviceProtocol.OPEN
                                 "wpaPsk" -> MonitorDeviceProtocol.WPA_PSK
                                 "wpa2Psk" -> MonitorDeviceProtocol.WPA2_PSK
                                 "wpa2PskSha256" -> MonitorDeviceProtocol.WPA2_PSK_SHA256
@@ -930,6 +933,7 @@ internal class MonitorModeController(
                                 else -> MonitorDeviceProtocol.UNKNOWN
                             },
                             decryptionStatus = when (deviceJson.optString("decryptionStatus")) {
+                                "plaintext" -> MonitorDecryptionStatus.PLAINTEXT
                                 "noPassword" -> MonitorDecryptionStatus.NO_PASSWORD
                                 "passwordMismatch" -> MonitorDecryptionStatus.PASSWORD_MISMATCH
                                 "incompleteHandshake" -> MonitorDecryptionStatus.INCOMPLETE_HANDSHAKE
@@ -941,6 +945,7 @@ internal class MonitorModeController(
                             },
                             communicationCount = communicationCount,
                             communicationRevision = communicationRevision,
+                            parsedCommunicationCount = if (mirror === activeMirror) communicationStore?.parsedCount(bssid, mac) ?: 0L else 0L,
                         )
                         if (mirror === activeMirror) communicationStore?.identity(bssid, mac, accessPoint.ssid, accessPoint.devices.getValue(mac).name)
                         changes.put("device:$bssid:$mac", MonitorChange.Device(bssid, accessPoint.devices.getValue(mac)))

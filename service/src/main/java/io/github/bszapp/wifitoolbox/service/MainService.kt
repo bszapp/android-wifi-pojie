@@ -431,6 +431,10 @@ open class MainService(
         )
     }
 
+    override fun toggleSmartInterfaces() = communication.callFromApp {
+        wifiListController.toggleSmartInterfaces()
+    }
+
     override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) = communication.callFromApp {
         wifiListController.setMonitorCapture(enabled, frequencyMhz, hopping)
     }
@@ -602,6 +606,9 @@ open class MainService(
 
     override fun runSecurityAudit(request: TaskStartRequest, dictionary: ParcelFileDescriptor): Long =
         communication.callFromApp { dictionary.use { taskManager.runSecurityAudit(request, it) } }
+
+    override fun joinSecurityAuditPool(request: TaskStartRequest): Long =
+        communication.callFromApp { taskManager.joinSecurityAuditPool(request) }
 
     override fun getSecurityAuditNetworks(taskId: Long, fromIndex: Int): ParcelFileDescriptor =
         communication.callFromApp {

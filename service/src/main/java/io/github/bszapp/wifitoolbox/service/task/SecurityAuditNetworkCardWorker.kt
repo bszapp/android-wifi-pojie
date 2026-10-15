@@ -19,11 +19,18 @@ import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
-/** 安全测试专用网卡执行器：一个任务持有一个 Python/FIFO 会话，逐轮发送连接配置。 */
+/** 安全测试专用网卡执行器：一个实例对应一张网卡，持有自己的 Python/FIFO 会话，逐轮发送连接配置。 */
 internal class SecurityAuditNetworkCardWorker(
     private val terminalManager: TerminalManager,
     private val deviceName: () -> String,
+    /** 本会话固定使用的网卡；多线程下每张可分配网卡各开一个这样的实例。 */
+    val interfaceName: String,
 ) {
+    init {
+        // 该值会原样拼进 chroot 里的 shell 命令，只接受内核网卡名（IFNAMSIZ 15 字节、无空白）。
+        require(interfaceName.matches(INTERFACE_NAME)) { "非法网卡名：$interfaceName" }
+    }
+
     @Volatile private var session: Session? = null
 
     /** mac 由调度器按 MAC 策略在每次连接前决定；null 表示本轮使用设备原 MAC。 */
@@ -56,7 +63,7 @@ internal class SecurityAuditNetworkCardWorker(
         }
         current.activeRequestId = requestId
         sendCommand(current, request)
-        context.log("向持久网卡会话提交连接请求：ssid=$ssid requestId=$requestId")
+        context.log("向持久网卡会话提交连接请求：iface=$interfaceName ssid=$ssid requestId=$requestId")
 
         var result = ConnectionAttemptResult.ERROR
         var exitCode: Int? = null
@@ -224,7 +231,7 @@ internal class SecurityAuditNetworkCardWorker(
             if (!current.exited) return current
             closeSession(context)
         }
-        context.log("创建持久网卡脚本会话")
+        context.log("创建持久网卡脚本会话：iface=$interfaceName")
         context.updateProgress(TaskProgress.ConnectWifi(ConnectWifiStage.ROUTER_COMMUNICATION))
         val current = Session()
         session = current
@@ -242,7 +249,7 @@ internal class SecurityAuditNetworkCardWorker(
             current.input = FileInputStream(Os.open(eventFifo.absolutePath, OsConstants.O_RDWR, 0))
             current.writer = FileOutputStream(Os.open(commandFifo.absolutePath, OsConstants.O_RDWR, 0))
                 .writer(Charsets.UTF_8).buffered()
-            current.readerThread = Thread({ readEvents(current) }, "security-audit-network-card-fifo").also {
+            current.readerThread = Thread({ readEvents(current) }, "security-audit-$interfaceName-fifo").also {
                 it.isDaemon = true
                 it.start()
             }
@@ -253,12 +260,14 @@ internal class SecurityAuditNetworkCardWorker(
                 },
             )
             current.terminalId = terminalId
-            context.log("安全测试网卡脚本终端已启动：terminalId=$terminalId commandFifoId=${current.commandFifoId} eventFifoId=${current.eventFifoId}")
+            context.log("安全测试网卡脚本终端已启动：terminalId=$terminalId iface=$interfaceName " +
+                "commandFifoId=${current.commandFifoId} eventFifoId=${current.eventFifoId}")
             val commandPath = "/tmp/wlantool-ipc/${current.sessionId}/${current.commandFifoId}"
             val eventPath = "/tmp/wlantool-ipc/${current.sessionId}/${current.eventFifoId}"
             terminalManager.writeInput(
                 terminalId,
-                "exec python managed_connect.py --command-pipe $commandPath --event-pipe $eventPath",
+                "exec python managed_connect.py --interface $interfaceName " +
+                    "--command-pipe $commandPath --event-pipe $eventPath",
             )
             val readyDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
             while (true) {
@@ -439,5 +448,6 @@ internal class SecurityAuditNetworkCardWorker(
     private companion object {
         const val SCRIPT_READY = "[*] Managed Wi-Fi diagnostic ready (protocol=2)"
         val LOG_PREFIXES = listOf("[*] ", "[-] ", "[+] ")
+        val INTERFACE_NAME = Regex("[A-Za-z0-9_.-]{1,15}")
     }
 }
