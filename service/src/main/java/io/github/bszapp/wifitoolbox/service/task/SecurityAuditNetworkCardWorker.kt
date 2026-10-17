@@ -60,6 +60,7 @@ internal class SecurityAuditNetworkCardWorker(
             put("maxHandshakeAttempts", connection.failureFlags.handshakeAttemptsExceeded
                 ?.maxHandshakeAttempts ?: JSONObject.NULL)
             put("passwordError", connection.failureFlags.passwordError)
+            put("handshakeOnly", true)
         }
         current.activeRequestId = requestId
         sendCommand(current, request)

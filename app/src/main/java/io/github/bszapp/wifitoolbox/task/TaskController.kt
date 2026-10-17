@@ -193,16 +193,17 @@ class TaskController(
         }
     }
 
-    override suspend fun runSecurityAudit(input: SecurityAuditTaskInput, dictionary: File): Long = withContext(Dispatchers.IO) {
+    override suspend fun runSecurityAudit(input: SecurityAuditTaskInput, dictionary: File, taskCount: Int): Long = withContext(Dispatchers.IO) {
         val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
         var accepted = false
         try {
             check(isCurrent(binding)) { "服务未连接" }
+            require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
             val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
             require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大，请减少字典选择" }
             auditStore.saveDictionary(input.network.dictionaryId, dictionary)
             val id = SecurityAuditDictionaryTransport.open(dictionary).use { fd ->
-                binding.service.runSecurityAudit(request, fd)
+                binding.service.runSecurityAuditRecords(request, fd, taskCount)
             }
             accepted = true
             val snapshot = binding.service.getTaskSnapshot(id)
@@ -211,9 +212,13 @@ class TaskController(
             }
             updateState(binding) { current ->
                 current.copy(currentTaskId = currentTaskId, tasks = current.tasks +
-                    (id to (current.tasks[id]?.copy(snapshot = snapshot) ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))))
+                    (id to (current.tasks[id]?.copy(snapshot = snapshot)
+                        ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))))
             }
-            synchronized(binding.pendingLock) { binding.pendingTaskIds += id; binding.pendingLogIds += id }
+            synchronized(binding.pendingLock) {
+                binding.pendingTaskIds += id
+                binding.pendingLogIds += id
+            }
             binding.signal.trySend(Unit)
             id
         } catch (error: Throwable) {
@@ -223,22 +228,27 @@ class TaskController(
         }
     }
 
-    override suspend fun joinSecurityAuditPool(input: SecurityAuditTaskInput): Long = withContext(Dispatchers.IO) {
+    override suspend fun joinSecurityAuditPool(input: SecurityAuditTaskInput, taskCount: Int): Long = withContext(Dispatchers.IO) {
         val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
         try {
             check(isCurrent(binding)) { "服务未连接" }
+            require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
             val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
             require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "共享候选池请求元数据过大" }
-            val id = binding.service.joinSecurityAuditPool(request)
+            val id = binding.service.joinSecurityAuditRecords(request, taskCount)
             val snapshot = binding.service.getTaskSnapshot(id)
             val currentTaskId = synchronized(binding.pendingLock) {
                 binding.service.getCurrentTaskId().takeIf { it > 0L }.also { binding.currentTaskId = it }
             }
             updateState(binding) { current ->
                 current.copy(currentTaskId = currentTaskId, tasks = current.tasks +
-                    (id to (current.tasks[id]?.copy(snapshot = snapshot) ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))))
+                    (id to (current.tasks[id]?.copy(snapshot = snapshot)
+                        ?: TrackedTaskState(snapshot, TaskLogState(scopeTaskId = id)))))
             }
-            synchronized(binding.pendingLock) { binding.pendingTaskIds += id; binding.pendingLogIds += id }
+            synchronized(binding.pendingLock) {
+                binding.pendingTaskIds += id
+                binding.pendingLogIds += id
+            }
             binding.signal.trySend(Unit)
             id
         } catch (error: Throwable) {
@@ -348,7 +358,8 @@ class TaskController(
             }
         }
         val requestedIds = pending.first
-        requestedIds.sorted().forEach { taskId ->
+        val currentId = synchronized(binding.pendingLock) { binding.currentTaskId }
+        requestedIds.sortedWith(compareByDescending<Long> { it == currentId }.thenBy { it }).forEach { taskId ->
             if (!isCurrent(binding)) return
             runCatching {
                 val snapshot = service.getTaskSnapshot(taskId)
@@ -441,7 +452,15 @@ class TaskController(
                     val old = state.tasks[taskId] ?: return@updateState state
                     state.copy(tasks = state.tasks + (taskId to old.copy(auditNetworks = records.toList())))
                 }
-                auditStore.merge(records)
+                val activeDictionaryIds = _state.value.tasks.values.asSequence()
+                    .filter { it.snapshot.state == TaskExecutionState.RUNNING }
+                    .flatMap { it.auditNetworks.asSequence() }
+                    .filterIsInstance<AuditRecord.Dictionary>()
+                    .filter { it.active }
+                    .map { it.input.dictionaryId }
+                    .toSet()
+                binding.auditHistoryRevisions[taskId] = auditStore.merge(
+                    records, binding.auditHistoryRevisions[taskId] ?: 0L, activeDictionaryIds)
                 binding.auditRevisions[taskId] = pageRevision ?: 0
                 return
             }
@@ -581,6 +600,7 @@ class TaskController(
         val pendingTaskIds: MutableSet<Long> = mutableSetOf(),
         val pendingLogIds: MutableSet<Long> = mutableSetOf(),
         val auditRevisions: MutableMap<Long, Long> = mutableMapOf(),
+        val auditHistoryRevisions: MutableMap<Long, Long> = mutableMapOf(),
         var globalLogsDirty: Boolean = false,
         var currentTaskId: Long? = null,
         @Volatile var registered: Boolean = false,

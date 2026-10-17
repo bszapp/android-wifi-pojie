@@ -53,6 +53,8 @@ import io.github.bszapp.wifitoolbox.contract.task.AuditRecord
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.TaskRequestPayload
+import io.github.bszapp.wifitoolbox.contract.task.TaskExecutionState
+import io.github.bszapp.wifitoolbox.uidefault.securityaudit.label
 import io.github.bszapp.wifitoolbox.contract.wifilist.WifiState
 import io.github.bszapp.wifitoolbox.contract.wifilist.SystemScanData
 import io.github.bszapp.wifitoolbox.contract.wifilist.scanResults
@@ -104,6 +106,7 @@ fun WifiList(
     val currentTask by vm.currentTask.collectAsStateWithLifecycle()
     val submode by vm.securityAudit.submode.collectAsStateWithLifecycle()
     val auditBatch by vm.securityAudit.batch.collectAsStateWithLifecycle()
+    val auditTasks by vm.securityAudit.auditTasks.collectAsStateWithLifecycle()
     val auditHistory by vm.securityAudit.history.collectAsStateWithLifecycle()
     val wpsAuditMode = modeState?.mode == WifiMode.NORMAL &&
         submode == io.github.bszapp.wifitoolbox.uidefault.model.NormalWifiSubmode.WPS_SECURITY_AUDIT
@@ -159,7 +162,10 @@ fun WifiList(
     val capturedMetadata = remember(capturedAccessPoints) {
         capturedAccessPoints.map { it.copy(devices = emptyList()) }
     }
-    val runningAuditNetworks = auditBatch?.auditNetworks.orEmpty().filter { it.active && it.kind == auditKind }
+    val dictionaryAuditNetworks = auditTasks.filter { it.snapshot.state == TaskExecutionState.RUNNING }
+        .flatMap { it.auditNetworks }.filterIsInstance<AuditRecord.Dictionary>().filter { it.active }
+    val runningAuditNetworks = if (wpsAuditMode) auditBatch?.auditNetworks.orEmpty()
+        .filter { it.active && it.kind == auditKind } else dictionaryAuditNetworks
     val groups = remember(scanResults, savedNetworks, connection, capturedMetadata, modeState?.mode, auditMode, runningAuditNetworks) {
         val scanned = MergedWifiGroup.buildFrom(
             results = scanResults,
@@ -168,11 +174,12 @@ fun WifiList(
             capturedAccessPoints = if (modeState?.mode == WifiMode.MONITOR) capturedMetadata else emptyList(),
         )
         if (!auditMode) scanned else {
-            val missing = runningAuditNetworks.filter { entry -> scanned.none { it.ssid == entry.ssid } }.map { entry ->
+            val missing = runningAuditNetworks.filter { entry -> scanned.none { it.ssid == entry.ssid } }
+                .distinctBy { it.ssid }.map { entry ->
                 MergedWifiGroup(entry.ssid, emptyList(), savedNetworks.filter { it.SSID?.removeSurrounding("\"") == entry.ssid }, null, null)
             }
             val all = scanned + missing
-            runningAuditNetworks.mapNotNull { entry -> all.firstOrNull { it.ssid == entry.ssid } } +
+            runningAuditNetworks.distinctBy { it.ssid }.mapNotNull { entry -> all.firstOrNull { it.ssid == entry.ssid } } +
                 scanned.filter { group -> runningAuditNetworks.none { it.ssid == group.ssid } }
         }
     }.distinctBy { it.ssid }
@@ -234,18 +241,31 @@ fun WifiList(
                 contentPadding = contentPadding,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                currentTask?.let { task ->
+                auditTasks.filter { it.snapshot.state == TaskExecutionState.RUNNING }.forEach { tracked ->
+                    val activeRecords = tracked.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
+                        .filter { it.active }
+                    item(key = "running-audit-task-${tracked.snapshot.taskId}") {
+                        RunningTaskCard(taskId = tracked.snapshot.taskId,
+                            title = "安全测试运行中",
+                            stage = if (activeRecords.isEmpty()) "准备测试"
+                                else "正在测试 ${activeRecords.size} 项",
+                            onClick = { vm.displayTask(tracked.snapshot.taskId) })
+                    }
+                }
+                currentTask?.takeUnless { it.request.payload is TaskRequestPayload.SecurityAudit }?.let { task ->
                     item(key = "running-task-${task.taskId}") {
                         RunningTaskCard(
                             taskId = task.taskId,
+                            title = if (task.request.payload is TaskRequestPayload.WpsSecurityAudit)
+                                "WPS 安全测试运行中" else "任务运行中 · #${task.taskId}",
                             stage = when (val progress = task.progress) {
                                 is TaskProgress.ConnectWifi -> progress.stage.name.toTaskStageText()
                                 is TaskProgress.WpsPbc ->
                                     "WPS-PBC · 已获取 ${progress.networkCount} 个网络"
                                 is TaskProgress.UsbMonitor -> "电脑控制"
                                 is TaskProgress.WpsPin -> "WPS PIN · 已获取 ${progress.networkCount} 个网络"
-                                is TaskProgress.SecurityAudit -> "网络安全测试 · ${progress.networkCount} 个网络"
-                                is TaskProgress.WpsSecurityAudit -> "WPS 安全测试 · ${progress.networkCount} 个网络"
+                                is TaskProgress.SecurityAudit -> "网络安全测试"
+                                is TaskProgress.WpsSecurityAudit -> "正在测试 ${progress.networkCount} 个网络"
                                 null -> "加载中"
                             },
                             onClick = {
@@ -271,6 +291,7 @@ fun WifiList(
                 groups.forEach { group ->
                     item(key = group.ssid) {
                         val auditRecord = auditBatch?.auditNetworks?.lastOrNull { it.ssid == group.ssid && it.kind == auditKind }
+                        val hasAuditHistory = auditMode && auditHistory.any { it.ssid == group.ssid && it.kind == auditKind }
                         Column(Modifier.animateItem()) {
                         WifiGroupCard(
                                 vm = vm,
@@ -280,6 +301,7 @@ fun WifiList(
                                 discoveredHiddenNameCount =
                                     discoveredHiddenNameCount.takeIf { group.ssid.isBlank() } ?: 0,
                                 auditMode = auditMode,
+                                hasAuditHistory = hasAuditHistory,
                                 auditRunning = wpsAuditMode && auditRecord?.active == true && group.ssid.isNotEmpty(),
                                 allowWpsPin = modeState?.mode == WifiMode.NORMAL,
                                 onClick = {
@@ -290,8 +312,7 @@ fun WifiList(
                                     if (auditMode) {
                                         if (wpsAuditMode && auditRecord?.active == true && group.ssid.isNotEmpty()) vm.securityAudit.stopNetwork(group.ssid, (auditRecord as? AuditRecord.Wps)?.mac)
                                         else if (wpsAuditMode) vm.securityAudit.openWpsNetwork(
-                                            group.ssid, group.savedWifiList.isNotEmpty(),
-                                            group.networks.any { it.supportsWps() }, group.networks)
+                                            group.ssid, group.savedWifiList.isNotEmpty(), group.networks)
                                         else vm.securityAudit.openNetwork(group.ssid, group.savedWifiList.isNotEmpty())
                                         return@WifiGroupCard
                                     }
@@ -311,10 +332,6 @@ fun WifiList(
                                 },
                         )
                         if (auditMode) {
-                            val previous = auditHistory.firstOrNull { it.ssid == group.ssid && it.kind == auditKind }
-                            if (previous != null) Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                                TagItem(if (wpsAuditMode) "WPS 有历史" else "有历史", style = TagStyle.Secondary)
-                            }
                             if (wpsAuditMode) {
                                 auditBatch?.auditNetworks?.filterIsInstance<AuditRecord.Wps>()
                                     ?.filter { it.ssid == group.ssid && it.active }?.forEach { entry ->
@@ -324,11 +341,14 @@ fun WifiList(
                                 }
                                 }
                             } else {
-                                auditBatch?.auditNetworks?.filterIsInstance<AuditRecord.Dictionary>()
-                                    ?.filter { it.ssid == group.ssid && it.active }?.forEach { record ->
-                                        io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(record) {
-                                            vm.securityAudit.stopRecord(record.id)
-                                        }
+                                dictionaryAuditNetworks
+                                    ?.filter { it.ssid == group.ssid }
+                                    ?.groupBy { it.groupId ?: it.id }?.values
+                                    ?.filter { members -> members.any { it.active } }
+                                    ?.forEach { members ->
+                                        io.github.bszapp.wifitoolbox.uidefault.securityaudit.AuditNetworkProgress(members, onStopRecord = { recordId ->
+                                            vm.securityAudit.stopRecord(recordId)
+                                        })
                                     }
                             }
                         }
@@ -512,6 +532,7 @@ private fun RunningTaskCard(
     taskId: Long,
     stage: String,
     onClick: () -> Unit,
+    title: String = "任务运行中 · #$taskId",
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -533,7 +554,7 @@ private fun RunningTaskCard(
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "任务运行中 · #$taskId",
+                    text = title,
                     style = MiuixTheme.textStyles.headline2,
                 )
                 Text(
@@ -652,6 +673,7 @@ private fun WifiGroupCard(
     handshakeDeviceCount: Int,
     discoveredHiddenNameCount: Int,
     auditMode: Boolean = false,
+    hasAuditHistory: Boolean = false,
     auditRunning: Boolean = false,
     allowWpsPin: Boolean = false,
     modifier: Modifier = Modifier,
@@ -715,6 +737,9 @@ private fun WifiGroupCard(
                         overflow = TextOverflow.Visible,
                         softWrap = true,
                     )
+                    if (hasAuditHistory) {
+                        TagItem(text = "有历史", style = TagStyle.Secondary)
+                    }
 
                     io.github.bszapp.wifitoolbox.uidefault.component.ImmediateVisibility(visible = isConnected) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -779,10 +804,6 @@ private fun WifiGroupCard(
                     lineHeight = 16.sp,
                     color = contentColor.copy(alpha = 0.7f),
                 )
-                assessments.mapNotNull { it.summary }.distinct().joinToString(" / ").takeIf { it.isNotEmpty() }?.let { summary ->
-                    Text(summary, style = MiuixTheme.textStyles.footnote1, color = contentColor.copy(alpha = 0.7f),
-                        softWrap = true)
-                }
             }
 
             Spacer(Modifier.width(12.dp))

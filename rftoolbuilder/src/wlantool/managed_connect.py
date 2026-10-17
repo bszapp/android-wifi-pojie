@@ -732,17 +732,29 @@ def run(args, session_guard=None):
         report('initialAddresses', addresses=[socket.inet_ntoa(ip)+'/'+str(prefix)
                                               for ip, prefix in initial_addresses])
         events = nl.events_socket()
-        associated = any(scan.first_attr(scan.parse_attrs(bss), 9) == struct.pack('=I', 1)
-                         for bss in nl.read_results())
+        # A virtual interface can be DOWN between attempts while its BSS cache
+        # still marks the previous AP as associated. There is no live link to
+        # disconnect in that case.
+        associated = bool(flags(args.interface) & 1) and any(
+            scan.first_attr(scan.parse_attrs(bss), 9) == struct.pack('=I', 1)
+            for bss in nl.read_results())
         if associated:
             report('disconnectingExistingConnection', message='Disconnect the current interface connection without changing saved configurations')
-            nl.disconnect_existing()
-            while any(scan.first_attr(scan.parse_attrs(bss), 9) == struct.pack('=I', 1)
-                      for bss in nl.read_results()):
-                ensure_running()
-                if select.select([events], [], [], .1)[0]:
-                    read_events(nl, events)
-            report('existingConnectionDisconnected')
+            try:
+                nl.disconnect_existing()
+            except OSError as error:
+                if error.errno != errno.ENETDOWN:
+                    raise
+                # The link went DOWN after the flag check. Continue with the
+                # existing bring-UP path instead of failing this password.
+                associated = False
+            if associated:
+                while any(scan.first_attr(scan.parse_attrs(bss), 9) == struct.pack('=I', 1)
+                          for bss in nl.read_results()):
+                    ensure_running()
+                    if select.select([events], [], [], .1)[0]:
+                        read_events(nl, events)
+                report('existingConnectionDisconnected')
         # Consume only pre-test disconnect events before requesting a new association.
         while select.select([events], [], [], 0)[0]:
             read_events(nl, events)
@@ -761,37 +773,49 @@ def run(args, session_guard=None):
         target_key = (args.interface, SSID)
         cached_target = target_cache.get(target_key)
         if cached_target is None:
-            report('scanStarted', scope='scan only; association limited to submitted SSID')
-            try:
-                nl._trigger_scan()
-            except OSError as error:
-                if error.errno != errno.EBUSY:
-                    raise
-                report('scanBusy', message='Waiting for the existing scan and reading cached results')
-            scan_deadline = min(overall_deadline, time.monotonic()+3)
-            while time.monotonic() < scan_deadline:
+            while True:
                 ensure_running()
-                if select.select([events], [], [], .1)[0]:
-                    if any(cmd in (34, 35) for cmd, _ in read_events(nl, events)):
-                        break
-            candidates = []
-            target_seen = False
-            for entry in nl.read_results():
-                bss = scan.parse_attrs(entry)
-                ies = scan.first_attr(bss, 6) or scan.first_attr(bss, 11) or b''
-                elements = scan.parse_information_elements(ies)
-                if not any(eid == 0 and data == SSID for eid, data in elements):
-                    continue
-                target_seen = True
-                target_rsn = next((data for eid, data in elements if eid == 48), None)
-                if target_rsn is None or not compatible_rsn(target_rsn):
-                    report('unsupportedBss', bssid=scan.first_attr(bss, 1).hex(':'), rsn=target_rsn.hex() if target_rsn else None)
-                    continue
-                signal_value = scan.first_attr(bss, 7)
-                strength = struct.unpack('=i', signal_value)[0] if signal_value else -10000
-                candidates.append((strength, bss, target_rsn))
-            if not candidates:
-                raise RuntimeError('Target does not support this WPA2-PSK/CCMP test without mandatory PMF' if target_seen else 'Target network was not found in scan results')
+                report('scanStarted', scope='scan only; association limited to submitted SSID')
+                scan_busy = False
+                try:
+                    nl._trigger_scan()
+                except scan.ScanTooFrequent:
+                    scan_busy = True
+                except OSError as error:
+                    if error.errno != errno.EBUSY:
+                        raise
+                    scan_busy = True
+                if scan_busy:
+                    report('scanBusy', message='Waiting for the existing scan and reading cached results')
+                else:
+                    scan_deadline = min(overall_deadline, time.monotonic()+3)
+                    while time.monotonic() < scan_deadline:
+                        ensure_running()
+                        if select.select([events], [], [], .1)[0]:
+                            if any(cmd in (34, 35) for cmd, _ in read_events(nl, events)):
+                                break
+                candidates = []
+                target_seen = False
+                for entry in nl.read_results():
+                    bss = scan.parse_attrs(entry)
+                    ies = scan.first_attr(bss, 6) or scan.first_attr(bss, 11) or b''
+                    elements = scan.parse_information_elements(ies)
+                    if not any(eid == 0 and data == SSID for eid, data in elements):
+                        continue
+                    target_seen = True
+                    target_rsn = next((data for eid, data in elements if eid == 48), None)
+                    if target_rsn is None or not compatible_rsn(target_rsn):
+                        report('unsupportedBss', bssid=scan.first_attr(bss, 1).hex(':'), rsn=target_rsn.hex() if target_rsn else None)
+                        continue
+                    signal_value = scan.first_attr(bss, 7)
+                    strength = struct.unpack('=i', signal_value)[0] if signal_value else -10000
+                    candidates.append((strength, bss, target_rsn))
+                if candidates:
+                    break
+                if target_seen:
+                    raise RuntimeError('Target does not support this WPA2-PSK/CCMP test without mandatory PMF')
+                ensure_running()
+                time.sleep(min(.2, max(0, overall_deadline-time.monotonic())))
             strength, bss, target_rsn = max(candidates, key=lambda item: item[0])
             ap = scan.first_attr(bss, 1)
             frequency = struct.unpack('=I', scan.first_attr(bss, 2))[0]
@@ -895,6 +919,10 @@ def run(args, session_guard=None):
             handshake_deadline = None
             if read_mac(nl) != own:
                 raise RuntimeError('MAC changed after handshake completion')
+            if getattr(args, 'handshake_only', False):
+                report('handshakeOnlyCompleted', message='Four-way handshake completed; IP acquisition is not required for this security audit')
+                success = True
+                break
             stage('IP_NEGOTIATION', 'DHCP address acquisition')
             accepted_replay = replay
 
@@ -1041,6 +1069,7 @@ def _arguments_from_request(request, interface='wlan0'):
         hostname_encoding=request.get('hostnameEncoding', 'gbk'),
         timeout_millis=request['timeoutMillis'], handshake_timeout=request.get('handshakeTimeoutMillis'),
         max_attempts=request.get('maxHandshakeAttempts'), password_error=request.get('passwordError', True),
+        handshake_only=request.get('handshakeOnly', False),
         output=None,
     )
 

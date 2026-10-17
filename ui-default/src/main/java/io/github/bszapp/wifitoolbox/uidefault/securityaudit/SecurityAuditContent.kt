@@ -4,6 +4,7 @@ import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -46,19 +47,19 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
     val form by model.sheet.collectAsStateWithLifecycle()
     val dictionaries by model.dictionaries.collectAsStateWithLifecycle()
     val history by model.history.collectAsStateWithLifecycle()
-    val batch by model.batch.collectAsStateWithLifecycle()
-    val sharedSources = batch?.auditNetworks?.filterIsInstance<AuditRecord.Dictionary>()
-        ?.filter { it.active }?.distinctBy { it.groupId ?: it.id }.orEmpty()
+    val auditTasks by model.auditTasks.collectAsStateWithLifecycle()
+    val sharedSources = auditTasks.filter { it.snapshot.state == TaskExecutionState.RUNNING }
+        .flatMap { it.auditNetworks }.filterIsInstance<AuditRecord.Dictionary>()
+        .filter { it.active }.distinctBy { it.groupId ?: it.id }
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val maxHeight = LocalConfiguration.current.screenHeightDp.dp * .8f
     SingleOverlayBottomSheet(
         show = form.show, title = when (form.page) {
             SecurityAuditSheetPage.CONFIGURATION -> "安全测试运行行为"
-            SecurityAuditSheetPage.DICTIONARIES -> "选择字典 · ${form.ssid}"
+            SecurityAuditSheetPage.DICTIONARIES -> "选择字典"
             SecurityAuditSheetPage.DETAIL -> "安全测试详情"
-            SecurityAuditSheetPage.GROUP_DETAIL -> "共享字典测试详情"
-            SecurityAuditSheetPage.SAVED -> "已保存的网络 · ${form.ssid}"
-            SecurityAuditSheetPage.RECOVERY -> "未完成的安全测试 · ${form.ssid}"
+            SecurityAuditSheetPage.SAVED -> "已保存的网络"
+            SecurityAuditSheetPage.RECOVERY -> "未完成的安全测试"
             SecurityAuditSheetPage.MANUAL -> "手动输入网络名称"
         }, onDismissRequest = model::dismiss
     ) {
@@ -83,23 +84,19 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
 
                     SecurityAuditSheetPage.DICTIONARIES -> {
                         item {
-                            Text(
-                                "选择普通字典，可多选。按选择顺序交错合并、去空白、去重并过滤不足八个字符的项；脚本字典不可选。",
-                                style = MiuixTheme.textStyles.body2
-                            )
+                            Text(form.ssid, style = MiuixTheme.textStyles.subtitle)
+                            AuditDisclosure("字典处理规则",
+                                "可选择多个普通字典。按选择顺序合并，去除空白、重复和少于八个字符的密码。")
                         }
                         if (sharedSources.isNotEmpty()) {
                             item {
-                                Text(
-                                    "与已有任务共享字典池",
-                                    style = MiuixTheme.textStyles.subtitle
-                                )
+                                Text("使用已有测试的字典", style = MiuixTheme.textStyles.subtitle)
                             }
                             items(sharedSources, key = { "shared-${it.id}" }) { source ->
                                 Card(Modifier.fillMaxWidth()) {
                                     BasicComponent(
-                                        title = "${source.ssid} · ${source.id.take(8)}",
-                                        summary = "公共进度 ${source.poolCompleted ?: source.completed}/${source.total} · 加入后按领取法分配候选，不重复试同一个",
+                                        title = source.ssid,
+                                        summary = "已尝试 ${source.poolCompleted ?: source.completed} 项，共 ${source.total} 项",
                                         onClick = { model.selectSharedSource(source.id) },
                                         endActions = {
                                             RadioButton(
@@ -132,10 +129,13 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                         }
                         item {
                             Text(
-                                if (form.sharedSourceRecordId == null) "有效密码：${form.candidateCount} 项"
-                                else "共享候选：${form.candidateCount} 项",
+                                "可尝试密码 ${form.candidateCount} 项",
                                 style = MiuixTheme.textStyles.subtitle
                             )
+                            AuditSlider("同时运行", form.taskCount.toLong(), 1, 8, 1, "项") {
+                                model.changeTaskCount(it.toInt())
+                            }
+                            AuditDisclosure("多项测试", "各项测试独立排队，共用选中的密码字典。")
                             var expanded by rememberSaveable { mutableStateOf(false) }
                             TextButton(
                                 if (expanded) "收起处理日志" else "展开处理日志",
@@ -163,18 +163,22 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                     }
 
                     SecurityAuditSheetPage.SAVED -> item {
-                        Text(
-                            "此网络已有保存配置，可直接测试已保存的密码，或重新选择字典。",
-                            style = MiuixTheme.textStyles.body2
-                        )
+                        Text("发现已保存密码", style = MiuixTheme.textStyles.subtitle)
+                        Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+                            Text(form.ssid, style = MiuixTheme.textStyles.subtitle)
+                            Text("密码", style = MiuixTheme.textStyles.footnote1,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                            Text(form.savedPassword ?: "未读取到密码", style = MiuixTheme.textStyles.body1)
+                        }
                         TextButton(
-                            "测试已保存的密码",
+                            "直接尝试",
                             model::useSavedPassword,
-                            Modifier.fillMaxWidth()
+                            Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.textButtonColorsPrimary()
                         )
                         TextButton(
-                            "重新选择字典",
-                            model::chooseDictionaries,
+                            "重新运行",
+                            model::rerunAfterSaved,
                             Modifier.fillMaxWidth()
                         )
                     }
@@ -182,14 +186,17 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                     SecurityAuditSheetPage.RECOVERY -> item {
                         val previous = history.filterIsInstance<AuditHistoryRecord.Dictionary>()
                             .firstOrNull { it.id == form.recordId }
-                        Text(
-                            "上次进度：${previous?.completed ?: 0}/${previous?.total ?: 0}",
-                            style = MiuixTheme.textStyles.body2
-                        )
+                        Text("发现未完成的历史", style = MiuixTheme.textStyles.subtitle)
+                        Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
+                            Text(form.ssid, style = MiuixTheme.textStyles.subtitle)
+                            Text("已尝试 ${previous?.completed ?: 0} 项，共 ${previous?.total ?: 0} 项",
+                                style = MiuixTheme.textStyles.body2)
+                        }
                         TextButton(
-                            "继续上次测试",
+                            "继续测试",
                             { previous?.let { model.resumeHistory(it.id) } },
-                            Modifier.fillMaxWidth()
+                            Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.textButtonColorsPrimary()
                         )
                         TextButton(
                             "重新选择字典",
@@ -200,7 +207,7 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
 
                     SecurityAuditSheetPage.DETAIL -> {
                         val record = history.filterIsInstance<AuditHistoryRecord.Dictionary>()
-                            .firstOrNull { it.id == form.recordId }
+                            .firstOrNull { it.ssid == form.ssid }
                         if (record == null) item { Text("暂无记录") }
                         else {
                             item { Text(record.ssid, style = MiuixTheme.textStyles.title3) }
@@ -224,41 +231,6 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                         }
                     }
 
-                    SecurityAuditSheetPage.GROUP_DETAIL -> {
-                        val members = history.filterIsInstance<AuditHistoryRecord.Dictionary>()
-                            .filter { it.groupId == form.groupId }
-                        if (members.isEmpty()) item { Text("暂无共享记录") }
-                        else {
-                            val completed = members.maxOf { it.poolCompleted ?: it.completed }
-                            item {
-                                Text(
-                                    "共享候选池 · ${members.size} 个运行实例",
-                                    style = MiuixTheme.textStyles.title3
-                                )
-                            }
-                            item {
-                                Text(
-                                    "公共进度：$completed/${members.first().total}",
-                                    style = MiuixTheme.textStyles.body2
-                                )
-                            }
-                            items(members, key = { it.id }) { record ->
-                                Card(Modifier.fillMaxWidth()) {
-                                    BasicComponent(
-                                        title = "${record.ssid} · ${record.id.take(8)}",
-                                        summary = "${timestamp(record.updatedAt)} · ${record.historySummary()}"
-                                    )
-                                    record.password?.let {
-                                        WeakPasswordResult(
-                                            record.id,
-                                            record.dictionaryPosition?.toLong(),
-                                            it
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
                 form.message?.let { message ->
                     item {
@@ -270,25 +242,11 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                 }
                 if (form.page == SecurityAuditSheetPage.DICTIONARIES) {
                     item {
-                        AuditSlider(
-                            title = "子任务数",
-                            value = form.subtaskCount.toLong(),
-                            min = MIN_SUBTASK_COUNT.toLong(),
-                            max = MAX_SUBTASK_COUNT.toLong(),
-                            step = 1,
-                            unit = "",
-                            valueText = "${form.subtaskCount} 个 · 共用候选池，各网卡分领候选",
-                        ) { model.changeSubtaskCount(it.toInt()) }
-                    }
-                    item {
-                        val activeTasks = batch?.auditNetworks?.count { it.active } ?: 0
-                        val windows = (batch?.snapshot?.progress as? TaskProgress.SecurityAudit)?.windows.orEmpty()
-                        Text(
-                            if (windows.isEmpty()) "已有 $activeTasks 个任务在排队占网卡 · 串行模式，1 张网卡（wlan0）"
-                            else "已有 $activeTasks 个任务在排队占网卡 · 可用网卡 ${windows.size} 张（${windows.joinToString("、")}）",
+                        val activeRecords = auditTasks.filter { it.snapshot.state == TaskExecutionState.RUNNING }
+                            .flatMap { it.auditNetworks }.count { it is AuditRecord.Dictionary && it.active }
+                        if (activeRecords > 0) Text("当前有 $activeRecords 项正在测试",
                             style = MiuixTheme.textStyles.footnote1,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-                        )
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                     }
                 }
             }
@@ -300,14 +258,14 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
                 TextButton("关闭", onClick = model::dismiss, modifier = Modifier.weight(1f))
                 when (form.page) {
                     SecurityAuditSheetPage.DICTIONARIES -> TextButton(
-                        if (form.busy) "准备中" else if (form.sharedSourceRecordId != null) "加入共享任务" else "运行",
+                        if (form.busy) "准备中" else "运行",
                         onClick = model::requestRun,
                         enabled = !form.busy && form.candidateCount > 0,
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.textButtonColorsPrimary()
                     )
 
-                    SecurityAuditSheetPage.DETAIL, SecurityAuditSheetPage.GROUP_DETAIL -> Unit
+                    SecurityAuditSheetPage.DETAIL -> Unit
                     SecurityAuditSheetPage.SAVED, SecurityAuditSheetPage.RECOVERY -> Unit
                     SecurityAuditSheetPage.MANUAL -> TextButton(
                         "下一步", model::selectManualNetwork,
@@ -333,6 +291,7 @@ fun SecurityAuditSheets(model: SecurityAuditUiState) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("目标网络：${form.ssid}")
+            if (form.taskCount > 1) Text("本次将创建 ${form.taskCount} 个测试任务，归属同一个安全测试任务并共享候选池。")
             Text(
                 "此功能仅用于已授权网络的安全评估。未经授权的在线密码尝试可能构成非法侵入、干扰他人网络，并承担法律责任。勾选声明不能替代实际授权。",
                 style = MiuixTheme.textStyles.body2
@@ -374,6 +333,16 @@ internal fun AuditChoice(
 }
 
 @Composable
+internal fun AuditDisclosure(title: String, detail: String) {
+    var expanded by rememberSaveable(title) { mutableStateOf(false) }
+    TextButton(if (expanded) "收起$title" else "了解$title", onClick = { expanded = !expanded })
+    AnimatedVisibility(expanded) {
+        Text(detail, style = MiuixTheme.textStyles.footnote1,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+    }
+}
+
+@Composable
 private fun AuditConfiguration(
     config: SecurityAuditConfig,
     onChange: (SecurityAuditConfig) -> Unit
@@ -398,10 +367,6 @@ private fun AuditConfiguration(
         AnimatedVisibility(config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("MAC 策略", style = MiuixTheme.textStyles.subtitle)
-                Text(
-                    "评估路由器对异常环境的风控能力；仅网卡方式支持，系统方式始终使用设备 MAC。",
-                    style = MiuixTheme.textStyles.footnote1
-                )
                 LegacyTabRow(
                     tabs = listOf("设备 MAC", "异常时更换", "每次更换"),
                     selectedTabIndex = config.macMode.ordinal,
@@ -411,20 +376,10 @@ private fun AuditConfiguration(
                         onChange(config.copy(macChangeThreshold = it.toInt()))
                     }
                 }
-                Text(
-                    "多线程",
-                    style = MiuixTheme.textStyles.subtitle,
-                    color = MiuixTheme.colorScheme.primary
-                )
-                Text(
-                    "实验性。服务把可作为普通 Wi-Fi 客户端的网卡当作窗口，排队记录抢空闲窗口并行尝试；" +
-                            "每张网卡一次只跑一个密码，做完一次就回队尾重新排号。并行度由可用网卡数量决定，" +
-                            "网卡不足或未勾选时与单线程行为一致。多点几次“运行”可排队多个任务。",
-                    style = MiuixTheme.textStyles.footnote1
-                )
                 AuditChoice(
                     "开启多线程运行（实验性）", config.multithreaded,
                     onClick = { onChange(config.copy(multithreaded = !config.multithreaded)) })
+                AuditDisclosure("多线程运行", "使用可用网卡并行测试；网卡不足时自动排队。")
             }
         }
         Text(
@@ -511,10 +466,7 @@ private fun AuditConfiguration(
             style = MiuixTheme.textStyles.subtitle,
             color = MiuixTheme.colorScheme.primary
         )
-        Text(
-            "超时或拒绝接入时重试；达到上限后尝试下一个字典项。冷却时间每次翻倍。",
-            style = MiuixTheme.textStyles.footnote1
-        )
+        AuditDisclosure("异常重试", "超时或拒绝接入时重试，达到上限后尝试下一个密码。冷却时间逐次翻倍。")
         AuditSlider(
             "重试次数",
             config.retryCount.toLong(),
@@ -544,7 +496,7 @@ internal fun AuditSlider(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(title, style = MiuixTheme.textStyles.body2)
             Text(
-                valueText ?: "$value $unit",
+                valueText ?: if (unit == "ms") "${value}毫秒" else "$value$unit",
                 style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary
             )
@@ -557,51 +509,68 @@ internal fun AuditSlider(
 }
 
 @Composable
-fun AuditNetworkProgress(record: AuditRecord.Dictionary?, onEdit: () -> Unit) {
-    var lastRecord by remember { mutableStateOf(record) }
-    if (record != null) lastRecord = record
+fun AuditNetworkProgress(records: List<AuditRecord.Dictionary>, onStopRecord: (String) -> Unit,
+    onInspectRecord: ((String) -> Unit)? = null) {
+    var lastRecords by remember { mutableStateOf(records) }
+    if (records.isNotEmpty()) lastRecords = records
     AnimatedVisibility(
-        visible = record != null,
+        visible = records.isNotEmpty(),
         enter = expandVertically(),
         exit = shrinkVertically()
     ) {
-        val record = lastRecord ?: return@AnimatedVisibility
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text("任务 ID：${record.id}", style = MiuixTheme.textStyles.footnote1)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(record.state.label(), style = MiuixTheme.textStyles.subtitle)
-                Text("${record.completed}/${record.total}", style = MiuixTheme.textStyles.footnote1)
+        val members = lastRecords
+        val newest = members.maxByOrNull { it.updatedAt } ?: return@AnimatedVisibility
+        val statistics = members.maxBy { it.groupElapsedMillis }
+        val completed = members.maxOf { it.poolCompleted ?: it.completed }
+        Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(12.dp),
+            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.tertiaryContainer)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(if (members.size == 1) newest.state.label(newest.kind)
+                    else "${members.count { it.active }} 项测试中", style = MiuixTheme.textStyles.subtitle,
+                    color = MiuixTheme.colorScheme.onTertiaryContainer)
+                if (members.size == 1 && newest.active) TextButton("停止", onClick = { onStopRecord(newest.id) })
             }
-            // 受理者网卡：只有运行中才有，排队/结束为 null。
-            Text(
-                "受理网卡：${record.window ?: "—（排队中，等待空闲网卡）"}",
-                style = MiuixTheme.textStyles.footnote1,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-            )
             LinearProgressIndicator(
-                progress = if (record.total > 0) record.completed.toFloat() / record.total else 0f,
+                progress = if (newest.total > 0) completed.toFloat() / newest.total else null,
                 modifier = Modifier.fillMaxWidth()
             )
-            Text(record.message, style = MiuixTheme.textStyles.body2)
-            record.stage?.let { Text(it.label(), style = MiuixTheme.textStyles.footnote1) }
-            Text(
-                "尝试 ${record.attempts} 次 · ${record.elapsedMillis} ms · 当前重试 ${record.retryCount} 次",
-                style = MiuixTheme.textStyles.footnote1
-            )
-            record.averageAttemptMillis?.takeIf { it > 0 }?.let { cost ->
-                Text(
-                    "平均 ${60000 / cost} 次/分 · 预计剩余 ${(record.total - record.completed) * cost / 1000} 秒",
-                    style = MiuixTheme.textStyles.footnote1
-                )
-            } ?: Text("速度计算中（至少需要5个样本）", style = MiuixTheme.textStyles.footnote1)
-            if (record.active) TextButton("停止此任务", onClick = onEdit)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("已试 $completed 项，共 ${newest.total} 项", style = MiuixTheme.textStyles.footnote1)
+                statistics.groupAverageAttemptMillis?.takeIf { it > 0 }?.let { cost ->
+                    Text("每分钟 ${60000 / cost} 次", style = MiuixTheme.textStyles.footnote1)
+                }
+            }
+            statistics.groupAverageAttemptMillis?.takeIf { it > 0 }?.let { cost ->
+                Text("预计还需 ${formatAuditDuration((newest.total - completed).coerceAtLeast(0) * cost)}",
+                    style = MiuixTheme.textStyles.footnote1)
+            }
+            if (members.size == 1) {
+                Text(newest.runStatus(), style = MiuixTheme.textStyles.body2,
+                    modifier = if (onInspectRecord != null) Modifier.clickable { onInspectRecord(newest.id) } else Modifier)
+            } else members.forEachIndexed { index, record ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("第 ${index + 1} 项：${record.runStatus()}",
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(if (onInspectRecord != null) Modifier.clickable {
+                                onInspectRecord(record.id)
+                            } else Modifier), style = MiuixTheme.textStyles.body2)
+                    if (record.active) TextButton("停止", onClick = { onStopRecord(record.id) })
+                }
+            }
         }
     }
+}
+
+private fun AuditRecord.Dictionary.runStatus(): String = when (state) {
+    SecurityAuditNetworkState.CONNECTING ->
+        stage?.label() ?: "正在连接路由器"
+    SecurityAuditNetworkState.QUEUED -> if (config.connectionMethod == SecurityAuditConnectionMethod.SYSTEM)
+        "排队等待连接" else "排队等待网卡"
+    SecurityAuditNetworkState.COOLDOWN -> "冷却中"
+    else -> state.label()
 }
 
 @Composable
@@ -609,30 +578,27 @@ private fun AuditRecordDetails(record: AuditHistoryRecord.Dictionary) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(record.historySummary(), style = MiuixTheme.textStyles.subtitle)
         Text("记录时间：${timestamp(record.updatedAt)}", style = MiuixTheme.textStyles.body2)
-        Text(
-            "字典进度：${record.completed}/${record.total}\n计算耗时：${record.elapsedMillis} ms",
-            style = MiuixTheme.textStyles.body2
-        )
-        record.averageAttemptMillis?.let {
-            Text(
-                "平均尝试耗时：$it ms\n平均速度：${if (it > 0) 60000 / it else 0} 次/分",
-                style = MiuixTheme.textStyles.body2
-            )
+        Text("已试 ${record.completed} 项，共 ${record.total} 项", style = MiuixTheme.textStyles.body2)
+        Text("总用时：${formatAuditDuration(record.groupElapsedMillis)}", style = MiuixTheme.textStyles.body2)
+        record.groupAverageAttemptMillis?.let {
+            if (it > 0) Text("平均每分钟 ${60000 / it} 次", style = MiuixTheme.textStyles.body2)
         }
     }
 }
 
 @Composable
 fun SecurityAuditTaskSheet(
-    task: TrackedTaskState, onStop: () -> Unit, onDismiss: () -> Unit,
-    onInspect: (String) -> Unit, onInspectWps: (String) -> Unit = onInspect,
-    onStopRecord: (String) -> Unit
+    task: TrackedTaskState, onStop: () -> Unit, onStopRecord: (String) -> Unit,
+    onStopNetwork: (String) -> Unit, onDismiss: () -> Unit,
+    onInspect: (String) -> Unit,
 ) {
+    val dictionaryNetworks = task.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
+        .groupBy { it.ssid }
     var show by rememberSaveable(task.snapshot.taskId) { mutableStateOf(true) }
     var logsExpanded by rememberSaveable(task.snapshot.taskId) { mutableStateOf(false) }
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     SingleOverlayBottomSheet(
-        show = show, title = "网络安全测试 · #${task.snapshot.taskId}",
+        show = show, title = "网络安全测试",
         onDismissRequest = { show = false }, onDismissFinished = onDismiss
     ) {
         Column(
@@ -647,34 +613,26 @@ fun SecurityAuditTaskSheet(
             ) {
                 item {
                     Text(
-                        if (task.snapshot.state == TaskExecutionState.RUNNING) "运行中" else "本批任务已结束",
+                        if (task.snapshot.state == TaskExecutionState.RUNNING) "运行中" else "任务已结束",
                         style = MiuixTheme.textStyles.subtitle
                     )
                 }
-                items(task.auditNetworks, key = { it.id }) { record ->
-                    Card(Modifier.fillMaxWidth(), onClick = {
-                        show = false
-                        if (record is AuditRecord.Dictionary) onInspect(record.id) else onInspectWps(
-                            record.id
-                        )
-                    }) {
-                        BasicComponent(
-                            title = "${record.ssid} · ${record.id.take(8)}",
-                            summary = when (record) {
-                                is AuditRecord.Dictionary ->
-                                    "${record.state.label(record.kind)} · ${record.completed}/${record.total}" +
-                                        (record.window?.let { " · 受理：$it" } ?: "") +
-                                        "\n${record.message}"
-                                is AuditRecord.Wps -> "${record.state.label(record.kind)} · ${
-                                    wpsPhaseLabel(
-                                        record.phase
-                                    )
-                                }\n${record.message}"
-                            }, endActions = {
-                                if (record.active && record is AuditRecord.Dictionary) {
-                                    TextButton("停止", onClick = { onStopRecord(record.id) })
-                                }
+                items(dictionaryNetworks.toList(), key = { "network-${it.first}" }) { (ssid, records) ->
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text(ssid, style = MiuixTheme.textStyles.subtitle,
+                                modifier = Modifier.weight(1f))
+                            if (task.snapshot.state == TaskExecutionState.RUNNING && records.any { it.active }) {
+                                TextButton("停止此网络", onClick = { onStopNetwork(ssid) })
+                            }
+                        }
+                        records.groupBy { it.groupId ?: it.id }.values.forEach { members ->
+                            AuditNetworkProgress(members, onStopRecord, onInspectRecord = { recordId ->
+                                show = false
+                                onInspect(recordId)
                             })
+                        }
                     }
                 }
                 item {
@@ -690,7 +648,7 @@ fun SecurityAuditTaskSheet(
                 }
             }
             if (task.snapshot.state == TaskExecutionState.RUNNING) TextButton(
-                "停止全部",
+                "停止任务",
                 onStop,
                 Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.textButtonColorsPrimary()
@@ -704,17 +662,9 @@ fun SecurityAuditTaskSheet(
 fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
     val navigator = LocalNavigator.current
     val history by viewModel.securityAudit.history.collectAsStateWithLifecycle()
-    val groups = remember(history) {
-        history.filterIsInstance<AuditHistoryRecord.Dictionary>()
-            .groupBy { it.groupId ?: it.id }
-    }
     val sorted = remember(history) {
-        (groups.values.map { members -> members.maxBy { it.updatedAt } } +
-                history.filterIsInstance<AuditHistoryRecord.Wps>())
-            .sortedWith(compareByDescending<AuditHistoryRecord> { record ->
-                if (record is AuditHistoryRecord.Dictionary) groups[record.groupId ?: record.id]
-                    ?.any { it.password != null } == true else record.password != null
-            }.thenByDescending { it.updatedAt })
+        history.sortedWith(compareByDescending<AuditHistoryRecord> { it.password != null }
+            .thenByDescending { it.updatedAt })
     }
     val scroll = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(LocalEnableBlur.current)
@@ -757,25 +707,11 @@ fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
                 if (sorted.isEmpty()) item { Text("暂无安全测试历史") }
                 items(
                     sorted,
-                    key = { if (it is AuditHistoryRecord.Dictionary) "dictionary-${it.groupId ?: it.id}" else "wps-${it.id}" }) { record ->
-                    val groupId = (record as? AuditHistoryRecord.Dictionary)?.groupId
-                    val members = groupId?.let(groups::get).orEmpty()
+                    key = { if (it is AuditHistoryRecord.Dictionary) "dictionary-${it.ssid}" else "wps-${it.id}" }) { record ->
                     Card(Modifier.fillMaxWidth()) {
                         BasicComponent(
-                            title = if (groupId != null) "共享候选池 · ${members.size} 个运行实例"
-                            else record.ssid.ifEmpty { "<隐藏网络>" }, summary = buildString {
-                                if (record.kind == AuditRecordKind.WPS) append("WPS 安全测试 · ")
-                                append(timestamp(record.updatedAt))
-                                if (groupId != null) {
-                                    val completed =
-                                        members.maxOfOrNull { it.poolCompleted ?: it.completed }
-                                            ?: 0
-                                    append(" · $completed/${members.firstOrNull()?.total ?: 0} 项")
-                                    if (members.any { it.password != null }) append(" · 已发现弱密码")
-                                } else append(" · ${record.historySummary()}")
-                            }, onClick = {
-                                if (groupId != null) viewModel.securityAudit.inspectGroup(groupId)
-                                else if (record is AuditHistoryRecord.Dictionary) viewModel.securityAudit.inspect(
+                            onClick = {
+                                if (record is AuditHistoryRecord.Dictionary) viewModel.securityAudit.inspect(
                                     record.id
                                 )
                                 else viewModel.securityAudit.inspectWps(record.id)
@@ -783,17 +719,21 @@ fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
                                 IconButton(onClick = {
                                     viewModel.showConfirmationDialog(
                                         title = "删除历史记录",
-                                        content = if (groupId != null) "删除此共享候选池和全部 ${members.size} 条运行记录？"
-                                        else "删除 ${record.ssid} 的这条安全测试记录？",
+                                        content = "删除 ${record.ssid} 的这条安全测试记录？",
                                         onConfirmed = {
-                                            viewModel.securityAudit.deleteHistory(
-                                                groupId ?: record.id
-                                            )
+                                            viewModel.securityAudit.deleteHistory(record.id)
                                         })
                                 }) {
                                     Icon(Icons.Rounded.DeleteOutline, "删除历史")
                                 }
-                            })
+                            }) {
+                            Text(record.ssid.ifEmpty { "隐藏网络" }, style = MiuixTheme.textStyles.subtitle)
+                            Text(if (record.kind == AuditRecordKind.WPS) "WPS 安全测试" else "密码安全测试",
+                                style = MiuixTheme.textStyles.footnote1)
+                            Text(record.historySummary(), style = MiuixTheme.textStyles.body2)
+                            Text(timestamp(record.updatedAt), style = MiuixTheme.textStyles.footnote1,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        }
                     }
                 }
             }
@@ -803,6 +743,14 @@ fun SecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
 
 internal fun timestamp(value: Long) =
     SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
+
+internal fun formatAuditDuration(millis: Long): String {
+    val seconds = (millis.coerceAtLeast(0) + 999) / 1000
+    if (seconds < 60) return "${seconds}秒"
+    val minutes = seconds / 60
+    if (minutes < 60) return "${minutes}分${seconds % 60}秒"
+    return "${minutes / 60}时${minutes % 60}分"
+}
 
 internal fun SecurityAuditNetworkState.label(kind: AuditRecordKind = AuditRecordKind.DICTIONARY) =
     when (this) {
@@ -826,17 +774,17 @@ internal fun AuditHistoryRecord.historySummary(): String = when (this) {
     is AuditHistoryRecord.Dictionary -> when {
         password != null -> "发现弱密码"
         completed >= total -> "字典已耗尽"
-        else -> "已记录 $completed/$total 项"
+        else -> "已试 $completed 项，共 $total 项"
     }
 
-    is AuditHistoryRecord.Wps -> if (password != null) "取得密码" else "${wpsPhaseLabel(phase)} · 已记录进度"
+    is AuditHistoryRecord.Wps -> if (password != null) "取得密码" else "${wpsPhaseLabel(phase)}，已记录进度"
 }
 
 private fun ConnectWifiStage.label() = when (this) {
     ConnectWifiStage.ROUTER_COMMUNICATION -> "与路由器建立通信"
-    ConnectWifiStage.WPA_HANDSHAKE_1_OF_4 -> "WPA 握手 1/4"
-    ConnectWifiStage.WPA_HANDSHAKE_2_OF_4 -> "WPA 握手 2/4"
-    ConnectWifiStage.WPA_HANDSHAKE_3_OF_4 -> "WPA 握手 3/4"
-    ConnectWifiStage.WPA_HANDSHAKE_4_OF_4 -> "WPA 握手 4/4"
+    ConnectWifiStage.WPA_HANDSHAKE_1_OF_4 -> "握手第一步"
+    ConnectWifiStage.WPA_HANDSHAKE_2_OF_4 -> "握手第二步"
+    ConnectWifiStage.WPA_HANDSHAKE_3_OF_4 -> "握手第三步"
+    ConnectWifiStage.WPA_HANDSHAKE_4_OF_4 -> "握手第四步"
     ConnectWifiStage.IP_NEGOTIATION -> "获取 IP 地址"
 }

@@ -4,26 +4,29 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
 import io.github.bszapp.wifitoolbox.contract.task.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 
-/** 单个数据库保存两类精简历史及完整候选字典；不读取旧文件。 */
+/** 单个数据库保存两类精简历史及完整候选字典。 */
 internal class SecurityAuditHistoryStore(context: Context) {
-    private val helper = Database(context.applicationContext)
+    private val db = context.applicationContext.openOrCreateDatabase(
+        "security_audit.db", Context.MODE_PRIVATE, null).apply {
+        setForeignKeyConstraintsEnabled(true)
+        prepareTables(this)
+    }
     private val lock = Any()
     private val dictionaries = mutableMapOf<String, List<String>>()
     private val pendingDictionaries = mutableSetOf<String>()
+    private val runningDictionaries = mutableSetOf<String>()
     private val _state = MutableStateFlow<List<AuditHistoryRecord>>(emptyList())
     val state = _state.asStateFlow()
 
     fun load() = synchronized(lock) { publish() }
 
-    /** 每个字典只在首次给定时插入，运行更新不改动候选数据。 */
+    /** 候选字典自身不可变；同一 SSID 的历史行可以在不同字典之间切换引用。 */
     fun saveDictionary(id: String, source: File) = synchronized(lock) {
-        val db = helper.writableDatabase
         check(!exists(db, "dictionary_sets", "id", id)) { "候选字典已经给定，不允许更新" }
         val passwords = source.readLines(Charsets.UTF_8)
         transaction(db) {
@@ -37,63 +40,51 @@ internal class SecurityAuditHistoryStore(context: Context) {
         }
         dictionaries[id] = passwords
         pendingDictionaries.add(id)
+        transaction(db) { cleanUnusedDictionaries(db) }
     }
 
     fun discardDictionary(id: String) = synchronized(lock) {
         pendingDictionaries.remove(id)
-        if (!exists(helper.writableDatabase, "dictionary_history", "dictionary_id", id)) {
-            helper.writableDatabase.delete("dictionary_sets", "id = ?", arrayOf(id))
-            dictionaries.remove(id)
-        }
+        transaction(db) { cleanUnusedDictionaries(db) }
     }
 
-    fun merge(incoming: List<AuditRecord>) = synchronized(lock) {
-        val db = helper.writableDatabase
+    /** 运行快照只向历史写入完成的尝试；返回已处理的服务事件顺序。 */
+    fun merge(incoming: List<AuditRecord>, afterAttemptRevision: Long,
+        activeDictionaryIds: Set<String>): Long = synchronized(lock) {
+        runningDictionaries.clear()
+        runningDictionaries.addAll(activeDictionaryIds)
+        val ordered = incoming.filterIsInstance<AuditRecord.Dictionary>()
+            .filter { it.historyRevision > afterAttemptRevision }
+            .sortedWith(compareBy<AuditRecord.Dictionary> { it.historyRevision }
+                .thenBy { it.password != null }) + incoming.filterIsInstance<AuditRecord.Wps>()
         transaction(db) {
-            incoming.forEach { record ->
+            ordered.forEach { record ->
+                val recordTime = if (record is AuditRecord.Dictionary) record.historyUpdatedAt else record.updatedAt
                 val deletedAt = db.rawQuery("SELECT updated_at FROM deleted_snapshots WHERE id = ?", arrayOf(record.id)).use {
                     if (it.moveToFirst()) it.getLong(0) else Long.MIN_VALUE
                 }
-                if (record.updatedAt <= deletedAt) return@forEach
+                if (recordTime <= deletedAt) return@forEach
                 val table = if (record is AuditRecord.Dictionary) "dictionary_history" else "wps_history"
                 val key = when (record) {
-                    // 每次运行单独保留；同一 SSID 的多条运行不能互相覆盖。
-                    is AuditRecord.Dictionary -> record.id
+                    is AuditRecord.Dictionary -> record.ssid
                     is AuditRecord.Wps -> record.mac?.lowercase() ?: record.ssid
                 }
                 val old = db.rawQuery("SELECT id, updated_at FROM $table WHERE target = ?", arrayOf(key)).use {
                     if (it.moveToFirst()) it.getString(0) to it.getLong(1) else null
                 }
-                if (old != null && old.second > record.updatedAt) return@forEach
+                if (old != null && old.second > recordTime) return@forEach
                 val values = ContentValues().apply {
                     put("id", record.id); put("target", key); put("ssid", record.ssid)
-                    put("updated_at", record.updatedAt); put("password", record.password)
+                    put("updated_at", recordTime); put("password", record.password)
                 }
                 when (record) {
                     is AuditRecord.Dictionary -> {
-                        val dictionaryId = db.rawQuery("SELECT dictionary_id FROM dictionary_history WHERE id = ?", arrayOf(record.id)).use {
-                            if (it.moveToFirst()) it.getString(0) else record.input.dictionaryId
-                        }
-                        check(dictionaryId == record.input.dictionaryId) { "运行中的候选字典不可更换" }
+                        val dictionaryId = record.input.dictionaryId
                         if (!exists(db, "dictionary_sets", "id", dictionaryId)) return@forEach
                         values.put("dictionary_id", dictionaryId); values.put("position", record.completed)
-                        values.put("elapsed_ms", record.elapsedMillis); values.put("average_ms", record.averageAttemptMillis)
+                        values.put("elapsed_ms", record.groupElapsedMillis)
+                        values.put("average_ms", record.groupAverageAttemptMillis)
                         values.put("found_position", record.dictionaryPosition)
-                        values.put("group_id", record.groupId)
-                        record.groupId?.let { groupId ->
-                            val oldGroup = db.rawQuery("SELECT position, created_at, updated_at FROM dictionary_groups WHERE id = ?",
-                                arrayOf(groupId)).use { rows ->
-                                if (rows.moveToFirst()) Triple(rows.getInt(0), rows.getLong(1), rows.getLong(2)) else null
-                            }
-                            val groupValues = ContentValues().apply {
-                                put("id", groupId); put("dictionary_id", dictionaryId)
-                                put("position", maxOf(oldGroup?.first ?: 0, record.poolCompleted ?: record.completed))
-                                put("created_at", minOf(oldGroup?.second ?: record.startedAt, record.startedAt))
-                                put("updated_at", maxOf(oldGroup?.third ?: 0L, record.updatedAt))
-                            }
-                            check(db.insertWithOnConflict("dictionary_groups", null, groupValues,
-                                SQLiteDatabase.CONFLICT_REPLACE) != -1L)
-                        }
                         pendingDictionaries.remove(dictionaryId)
                     }
                     is AuditRecord.Wps -> {
@@ -105,26 +96,23 @@ internal class SecurityAuditHistoryStore(context: Context) {
                     }
                 }
                 if (old != null && old.first != record.id) rememberDeleted(db, old.first, old.second)
-                db.delete(table, "id = ? AND target <> ?", arrayOf(record.id, key))
-                check(db.insertWithOnConflict(table, null, values, SQLiteDatabase.CONFLICT_REPLACE) != -1L)
+                db.delete(table, "target = ?", arrayOf(key))
+                db.delete(table, "id = ?", arrayOf(record.id))
+                db.insertOrThrow(table, null, values)
+                cleanUnusedDictionaries(db)
             }
-            cleanUnusedDictionaries(db)
         }
         publish()
+        maxOf(afterAttemptRevision,
+            incoming.filterIsInstance<AuditRecord.Dictionary>().maxOfOrNull { it.historyRevision } ?: 0L)
     }
 
     fun delete(id: String) = synchronized(lock) {
         val record = _state.value.firstOrNull { it.id == id }
-        val grouped = _state.value.filterIsInstance<AuditHistoryRecord.Dictionary>()
-            .filter { it.groupId == id }
-        if (record == null && grouped.isEmpty()) return@synchronized
-        val db = helper.writableDatabase
+        if (record == null) return@synchronized
         transaction(db) {
-            val targets = if (grouped.isNotEmpty()) grouped else listOfNotNull(record)
-            targets.forEach { target ->
-                rememberDeleted(db, target.id, target.updatedAt)
-                db.delete("dictionary_history", "id = ?", arrayOf(target.id))
-            }
+            rememberDeleted(db, record.id, record.updatedAt)
+            db.delete("dictionary_history", "id = ?", arrayOf(id))
             if (record is AuditHistoryRecord.Wps) db.delete("wps_history", "id = ?", arrayOf(id))
             cleanUnusedDictionaries(db)
         }
@@ -132,9 +120,9 @@ internal class SecurityAuditHistoryStore(context: Context) {
     }
 
     private fun cleanUnusedDictionaries(db: SQLiteDatabase) {
-        db.execSQL("DELETE FROM dictionary_groups WHERE id NOT IN (SELECT group_id FROM dictionary_history WHERE group_id IS NOT NULL)")
         val unused = db.rawQuery("SELECT id FROM dictionary_sets WHERE id NOT IN (SELECT dictionary_id FROM dictionary_history)", null).use {
-            buildList { while (it.moveToNext()) if (it.getString(0) !in pendingDictionaries) add(it.getString(0)) }
+            buildList { while (it.moveToNext()) if (it.getString(0) !in pendingDictionaries &&
+                it.getString(0) !in runningDictionaries) add(it.getString(0)) }
         }
         unused.forEach { db.delete("dictionary_sets", "id = ?", arrayOf(it)); dictionaries.remove(it) }
     }
@@ -146,12 +134,7 @@ internal class SecurityAuditHistoryStore(context: Context) {
     }
 
     private fun publish() {
-        val db = helper.readableDatabase
         val history = mutableListOf<AuditHistoryRecord>()
-        val groupPositions = mutableMapOf<String, Int>()
-        db.rawQuery("SELECT id, position FROM dictionary_groups", null).use { rows ->
-            while (rows.moveToNext()) groupPositions[rows.getString(0)] = rows.getInt(1)
-        }
         db.rawQuery("SELECT * FROM dictionary_history", null).use { c ->
             while (c.moveToNext()) {
                 val dictionaryId = c.string("dictionary_id")!!
@@ -161,9 +144,9 @@ internal class SecurityAuditHistoryStore(context: Context) {
                     }
                 }
                 history += AuditHistoryRecord.Dictionary(c.string("id")!!, c.string("ssid")!!, passwords,
-                    c.long("position").toInt(), c.string("password"), c.long("updated_at"), c.long("elapsed_ms"),
-                    c.nullableLong("average_ms"), c.nullableLong("found_position")?.toInt(),
-                    c.string("group_id"), c.string("group_id")?.let(groupPositions::get))
+                    c.long("position").toInt(), c.string("password"), c.long("updated_at"),
+                    c.long("elapsed_ms"), c.nullableLong("average_ms"),
+                    c.nullableLong("found_position")?.toInt())
             }
         }
         db.rawQuery("SELECT * FROM wps_history", null).use { c ->
@@ -187,34 +170,50 @@ internal class SecurityAuditHistoryStore(context: Context) {
     private fun Cursor.long(name: String) = getLong(getColumnIndexOrThrow(name))
     private fun Cursor.nullableLong(name: String): Long? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getLong(it) }
 
-    private class Database(context: Context) : SQLiteOpenHelper(context, "security_audit.db", null, 3) {
-        override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
-        override fun onCreate(db: SQLiteDatabase) {
-            createDictionaryTables(db)
-            db.execSQL("CREATE TABLE wps_history(target TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, ssid TEXT NOT NULL, bssid TEXT, " +
-                "updated_at INTEGER NOT NULL, phase TEXT NOT NULL, first_half TEXT, first_index INTEGER NOT NULL, " +
-                "second_index INTEGER NOT NULL, attempts INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL, average_ms INTEGER, " +
-                "pin TEXT, password TEXT, found_phase TEXT)")
-            db.execSQL("CREATE TABLE deleted_snapshots(id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL)")
+    private fun prepareTables(db: SQLiteDatabase) {
+        val expected = mapOf(
+            "dictionary_sets" to setOf("id"),
+            "candidates" to setOf("dictionary_id", "position", "password"),
+            "dictionary_history" to setOf("target", "id", "ssid", "dictionary_id", "position",
+                "password", "updated_at", "elapsed_ms", "average_ms", "found_position"),
+            "wps_history" to setOf("target", "id", "ssid", "bssid", "updated_at", "phase",
+                "first_half", "first_index", "second_index", "attempts", "elapsed_ms",
+                "average_ms", "pin", "password", "found_phase"),
+            "deleted_snapshots" to setOf("id", "updated_at"),
+        )
+        val knownTables = expected.keys + setOf("dictionary_groups", "dictionary_group_stats")
+        val existing = db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table' " +
+            "AND name NOT LIKE 'sqlite_%' AND name <> 'android_metadata'", null).use { rows ->
+            buildSet { while (rows.moveToNext()) add(rows.getString(0)) }
         }
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // 旧字典历史不兼容共享组结构；WPS 历史保持原样。
-            db.execSQL("DROP TABLE IF EXISTS dictionary_history")
-            db.execSQL("DROP TABLE IF EXISTS dictionary_groups")
-            db.execSQL("DROP TABLE IF EXISTS candidates")
-            db.execSQL("DROP TABLE IF EXISTS dictionary_sets")
-            createDictionaryTables(db)
+        check(existing.all { it in knownTables }) { "安全测试历史库包含未知数据表，无法清空" }
+        val current = existing == expected.keys && expected.all { (table, columns) ->
+            db.rawQuery("PRAGMA table_info($table)", null).use { rows ->
+                buildSet { while (rows.moveToNext()) add(rows.getString(1)) } == columns
+            }
         }
+        if (existing.isNotEmpty() && !current) {
+            transaction(db) {
+                listOf("dictionary_history", "dictionary_group_stats", "dictionary_groups",
+                    "candidates", "dictionary_sets", "wps_history", "deleted_snapshots").forEach { table ->
+                    db.execSQL("DROP TABLE IF EXISTS $table")
+                }
+            }
+        }
+        createTables(db)
+    }
 
-        private fun createDictionaryTables(db: SQLiteDatabase) {
-            db.execSQL("CREATE TABLE dictionary_sets(id TEXT PRIMARY KEY)")
-            db.execSQL("CREATE TABLE dictionary_groups(id TEXT PRIMARY KEY, dictionary_id TEXT NOT NULL REFERENCES dictionary_sets(id), " +
-                "position INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
-            db.execSQL("CREATE TABLE candidates(dictionary_id TEXT NOT NULL REFERENCES dictionary_sets(id) ON DELETE CASCADE, " +
-                "position INTEGER NOT NULL, password TEXT NOT NULL, PRIMARY KEY(dictionary_id, position))")
-            db.execSQL("CREATE TABLE dictionary_history(target TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, ssid TEXT NOT NULL, " +
-                "dictionary_id TEXT NOT NULL REFERENCES dictionary_sets(id), group_id TEXT, position INTEGER NOT NULL, password TEXT, " +
-                "updated_at INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL, average_ms INTEGER, found_position INTEGER)")
-        }
+    private fun createTables(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS dictionary_sets(id TEXT PRIMARY KEY)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS candidates(dictionary_id TEXT NOT NULL REFERENCES dictionary_sets(id) ON DELETE CASCADE, " +
+            "position INTEGER NOT NULL, password TEXT NOT NULL, PRIMARY KEY(dictionary_id, position))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS dictionary_history(target TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, ssid TEXT NOT NULL, " +
+            "dictionary_id TEXT NOT NULL REFERENCES dictionary_sets(id), position INTEGER NOT NULL, password TEXT, " +
+            "updated_at INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL, average_ms INTEGER, found_position INTEGER)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS wps_history(target TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, ssid TEXT NOT NULL, bssid TEXT, " +
+            "updated_at INTEGER NOT NULL, phase TEXT NOT NULL, first_half TEXT, first_index INTEGER NOT NULL, " +
+            "second_index INTEGER NOT NULL, attempts INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL, average_ms INTEGER, " +
+            "pin TEXT, password TEXT, found_phase TEXT)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS deleted_snapshots(id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL)")
     }
 }

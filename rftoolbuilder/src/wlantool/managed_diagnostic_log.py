@@ -45,6 +45,7 @@ HEADLINES = {
     'm3Rsn': ('P', 'WPA: RSN information from message 3'),
     'keyInstalled': ('+', 'WPA: Installed {kind} (index={index}, key length={keyBytes} bytes)'),
     'handshakeCompletedLocally': ('+', 'WPA: Four-way handshake completed locally; keys installed and controlled port authorized'),
+    'handshakeOnlyCompleted': ('+', 'Security audit passed: four-way handshake completed; disconnecting immediately'),
     'm3Retransmission': ('*', 'WPA: Retransmitted message 3; resending M4 without reinstalling keys'),
     'handshakeRestarted': ('!', 'WPA: New message 1 received during DHCP; continuing with the next password line'),
     'dhcpTxSubmitted': ('*', 'DHCP: Sending {message} (xid={xid}, client={clientMac})'),

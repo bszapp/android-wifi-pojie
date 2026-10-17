@@ -128,4 +128,10 @@ interface IMainService {
     void startCameraPreview(String sessionId, in Surface preview, in Surface analysis, ICameraPreviewCallback callback);
     void stopCameraPreview(String sessionId);
     void toggleSmartInterfaces();
+    // 旧批量顶层任务事务保留编号；新服务拒绝调用，避免创建多个通用任务。
+    long[] runSecurityAuditGroup(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
+    long[] joinSecurityAuditPoolGroup(in TaskStartRequest request, int taskCount);
+    // 新事务只返回一个顶层安全测试任务 ID；taskCount 是内部测试记录数。
+    long runSecurityAuditRecords(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
+    long joinSecurityAuditRecords(in TaskStartRequest request, int taskCount);
 }

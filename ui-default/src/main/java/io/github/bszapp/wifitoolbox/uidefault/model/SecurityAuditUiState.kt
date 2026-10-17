@@ -26,12 +26,9 @@ import java.io.File
 import java.util.UUID
 
 enum class NormalWifiSubmode { SCAN, SECURITY_AUDIT, WPS_SECURITY_AUDIT }
-enum class SecurityAuditSheetPage { CONFIGURATION, DICTIONARIES, DETAIL, GROUP_DETAIL, SAVED, RECOVERY, MANUAL }
+enum class SecurityAuditSheetPage { CONFIGURATION, DICTIONARIES, DETAIL, SAVED, RECOVERY, MANUAL }
 enum class WpsAuditSheetPage { TARGET, ACCESS_POINTS, CONFIGURATION, DETAIL }
 
-/** 一次「运行」创建的并行实例数范围；与服务侧 SecurityAuditTask.MAX_SUBTASK_COUNT 对齐。 */
-internal const val MIN_SUBTASK_COUNT = 1
-internal const val MAX_SUBTASK_COUNT = 6
 data class WpsAuditSheetState(
     val show: Boolean = false,
     val page: WpsAuditSheetPage = WpsAuditSheetPage.TARGET,
@@ -54,16 +51,15 @@ data class SecurityAuditSheetState(
     val config: SecurityAuditConfig = SecurityAuditConfig(),
     val ssid: String = "",
     val saved: Boolean = false,
+    val savedPassword: String? = null,
     val selectedIds: List<String> = emptyList(),
+    val taskCount: Int = 1,
     val candidateCount: Int = 0,
     val preparationLog: List<String> = emptyList(),
     val resumeRecordId: String? = null,
     val useSavedPassword: Boolean = false,
     val recordId: String? = null,
     val sharedSourceRecordId: String? = null,
-    val groupId: String? = null,
-    /** 本次「运行」创建的并行实例数，1～6；默认 1 即只创建一条运行记录。 */
-    val subtaskCount: Int = 1,
     val busy: Boolean = false,
     val message: String? = null,
     val authorizationShow: Boolean = false,
@@ -71,7 +67,7 @@ data class SecurityAuditSheetState(
     val authorizationReadyAt: Long = 0,
 )
 
-/** 表单由 ViewModel 拥有；队列、任务 ID、结果全部从 App 的服务镜像读取。 */
+/** 表单由 ViewModel 拥有；顶层任务 ID 与内部测试记录均从 App 的服务镜像读取。 */
 class SecurityAuditUiState(
     private val app: Application,
     private val controller: IAppController,
@@ -89,10 +85,14 @@ class SecurityAuditUiState(
     private var preparation: Job? = null
     private var preparedPasswords: List<String> = emptyList()
 
+    val auditTasks = controller.tasks.state.map { state ->
+        state.tasks.values.filter { it.snapshot.request.payload is TaskRequestPayload.SecurityAudit }
+            .sortedBy { it.snapshot.taskId }
+    }.stateIn(scope, SharingStarted.Eagerly, emptyList())
+
     val batch = controller.tasks.state.map { state ->
         state.currentTaskId?.let(state.tasks::get)?.takeIf {
-            val payload = it.snapshot.request.payload
-            payload is TaskRequestPayload.SecurityAudit || payload is TaskRequestPayload.WpsSecurityAudit
+            it.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit
         }
     }.stateIn(scope, SharingStarted.Eagerly, null)
 
@@ -103,7 +103,10 @@ class SecurityAuditUiState(
     val wpsForm = _wpsForm.asStateFlow()
 
     fun selectSubmode(value: NormalWifiSubmode) { _submode.value = value }
-    private fun currentConfig() = (runningBatch()?.snapshot?.progress as? TaskProgress.SecurityAudit)?.config ?: controller.tasks.auditConfig.value
+    private fun currentConfig() = auditTasks.value.asReversed().firstNotNullOfOrNull {
+        if (it.snapshot.state == TaskExecutionState.RUNNING)
+            (it.snapshot.progress as? TaskProgress.SecurityAudit)?.config else null
+    } ?: controller.tasks.auditConfig.value
     private fun currentWpsConfig() =
         (runningWpsBatch()?.snapshot?.progress as? TaskProgress.WpsSecurityAudit)?.config ?: controller.tasks.wpsAuditConfig.value
     fun configure() {
@@ -129,17 +132,19 @@ class SecurityAuditUiState(
     fun openNetwork(ssid: String, saved: Boolean) {
         preparation?.cancel()
         preparedPasswords = emptyList()
-        val activeIds = runningBatch()?.auditNetworks?.filterIsInstance<AuditRecord.Dictionary>()
-            ?.filter { it.active && it.ssid == ssid }?.map { it.id }?.toSet().orEmpty()
+        val savedPassword = controller.wifiList.savedWifiList.value?.networks.orEmpty()
+            .firstOrNull { it.SSID?.removeSurrounding("\"") == ssid }
+            ?.preSharedKey?.removeSurrounding("\"")
+        val running = hasRunningDictionaryTest(ssid)
         val previous = history.value.filterIsInstance<AuditHistoryRecord.Dictionary>()
-            .filter { it.groupId == null && it.id !in activeIds && it.ssid == ssid &&
-                it.password == null && it.completed < it.total }
+            .filter { !running && it.ssid == ssid && it.password == null && it.completed < it.total }
             .maxByOrNull { it.updatedAt }
-        val page = when { saved -> SecurityAuditSheetPage.SAVED
+        val page = when { running -> SecurityAuditSheetPage.DICTIONARIES
+            saved -> SecurityAuditSheetPage.SAVED
             previous != null -> SecurityAuditSheetPage.RECOVERY
             else -> SecurityAuditSheetPage.DICTIONARIES }
         val form = SecurityAuditSheetState(show = true, page = SecurityAuditSheetPage.DICTIONARIES,
-            config = currentConfig(), ssid = ssid, saved = saved,
+            config = currentConfig(), ssid = ssid, saved = saved, savedPassword = savedPassword,
             recordId = previous?.id)
             .copy(page = page)
         _sheet.value = form
@@ -155,10 +160,26 @@ class SecurityAuditUiState(
             runCatching { DictionaryStore.getAll(app).filter { it.type == 0 } }
                 .onSuccess {
                     _dictionaries.value = it
-                    if (_sheet.compareAndSet(form, form.copy(busy = false))) prepareDictionaries()
+                    val current = _sheet.value
+                    if (current.copy(taskCount = form.taskCount) == form) {
+                        _sheet.value = current.copy(busy = false)
+                        prepareDictionaries()
+                    }
                 }
-                .onFailure { error -> _sheet.compareAndSet(form, form.copy(busy = false, message = error.message)) }
+                .onFailure { error ->
+                    val current = _sheet.value
+                    if (current.copy(taskCount = form.taskCount) == form) {
+                        _sheet.value = current.copy(busy = false, message = error.message)
+                    }
+                }
         }
+    }
+
+    fun rerunAfterSaved() {
+        val form = _sheet.value
+        if (form.recordId != null && !hasRunningDictionaryTest(form.ssid)) {
+            _sheet.update { it.copy(page = SecurityAuditSheetPage.RECOVERY, message = null) }
+        } else chooseDictionaries()
     }
 
     fun selectDictionary(id: String) {
@@ -167,9 +188,11 @@ class SecurityAuditUiState(
         prepareDictionaries()
     }
 
-    fun availableSharedSources(): List<AuditRecord.Dictionary> = runningBatch()?.auditNetworks
-        ?.filterIsInstance<AuditRecord.Dictionary>()?.filter { it.active }
-        ?.distinctBy { it.groupId ?: it.id }.orEmpty()
+    fun changeTaskCount(value: Int) { _sheet.update { it.copy(taskCount = value.coerceIn(1, 8)) } }
+
+    fun availableSharedSources(): List<AuditRecord.Dictionary> = runningTasks().flatMap { it.auditNetworks }
+        .filterIsInstance<AuditRecord.Dictionary>().filter { it.active }
+        .distinctBy { it.groupId ?: it.id }
 
     fun selectSharedSource(recordId: String) {
         val source = availableSharedSources().firstOrNull { it.id == recordId } ?: return
@@ -193,9 +216,10 @@ class SecurityAuditUiState(
             }
             val result = unique.toList()
             withContext(Dispatchers.Main) {
-                if (_sheet.value == form) {
+                val current = _sheet.value
+                if (current.copy(taskCount = form.taskCount) == form) {
                     preparedPasswords = result
-                    _sheet.value = form.copy(busy = false, candidateCount = result.size,
+                    _sheet.value = current.copy(busy = false, candidateCount = result.size,
                         preparationLog = selected.mapIndexed { index, item -> "${item.name ?: item.id}：${lists[index].size} 项" } +
                             "交错合并、去重及过滤短项后：${result.size} 项")
                 }
@@ -204,6 +228,7 @@ class SecurityAuditUiState(
     }
 
     fun useSavedPassword() {
+        if (hasRunningDictionaryTest(_sheet.value.ssid)) { chooseDictionaries(); return }
         val config = controller.wifiList.savedWifiList.value?.networks.orEmpty().firstOrNull {
             it.SSID?.removeSurrounding("\"") == _sheet.value.ssid
         } ?: run { _sheet.update { it.copy(message = "暂无已保存配置") }; return }
@@ -216,6 +241,7 @@ class SecurityAuditUiState(
 
     fun resumeHistory(recordId: String) {
         val record = history.value.filterIsInstance<AuditHistoryRecord.Dictionary>().firstOrNull { it.id == recordId } ?: return
+        if (hasRunningDictionaryTest(record.ssid)) { openNetwork(record.ssid, saved = false); return }
         _sheet.update { it.copy(ssid = record.ssid, config = currentConfig(),
             saved = controller.wifiList.savedWifiList.value?.networks.orEmpty().any { network ->
                 network.SSID?.removeSurrounding("\"") == record.ssid },
@@ -231,14 +257,16 @@ class SecurityAuditUiState(
             authorizationReadyAt = SystemClock.elapsedRealtime() + 0, message = null)//TODO
     }
     fun agree(value: Boolean) { _sheet.update { it.copy(authorizationAgreed = value) } }
-    fun changeSubtaskCount(value: Int) {
-        _sheet.update { it.copy(subtaskCount = value.coerceIn(MIN_SUBTASK_COUNT, MAX_SUBTASK_COUNT)) }
-    }
     fun dismissAuthorization() { _sheet.update { it.copy(authorizationShow = false) } }
     fun confirmRun() {
         val form = _sheet.value
         val passwords = preparedPasswords
         if (!form.authorizationShow || !form.authorizationAgreed || SystemClock.elapsedRealtime() < form.authorizationReadyAt || form.busy) return
+        if ((form.resumeRecordId != null || form.useSavedPassword) && hasRunningDictionaryTest(form.ssid)) {
+            chooseDictionaries()
+            _sheet.update { it.copy(authorizationShow = false) }
+            return
+        }
         _sheet.value = form.copy(authorizationShow = false, busy = true,
             message = if (form.sharedSourceRecordId == null) "合并字典并去重" else "加入共享候选池")
         scope.launch {
@@ -246,13 +274,13 @@ class SecurityAuditUiState(
                 var combined: File? = null
                 try {
                     if (form.sharedSourceRecordId != null) {
-                        val source = runningBatch()?.auditNetworks?.filterIsInstance<AuditRecord.Dictionary>()
-                            ?.firstOrNull { it.id == form.sharedSourceRecordId && it.active }
+                        val source = availableSharedSources().firstOrNull {
+                            it.id == form.sharedSourceRecordId && it.active }
                             ?: error("共享来源记录已结束")
                         val id = controller.tasks.joinSecurityAuditPool(SecurityAuditTaskInput(currentConfig(),
                             SecurityAuditNetworkInput(form.ssid, source.input.dictionaryId,
                                 source.input.dictionaryNames, source.input.resourceIds,
-                                sharedWithRecordId = source.id)))
+                                sharedWithRecordId = source.id)), form.taskCount)
                         controller.tasks.trackTask(id)
                         _sheet.update { it.copy(show = false, busy = false, message = null) }
                         return@withLock
@@ -267,8 +295,7 @@ class SecurityAuditUiState(
                         val id = controller.tasks.runSecurityAudit(SecurityAuditTaskInput(currentConfig(),
                             SecurityAuditNetworkInput(form.ssid, UUID.randomUUID().toString(),
                                 if (previous != null) listOf("历史候选字典") else if (form.useSavedPassword) listOf("已保存网络密码") else selected.map { it.name ?: it.id },
-                                if (previous != null) emptyList() else selected.map { it.id }, previous?.completed ?: 0,
-                                subtaskCount = form.subtaskCount)), file)
+                                if (previous != null) emptyList() else selected.map { it.id }, previous?.completed ?: 0)), file, form.taskCount)
                         controller.tasks.trackTask(id)
                     }
                     _sheet.update { it.copy(show = false, busy = false, message = null) }
@@ -280,26 +307,31 @@ class SecurityAuditUiState(
         }
     }
 
-    private fun runningBatch() = batch.value?.takeIf {
-        it.snapshot.request.payload is TaskRequestPayload.SecurityAudit &&
-            it.snapshot.state == TaskExecutionState.RUNNING
+    private fun runningTasks() = auditTasks.value.filter { it.snapshot.state == TaskExecutionState.RUNNING }
+    private fun hasRunningDictionaryTest(ssid: String) = runningTasks().any { task ->
+        task.auditNetworks.any { it is AuditRecord.Dictionary && it.active && it.ssid == ssid }
     }
     private fun runningWpsBatch() = wpsBatch.value?.takeIf { it.snapshot.state == TaskExecutionState.RUNNING }
 
     fun stopNetwork(ssid: String, mac: String? = null) {
-        val task = runningBatch() ?: runningWpsBatch() ?: return
+        val task = runningWpsBatch() ?: return
         controller.tasks.updateTask(task.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.SecurityAuditRemove(ssid, mac)))
     }
-    fun stopRecord(recordId: String) {
-        val task = runningBatch() ?: return
-        controller.tasks.updateTask(task.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.SecurityAuditStop(recordId)))
+    fun stopDictionaryNetwork(ssid: String) {
+        val task = runningTasks().firstOrNull { tracked ->
+            tracked.auditNetworks.any { it is AuditRecord.Dictionary && it.ssid == ssid && it.active }
+        } ?: return
+        controller.tasks.updateTask(task.snapshot.taskId,
+            TaskUpdateRequest(TaskUpdatePayload.SecurityAuditRemove(ssid)))
     }
-    fun stopBatch() { (runningBatch() ?: runningWpsBatch())?.let { controller.tasks.stopTask(it.snapshot.taskId) } }
+    fun stopRecord(recordId: String) {
+        val task = runningTasks().firstOrNull { tracked -> tracked.auditNetworks.any { it.id == recordId } } ?: return
+        controller.tasks.updateTask(task.snapshot.taskId,
+            TaskUpdateRequest(TaskUpdatePayload.SecurityAuditStopRecord(recordId)))
+    }
     fun inspect(recordId: String) { _sheet.value = SecurityAuditSheetState(show = true,
         page = SecurityAuditSheetPage.DETAIL, recordId = recordId,
         ssid = history.value.filterIsInstance<AuditHistoryRecord.Dictionary>().firstOrNull { it.id == recordId }?.ssid.orEmpty()) }
-    fun inspectGroup(groupId: String) { _sheet.value = SecurityAuditSheetState(show = true,
-        page = SecurityAuditSheetPage.GROUP_DETAIL, groupId = groupId) }
 
     // ── WPS 安全测试 ────────────────────────────────────────────────────────
     fun configureWps() { _wpsForm.value = WpsAuditSheetState(show = true,
@@ -309,14 +341,15 @@ class SecurityAuditUiState(
         _wpsForm.update { it.copy(config = config) }
     }
 
-    fun openWpsNetwork(ssid: String, saved: Boolean, supportsWps: Boolean, accessPoints: List<ScanResult> = emptyList()) {
-        val previous = history.value.filterIsInstance<AuditHistoryRecord.Wps>()
-            .firstOrNull { it.ssid == ssid && it.password == null && it.phase != WpsSecurityAuditPhase.DONE }
+    fun openWpsNetwork(ssid: String, saved: Boolean, accessPoints: List<ScanResult>) {
+        val candidates = accessPoints.filter { !it.BSSID.isNullOrBlank() && it.supportsWps() }
+            .sortedWith(compareByDescending<ScanResult> { if (it.level == 0) Int.MIN_VALUE else it.level }
+                .thenBy { it.BSSID.lowercase() })
+            .distinctBy { it.BSSID.lowercase() }
         _wpsForm.value = WpsAuditSheetState(show = true,
-            page = if (ssid.isEmpty()) WpsAuditSheetPage.ACCESS_POINTS else WpsAuditSheetPage.TARGET,
-            ssid = ssid, saved = saved, supportsWps = supportsWps, config = currentWpsConfig(),
-            recordId = if (ssid.isEmpty()) null else previous?.id,
-            accessPoints = accessPoints.filter { !it.BSSID.isNullOrEmpty() && it.supportsWps() }.distinctBy { it.BSSID.lowercase() })
+            page = WpsAuditSheetPage.ACCESS_POINTS,
+            ssid = ssid, saved = saved, supportsWps = candidates.isNotEmpty(), config = currentWpsConfig(),
+            accessPoints = candidates)
     }
 
     fun selectWpsAccessPoint(mac: String) {
@@ -329,13 +362,14 @@ class SecurityAuditUiState(
     }
 
     fun confirmWpsAccessPoint() {
-        if (_wpsForm.value.selectedMac == null) return
+        val form = _wpsForm.value
+        if (form.accessPoints.none { it.BSSID.equals(form.selectedMac, true) }) return
         _wpsForm.update { it.copy(page = WpsAuditSheetPage.TARGET) }
     }
 
     fun requestWpsRun() {
         val form = _wpsForm.value
-        if (form.ssid.isEmpty() && form.selectedMac == null) {
+        if (form.accessPoints.none { it.BSSID.equals(form.selectedMac, true) }) {
             _wpsForm.update { it.copy(page = WpsAuditSheetPage.ACCESS_POINTS, message = "请先选择已授权的接入点") }; return
         }
         if (!form.supportsWps) { _wpsForm.update { it.copy(message = "此网络未广播 WPS 能力") }; return }
@@ -348,6 +382,11 @@ class SecurityAuditUiState(
         val form = _wpsForm.value
         if (!form.authorizationShow || !form.authorizationAgreed || form.busy) return
         if (SystemClock.elapsedRealtime() < form.authorizationReadyAt) return
+        if (form.accessPoints.none { it.BSSID.equals(form.selectedMac, true) }) {
+            _wpsForm.update { it.copy(page = WpsAuditSheetPage.ACCESS_POINTS,
+                authorizationShow = false, message = "请先选择已授权的接入点") }
+            return
+        }
         _wpsForm.value = form.copy(authorizationShow = false, busy = true, message = null)
         scope.launch {
             try {

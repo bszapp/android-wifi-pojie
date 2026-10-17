@@ -477,9 +477,10 @@ private fun DisplayedTaskSheet(
         is TaskRequestPayload.WpsPin -> WpsPinTaskSheet(task, viewModel::stopDisplayedTask,
             viewModel::closeDisplayedTask, viewModel::connectCapturedWpsNetwork)
         is TaskRequestPayload.SecurityAudit -> SecurityAuditTaskSheet(task,
-            onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
-            onInspect = viewModel.securityAudit::inspect,
-            onStopRecord = viewModel.securityAudit::stopRecord)
+            onStop = viewModel::stopDisplayedTask, onStopRecord = viewModel.securityAudit::stopRecord,
+            onStopNetwork = viewModel.securityAudit::stopDictionaryNetwork,
+            onDismiss = viewModel::closeDisplayedTask,
+            onInspect = viewModel.securityAudit::inspect)
         is TaskRequestPayload.WpsSecurityAudit -> WpsSecurityAuditTaskSheet(task,
             onStop = viewModel::stopDisplayedTask, onDismiss = viewModel::closeDisplayedTask,
             onInspect = viewModel.securityAudit::inspectWps)

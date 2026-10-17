@@ -47,8 +47,10 @@ sealed class AuditRecord : Parcelable {
         val completed: Int = 0,
         override val attempts: Long = 0,
         val retryCount: Int = 0,
-        val elapsedMillis: Long = 0,
-        val averageAttemptMillis: Long? = null,
+        /** 同 SSID、同候选池的累计尝试时间；独立任务以自身为一组。 */
+        val groupElapsedMillis: Long = 0,
+        /** 此组最近最多 20 次尝试的平均耗时。 */
+        val groupAverageAttemptMillis: Long? = null,
         val nextAttemptAt: Long? = null,
         val stage: ConnectWifiStage? = null,
         override val message: String = "排队中",
@@ -62,6 +64,9 @@ sealed class AuditRecord : Parcelable {
         val window: String? = null,
         /** 本轮正在尝试的密码；非运行中为 null。 */
         val attemptPassword: String? = null,
+        /** 最近一次完成尝试的全局顺序；只在尝试结束时更新，供历史按事件顺序写入。 */
+        val historyRevision: Long = 0,
+        val historyUpdatedAt: Long = 0,
     ) : AuditRecord() {
         override val kind: AuditRecordKind get() = AuditRecordKind.DICTIONARY
         override val ssid: String get() = input.ssid
@@ -126,11 +131,9 @@ sealed class AuditHistoryRecord {
         val completed: Int,
         override val password: String?,
         override val updatedAt: Long,
-        val elapsedMillis: Long,
-        val averageAttemptMillis: Long?,
+        val groupElapsedMillis: Long,
+        val groupAverageAttemptMillis: Long?,
         val dictionaryPosition: Int?,
-        val groupId: String? = null,
-        val poolCompleted: Int? = null,
     ) : AuditHistoryRecord() {
         override val kind get() = AuditRecordKind.DICTIONARY
         val total get() = passwords.size

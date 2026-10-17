@@ -13,7 +13,8 @@ import kotlinx.parcelize.Parcelize
  *
  * ## 并发与任务 ID
  *
- * 同一个 Service 进程同时只允许一个运行中任务，不提供排队。任务请求被接受后才分配 ID；
+ * 普通任务同时只允许一个运行；安全测试任务共享一个调度器，可各自排队、冷却或占用窗口。
+ * 任务请求被接受后才分配 ID；
  * ID 从 1 开始，在 Service 生命周期内严格递增且不复用。被任务占用或参数校验拒绝的请求
  * 不分配 ID。Service 重启后任务及其 ID 空间重新开始。
  *
@@ -276,13 +277,8 @@ sealed class TaskRequestPayload : Parcelable {
 
 @Parcelize
 sealed class TaskUpdatePayload : Parcelable {
-    /** 追加一条独立运行记录；允许 SSID 重复，已提交记录的字典不可更换。 */
-    data class SecurityAuditAdd(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
-    /** 从现有记录的公共候选池追加成员，不再次传输字典。 */
-    data class SecurityAuditJoin(val network: SecurityAuditNetworkInput) : TaskUpdatePayload()
-    /** 停止指定安全测试运行记录；同一 SSID 的其他记录保持运行。 */
-    data class SecurityAuditStop(val recordId: String) : TaskUpdatePayload()
     data class SecurityAuditRemove(val ssid: String, val mac: String? = null) : TaskUpdatePayload()
+    data class SecurityAuditStopRecord(val recordId: String) : TaskUpdatePayload()
     data class SecurityAuditConfigure(val config: SecurityAuditConfig) : TaskUpdatePayload()
 
     data class WpsSecurityAuditAdd(val targets: List<WpsSecurityAuditTarget>) : TaskUpdatePayload()

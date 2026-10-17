@@ -7,12 +7,12 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * 旧版多网络轮询、冷却、重试调度；单次连接由安全测试专用执行器完成。
+ * 单个安全测试顶层任务内部的窗口调度器；单次连接由安全测试专用执行器完成。
  *
  * 调度线程只负责领号、开窗与收尾，[entries] 的读写也只发生在它身上；真正阻塞在连接上的
  * 工作交给工作线程，结果经 [outcomes] 回流。这样两种模式共用同一套状态机：
  *
- * - 未开启多线程时固定占用 wlan0 这一张窗口，同一时刻只有一个任务在跑，与旧版串行行为一致。
+ * - 系统 API 使用唯一的连接焦点名额；网卡方式未开启多线程时使用 wlan0，一次只有一个任务在跑。
  * - 开启多线程（仅网卡方式）时可作为普通 Wi-Fi 客户端的网卡即窗口，空闲窗口按最久未尝试
  *   优先领一个排队记录；一张网卡一次只跑一个密码，做完一次尝试（成功/错误/异常）就回到
  *   队尾重新排号，窗口随即交还给下一个任务。
@@ -20,60 +20,85 @@ import java.util.concurrent.TimeUnit
  * 共享字典池按领取法运转：成员手头空了就向池子申领一个互不相同的候选并占住它，
  * 得到确定结果才交还，重试冷却期间保持归属。
  */
-internal class SecurityAuditTask(
-    input: SecurityAuditTaskInput,
-    private val dictionary: (String) -> List<String>,
+internal class SecurityAuditDispatcher(
+    initialConfig: SecurityAuditConfig,
     private val worker: SecurityAuditConnectWorker,
     /** 可作为普通 Wi-Fi 客户端的网卡；多线程模式下作为可分配的窗口。 */
     private val interfaces: () -> List<String> = { emptyList() },
-) : ServiceTask {
-    @Volatile private var config = input.config
-    private val updates = LinkedBlockingQueue<TaskUpdatePayload>()
+) {
+    @Volatile private var config = initialConfig
+    private val updates = LinkedBlockingQueue<Command>()
     private val entries = mutableListOf<Entry>()
     /** 工作线程写、调度线程读；进度只搬数据，不直接改记录。 */
     private val stages = LinkedBlockingQueue<StageUpdate>()
     private val outcomes = LinkedBlockingQueue<Outcome>()
+    /** 统计键由 SSID 和候选池 ID 组成；未共享时以记录 ID 作池 ID。 */
+    private val groupStats = mutableMapOf<Pair<String, String>, GroupStats>()
     /** recordId -> 正占用某张网卡的尝试。 */
     private val running = mutableMapOf<String, Job>()
+    private var historyRevision = 0L
+    private var historyUpdatedAt = 0L
     @Volatile private var accepting = true
 
     private var cachedInterfaces: List<String> = emptyList()
     private var interfaceScannedAt = 0L
 
-    init { add(input.network) }
+    fun isAccepting(): Boolean = synchronized(updates) { accepting }
 
-    override fun update(update: TaskUpdateRequest): Boolean {
+    fun currentConfig(): SecurityAuditConfig = config
+
+    fun submitGroup(input: SecurityAuditNetworkInput, passwords: List<String>,
+        count: Int, context: TaskContext): Boolean =
         synchronized(updates) {
             if (!accepting) return false
-            when (update.payload) {
-                is TaskUpdatePayload.SecurityAuditAdd -> {
-                    // TaskManager 校验并持有候选字典 ID；同一 SSID 可重复追加独立记录。
-                }
-                is TaskUpdatePayload.SecurityAuditJoin,
-                is TaskUpdatePayload.SecurityAuditStop,
-                is TaskUpdatePayload.SecurityAuditConfigure -> Unit
-                else -> return false
-            }
-            updates.offer(update.payload)
+            require(count > 0)
+            updates.offer(Command.AddGroup(input, passwords, count, context))
             return true
         }
+
+    fun joinGroup(input: SecurityAuditNetworkInput, count: Int, context: TaskContext): Boolean =
+        synchronized(updates) {
+            if (!accepting) return false
+            require(count > 0)
+            updates.offer(Command.JoinGroup(input, count, context))
+            true
+        }
+
+    fun stopRecord(recordId: String): Boolean = synchronized(updates) {
+        if (!accepting) return false
+        updates.offer(Command.StopRecord(recordId))
+        true
     }
 
-    override fun run(context: TaskContext) {
-        context.log(if (parallel()) "授权网络安全测试开始：网卡即窗口，多任务并行领取窗口" +
-            "，每个窗口一次只跑一个密码"
-        else "授权网络安全测试开始：多网络排队，单次连接串行执行")
-        publish(context)
+    fun stopNetwork(ssid: String): Boolean = synchronized(updates) {
+        if (!accepting) return false
+        updates.offer(Command.StopNetwork(ssid))
+        true
+    }
+
+    fun stopAll(): Boolean = synchronized(updates) {
+        if (!accepting) return false
+        accepting = false
+        updates.offer(Command.StopAll)
+        true
+    }
+
+    fun configure(value: SecurityAuditConfig): Boolean = synchronized(updates) {
+        if (!accepting) return false
+        updates.offer(Command.Configure(value))
+        true
+    }
+
+    fun run() {
         try {
             while (true) {
                 try {
-                    context.ensureRunning()
-                    drainUpdates(context)
-                    drainStages(context)
-                    reap(context)
-                    retireExhaustedPools(context)
-                    dispatch(context)
-                    retireExhaustedPools(context)
+                    drainUpdates()
+                    drainStages()
+                    reap()
+                    retireExhaustedPools()
+                    dispatch()
+                    retireExhaustedPools()
                     val active = entries.filter { it.record.active }
                     if (active.isEmpty() && running.isEmpty()) {
                         synchronized(updates) {
@@ -81,13 +106,12 @@ internal class SecurityAuditTask(
                             accepting = false
                         }
                         if (accepting) continue
-                        context.log("运行队列为空，本批安全测试结束")
                         return
                     }
                     // 各个改状态的地方都自带 publish，这里不再重复广播。
                     if (running.isNotEmpty()) {
                         // 有窗口在跑就短等，保证停止/配置变更与进度能及时被处理。
-                        outcomes.poll(POLL_WITH_RUNNING_MS, TimeUnit.MILLISECONDS)?.let { finish(it, context) }
+                        outcomes.poll(POLL_WITH_RUNNING_MS, TimeUnit.MILLISECONDS)?.let(::finish)
                     } else {
                         // 共享池被占满的成员此刻领不到候选，拿它算等待会算成 0 并空转；
                         // 只把“手里有候选”或“池子还能发号”的成员纳入等待计算。
@@ -97,32 +121,38 @@ internal class SecurityAuditTask(
                         }
                         val wait = if (schedulable.isEmpty()) IDLE_POLL_MS
                         else SecurityAuditQueue.waitMillis(schedulable).coerceIn(1L, 2000L)
-                        updates.poll(wait, TimeUnit.MILLISECONDS)?.let { applyUpdate(it, context) }
+                        updates.poll(wait, TimeUnit.MILLISECONDS)?.let(::applyUpdate)
                     }
                 } catch (stop: InterruptedException) {
                     throw stop
                 } catch (error: ConnectionCleanupException) {
-                    context.log("上一轮断开未确认，停止提交后续连接：${error.cause?.message ?: error.message}")
+                    entries.filter { it.record.active }.forEach {
+                        it.context.log("上一轮断开未确认，停止提交后续连接：${error.cause?.message ?: error.message}")
+                    }
                     throw error
                 } catch (error: Exception) {
-                    context.log("本轮异常，保留当前位置继续：${error.message ?: error.javaClass.name}")
+                    entries.filter { it.record.active }.forEach {
+                        it.context.log("本轮异常，保留当前位置继续：${error.message ?: error.javaClass.name}")
+                    }
                     Thread.sleep(100)
                 }
             }
         } finally {
-            accepting = false
-            drainRunning(context)
-            runCatching { worker.closeNetworkCardSession(context) }
-                .onFailure { context.log("关闭持久网卡脚本会话失败：${it.message ?: it.javaClass.name}") }
+            synchronized(updates) { accepting = false }
+            drainRunning()
+            entries.lastOrNull()?.context?.let { context ->
+                runCatching { worker.closeNetworkCardSession(context) }
+                    .onFailure { context.log("关闭持久网卡脚本会话失败：${it.message ?: it.javaClass.name}") }
+            }
             entries.filter { it.record.active }.forEach {
                 it.record = it.record.copy(state = SecurityAuditNetworkState.STOPPED,
                     stage = null, nextAttemptAt = null, updatedAt = System.currentTimeMillis(),
                     window = null, attemptPassword = null, message = "已停止")
             }
             entries.filter { it.record.state != SecurityAuditNetworkState.SUCCEEDED }.forEach {
-                forgetNetwork(it, context)
+                forgetNetwork(it, it.context)
             }
-            publish(context)
+            publish()
         }
     }
 
@@ -132,9 +162,13 @@ internal class SecurityAuditTask(
     private fun parallel(): Boolean =
         config.multithreaded && config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD
 
-    /** 当前没被占用的窗口；未开多线程时恒为单张 wlan0，与脚本旧行为一致。 */
+    /** 当前没被占用的窗口；系统 API 的窗口是连接焦点名额，网卡方式是接口名。 */
     private fun freeWindows(): List<String> {
-        val all = if (parallel()) enumerateInterfaces() else listOf(DEFAULT_INTERFACE)
+        val all = when {
+            config.connectionMethod == SecurityAuditConnectionMethod.SYSTEM -> listOf(SYSTEM_CONNECTION_FOCUS)
+            parallel() -> enumerateInterfaces()
+            else -> listOf(DEFAULT_INTERFACE)
+        }
         val used = running.values.mapTo(mutableSetOf()) { it.window }
         return all.filterNot { it in used }
     }
@@ -150,11 +184,11 @@ internal class SecurityAuditTask(
             interfaceScannedAt = now
             cachedInterfaces = interfaces().filter { it.matches(INTERFACE_NAME) }.distinct()
         }
-        return cachedInterfaces.ifEmpty { listOf(DEFAULT_INTERFACE) }
+        return cachedInterfaces
     }
 
     /** 把空闲窗口交给排队记录：最久未尝试的先上，领不到候选的（共享池被占满）跳过。 */
-    private fun dispatch(context: TaskContext) {
+    private fun dispatch() {
         if (!parallel() && running.isNotEmpty()) return
         val free = freeWindows()
         if (free.isEmpty()) return
@@ -165,7 +199,7 @@ internal class SecurityAuditTask(
         for (window in free.take(if (parallel()) free.size else 1)) {
             waiting.firstOrNull { entry ->
                 entry.record.active && !running.containsKey(entry.record.id) &&
-                    entry.readyAt <= SystemClock.elapsedRealtime() && start(entry, window, context)
+                    entry.readyAt <= SystemClock.elapsedRealtime() && start(entry, window)
             } ?: break
         }
     }
@@ -174,7 +208,7 @@ internal class SecurityAuditTask(
      * 让一个记录占用 [window] 跑一次密码尝试；返回 false 表示这次没跑起来（共享池领不到
      * 候选或字典已尽），调用方应把窗口让给下一个候选。
      */
-    private fun start(entry: Entry, window: String, context: TaskContext): Boolean {
+    private fun start(entry: Entry, window: String): Boolean {
         if (running.containsKey(entry.record.id)) return false
         val pool = entry.pool
         val position = if (pool == null) entry.record.completed
@@ -182,19 +216,19 @@ internal class SecurityAuditTask(
         entry.heldIndex = if (pool == null) null else position
         val password = entry.passwords.getOrNull(position)
         if (password == null) {
-            exhaust(entry, context)
-            publish(context)
+            exhaust(entry)
+            publish()
             return false
         }
-        val token = entry.attemptToken
+        val token = ++entry.attemptToken
         val selectedConfig = config
         entry.lastAttemptAt = SystemClock.elapsedRealtime()
         val started = entry.lastAttemptAt
         // 网卡方式的随机策略在本轮连接前决定并保持；返回 null 即使用设备原 MAC。
         val mac = selectMac(entry, selectedConfig)
-        val child = context.forAttempt(entry.record.input.ssid, { progress ->
+        val child = entry.context.forAttempt(entry.record.input.ssid, { progress ->
             // 工作线程只投递数据，记录改写统一回到调度线程，避免并发写同一条记录。
-            if (progress is TaskProgress.ConnectWifi) stages.offer(StageUpdate(entry.record.id, progress.stage))
+            if (progress is TaskProgress.ConnectWifi) stages.offer(StageUpdate(entry.record.id, token, progress.stage))
         }, { if (token != entry.attemptToken) throw AttemptChanged() }, { config })
         val job = Job(entry.record.id, window, entry.record.input.ssid, password, mac,
             selectedConfig, child, started, position)
@@ -206,10 +240,10 @@ internal class SecurityAuditTask(
                 window = window, attemptPassword = password,
                 message = if (mac != null) "正在尝试：$password\nMAC：$mac" else "正在尝试：$password",
                 stage = ConnectWifiStage.ROUTER_COMMUNICATION)
-            context.log("[${entry.record.input.ssid}] 尝试字典第 ${position + 1}/${entry.passwords.size} 位" +
+            entry.context.log("[${entry.record.input.ssid}] 尝试字典第 ${position + 1}/${entry.passwords.size} 位" +
                 " 窗口=$window" + (mac?.let { " mac=$it" } ?: ""))
-            publish(context)
-            Thread({ runJob(job, context, entry) }, "security-audit-$window").apply {
+            publish()
+            Thread({ runJob(job, entry) }, "security-audit-$window").apply {
                 isDaemon = true
                 start()
             }
@@ -218,13 +252,17 @@ internal class SecurityAuditTask(
             running.remove(entry.record.id)
             entry.heldIndex?.let { pool?.release(it) }
             entry.heldIndex = null
+            entry.record = entry.record.copy(state = SecurityAuditNetworkState.QUEUED,
+                stage = null, window = null, attemptPassword = null,
+                attempts = entry.record.attempts - 1, message = "排队中",
+                updatedAt = System.currentTimeMillis())
             throw error
         }
         return true
     }
 
     /** 工作线程：只跑阻塞的连接与清理，全程不改写 [entries] 里的记录字段。 */
-    private fun runJob(job: Job, context: TaskContext, entry: Entry) {
+    private fun runJob(job: Job, entry: Entry) {
         var result = ConnectionAttemptResult.ERROR
         var duration = 0L
         try {
@@ -251,43 +289,47 @@ internal class SecurityAuditTask(
         } catch (error: ConnectionCleanupException) {
             outcomes.offer(Outcome.CleanupFailed(job.recordId, job.window, error))
         } catch (error: Exception) {
-            context.log("[${job.ssid}] 执行异常：${error.message ?: error.javaClass.name}")
+            entry.context.log("[${job.ssid}] 执行异常：${error.message ?: error.javaClass.name}")
             outcomes.offer(Outcome.Finished(job.recordId, job.window, ConnectionAttemptResult.ERROR, duration))
         }
     }
 
-    private fun reap(context: TaskContext) {
-        while (true) finish(outcomes.poll() ?: break, context)
+    private fun reap() {
+        while (true) finish(outcomes.poll() ?: break)
     }
 
-    private fun drainStages(context: TaskContext) {
+    private fun drainStages() {
         var changed = false
         while (true) {
             val update = stages.poll() ?: break
-            changed = true
             entries.firstOrNull { it.record.id == update.recordId }?.let { entry ->
-                entry.record = entry.record.copy(stage = update.stage, updatedAt = System.currentTimeMillis())
+                if (entry.attemptToken == update.token && running.containsKey(update.recordId) &&
+                    entry.record.state == SecurityAuditNetworkState.CONNECTING) {
+                    entry.record = entry.record.copy(stage = update.stage, updatedAt = System.currentTimeMillis())
+                    changed = true
+                }
             }
         }
-        if (changed) publish(context)
+        if (changed) publish()
     }
 
     /** 共享池再没有可领取的候选时，把仍然排队的成员整体收尾。 */
-    private fun retireExhaustedPools(context: TaskContext) {
+    private fun retireExhaustedPools() {
         var retired = false
         while (true) {
             val victim = entries.firstOrNull { it.record.active && it.pool?.exhausted() == true } ?: break
-            exhaust(victim, context)
+            exhaust(victim)
             retired = true
         }
-        if (retired) publish(context)
+        if (retired) publish()
     }
 
     // ------------------------------------------------------------------ 收尾
 
-    private fun finish(outcome: Outcome, context: TaskContext) {
+    private fun finish(outcome: Outcome) {
         val job = running.remove(outcome.recordId) ?: return
         val entry = entries.firstOrNull { it.record.id == outcome.recordId } ?: return
+        val context = entry.context
         // 窗口已经交还：受理者与候选密码一并撤下，避免界面/通知继续显示上一轮的现场。
         if (entry.record.window != null || entry.record.attemptPassword != null) {
             entry.record = entry.record.copy(window = null, attemptPassword = null,
@@ -298,7 +340,7 @@ internal class SecurityAuditTask(
             entry.heldIndex = null
             entry.record = entry.record.copy(state = SecurityAuditNetworkState.ERROR, stage = null,
                 updatedAt = System.currentTimeMillis(), message = "上一轮断开未确认，已停止继续连接")
-            publish(context)
+            publish()
             throw outcome.cause
         }
         if (!entry.record.active) {
@@ -306,7 +348,7 @@ internal class SecurityAuditTask(
             entry.heldIndex?.let { entry.pool?.release(it) }
             entry.heldIndex = null
             forgetNetwork(entry, context)
-            publish(context)
+            publish()
             return
         }
         when (outcome) {
@@ -314,7 +356,7 @@ internal class SecurityAuditTask(
                 // 配置或共享关系变化，本轮作废但候选与位置都保留，稍后重新排号。
                 entry.record = entry.record.copy(state = SecurityAuditNetworkState.QUEUED, stage = null,
                     nextAttemptAt = null, message = "排队中", attempts = entry.record.attempts - 1)
-                publish(context)
+                publish()
             }
             is Outcome.Finished -> finishAttempt(entry, job, outcome, context)
             is Outcome.CleanupFailed -> Unit
@@ -325,20 +367,11 @@ internal class SecurityAuditTask(
         val result = outcome.result
         val duration = outcome.duration
         val position = job.position
-        val totalDuration = entry.record.elapsedMillis + duration
-        when (result) {
-            ConnectionAttemptResult.FAILED -> {
-                entry.costs += duration
-                if (entry.costs.size > 20) entry.costs.removeAt(0)
-            }
-            ConnectionAttemptResult.TIMEOUT, ConnectionAttemptResult.REJECTED -> {
-                if (entry.costs.isNotEmpty()) entry.costs[entry.costs.lastIndex] += duration
-            }
-            else -> Unit
-        }
-        entry.record = entry.record.copy(elapsedMillis = totalDuration, stage = null,
-            updatedAt = System.currentTimeMillis(), averageAttemptMillis =
-                if (entry.costs.size >= 5) entry.costs.sum() / entry.costs.size else null)
+        val stats = groupStats.getOrPut(groupKey(entry)) { GroupStats() }
+        stats.record(duration)
+        entry.record = entry.record.copy(stage = null, updatedAt = System.currentTimeMillis(),
+            groupElapsedMillis = stats.elapsedMillis,
+            groupAverageAttemptMillis = stats.averageAttemptMillis)
         context.log("[${entry.record.input.ssid}] 本次结果=$result，耗时=${duration}ms")
         when (result) {
             ConnectionAttemptResult.SUCCESS -> {
@@ -356,7 +389,7 @@ internal class SecurityAuditTask(
                             member.attemptToken++
                             member.record = member.record.copy(state = SecurityAuditNetworkState.STOPPED,
                                 stage = null, nextAttemptAt = null, message = "共享候选池已找到密码")
-                            forgetNetwork(member, context)
+                            forgetNetwork(member, member.context)
                         }
                     }
                 }
@@ -389,13 +422,20 @@ internal class SecurityAuditTask(
         }
         entry.pool?.let { pool ->
             entries.filter { it.pool === pool && !it.record.active && it.record.state != SecurityAuditNetworkState.SUCCEEDED }
-                .forEach { forgetNetwork(it, context) }
+                .forEach { forgetNetwork(it, it.context) }
         }
-        publish(context)
+        // 一次尝试完成后，公共候选池的每个 SSID 都收到相同的历史事件。
+        historyRevision++
+        historyUpdatedAt = maxOf(System.currentTimeMillis(), historyUpdatedAt + 1)
+        (entry.pool?.let { pool -> entries.filter { it.pool === pool } } ?: listOf(entry)).forEach { member ->
+            member.record = member.record.copy(historyRevision = historyRevision,
+                historyUpdatedAt = historyUpdatedAt)
+        }
+        publish()
     }
 
     /** 任务结束前等所有窗口交还；停止指令会让工作线程在一次轮询内主动退出。 */
-    private fun drainRunning(context: TaskContext) {
+    private fun drainRunning() {
         val interrupted = Thread.interrupted()
         val deadline = SystemClock.elapsedRealtime() + SHUTDOWN_DEADLINE_MS
         try {
@@ -403,14 +443,16 @@ internal class SecurityAuditTask(
                 val outcome = try { outcomes.poll(WINDOW_DRAIN_POLL_MS, TimeUnit.MILLISECONDS) }
                 catch (_: InterruptedException) { null }
                 if (outcome != null) {
-                    try { finish(outcome, context) }
+                    try { finish(outcome) }
                     catch (error: Exception) {
-                        context.log("收尾窗口未确认断开：${error.message ?: error.javaClass.name}")
+                        entries.firstOrNull { it.record.id == outcome.recordId }?.context
+                            ?.log("收尾窗口未确认断开：${error.message ?: error.javaClass.name}")
                     }
                 }
             }
             if (running.isNotEmpty()) {
-                context.log("等待 ${running.size} 个窗口交还超时，直接关闭脚本会话")
+                running.keys.forEach { id -> entries.firstOrNull { it.record.id == id }?.context
+                    ?.log("等待窗口交还超时，直接关闭脚本会话") }
             }
         } finally {
             if (interrupted) Thread.currentThread().interrupt()
@@ -436,102 +478,117 @@ internal class SecurityAuditTask(
         val completed = pool.completed
         val now = System.currentTimeMillis()
         entries.filter { it.pool === pool }.forEach { member ->
-            member.readyAt = 0
-            member.record = member.record.copy(completed = completed, poolCompleted = completed,
-                retryCount = 0, nextAttemptAt = null, updatedAt = now)
+            if (member === entry) {
+                member.readyAt = 0
+                member.record = member.record.copy(completed = completed, poolCompleted = completed,
+                    retryCount = 0, nextAttemptAt = null, state = SecurityAuditNetworkState.QUEUED,
+                    updatedAt = now, message = "排队中")
+            } else {
+                // 公共游标前进不影响其他任务手中候选、重试次数或冷却时间。
+                member.record = member.record.copy(completed = completed, poolCompleted = completed,
+                    updatedAt = now)
+            }
         }
     }
 
-    private fun exhaust(entry: Entry, context: TaskContext) {
+    private fun exhaust(entry: Entry) {
         val members = entry.pool?.let { pool -> entries.filter { it.pool === pool } } ?: listOf(entry)
         members.filter { it.record.active }.forEach { member ->
             member.heldIndex = null
             member.record = member.record.copy(state = SecurityAuditNetworkState.EXHAUSTED,
                 stage = null, message = "给定字典未发现密码")
-            forgetNetwork(member, context)
+            forgetNetwork(member, member.context)
         }
     }
 
-    private fun drainUpdates(context: TaskContext) {
-        var applied = false
-        while (true) { applyUpdate(updates.poll() ?: break, context); applied = true }
-        if (applied) publish(context)
+    private fun drainUpdates() {
+        while (true) applyUpdate(updates.poll() ?: break)
     }
 
-    private fun applyUpdate(update: TaskUpdatePayload, context: TaskContext) {
+    private fun applyUpdate(update: Command) {
         when (update) {
-            is TaskUpdatePayload.SecurityAuditAdd -> {
-                add(update.network)
-                context.log("[${update.network.ssid}] 已添加运行网络，候选字典固定")
+            is Command.AddGroup -> {
+                val source = add(update.network, update.passwords, update.context)
+                source.context.log("[${source.record.input.ssid}] 已加入候号队列，候选字典固定")
+                repeat(update.count - 1) {
+                    val joined = sharePool(source, update.network, update.context)
+                    joined.context.log("[${joined.record.input.ssid}] 已加入共享候选池 ${joined.pool?.id}")
+                }
             }
-            is TaskUpdatePayload.SecurityAuditJoin -> {
-                val source = entries.firstOrNull { it.record.id == update.network.sharedWithRecordId }
+            is Command.JoinGroup -> {
+                val source = entries.firstOrNull { it.record.id == update.network.sharedWithRecordId && it.record.active }
                 if (source == null) {
-                    context.log("[${update.network.ssid}] 共享来源记录不存在，加入失败")
+                    update.context.log("[${update.network.ssid}] 共享来源测试记录不存在，加入失败")
                 } else {
-                    val joined = sharePool(source, update.network)
-                    context.log("[${joined.record.input.ssid}] 已加入共享候选池 ${joined.pool?.id}，" +
-                        "记录 ${joined.record.id}")
-                }
-            }
-            is TaskUpdatePayload.SecurityAuditStop -> {
-                val entry = entries.firstOrNull { it.record.id == update.recordId && it.record.active }
-                if (entry != null) {
-                    if (running.containsKey(entry.record.id)) {
-                        // 占着窗口：撤销本轮，候选与窗口由收尾统一交还。
-                        entry.attemptToken++
-                    } else {
-                        entry.heldIndex?.let { entry.pool?.release(it) }
-                        entry.heldIndex = null
+                    repeat(update.count) {
+                        val joined = sharePool(source, update.network, update.context)
+                        joined.context.log("[${joined.record.input.ssid}] 已加入共享候选池 ${joined.pool?.id}")
                     }
-                    entry.record = entry.record.copy(state = SecurityAuditNetworkState.STOPPED,
-                        stage = null, nextAttemptAt = null, updatedAt = System.currentTimeMillis(), message = "用户停止此任务")
-                    forgetNetwork(entry, context)
-                    context.log("[${entry.record.input.ssid}] 已停止运行记录 ${entry.record.id}")
                 }
             }
-            is TaskUpdatePayload.SecurityAuditConfigure -> {
+            is Command.StopRecord -> {
+                val entry = entries.firstOrNull { it.record.id == update.recordId && it.record.active }
+                if (entry != null) stopEntry(entry, "用户停止此测试")
+            }
+            is Command.StopNetwork -> entries.filter { it.record.active && it.record.ssid == update.ssid }
+                .forEach { stopEntry(it, "用户停止此网络的测试") }
+            Command.StopAll -> entries.filter { it.record.active }
+                .forEach { stopEntry(it, "用户停止安全测试") }
+            is Command.Configure -> {
                 config = update.config
                 entries.filter { it.record.active }.forEach {
                     it.record = it.record.copy(config = config)
-                    if (it.record.retryCount > 0) {
+                    if (it.record.retryCount > 0 && !running.containsKey(it.record.id)) {
                         it.readyAt = SecurityAuditQueue.readyAt(it.lastAttemptAt, cooldownMillis(it.record.retryCount))
                         it.record = it.record.copy(nextAttemptAt = SecurityAuditQueue.displayTime(it.readyAt),
                             state = if (it.readyAt > SystemClock.elapsedRealtime()) SecurityAuditNetworkState.COOLDOWN else SecurityAuditNetworkState.QUEUED)
                     }
+                    it.context.log("安全测试运行配置已更新")
                 }
-                context.log("安全测试运行配置已更新")
             }
-            else -> error("安全测试不支持此更新")
         }
+        publish()
     }
 
-    private fun add(input: SecurityAuditNetworkInput) {
-        val passwords = dictionary(input.dictionaryId)
+    private fun stopEntry(entry: Entry, reason: String) {
+        if (running.containsKey(entry.record.id)) entry.attemptToken++
+        else {
+            entry.heldIndex?.let { entry.pool?.release(it) }
+            entry.heldIndex = null
+        }
+        entry.record = entry.record.copy(state = SecurityAuditNetworkState.STOPPED,
+            stage = null, nextAttemptAt = null, updatedAt = System.currentTimeMillis(),
+            window = null, attemptPassword = null, message = reason)
+        if (!running.containsKey(entry.record.id)) forgetNetwork(entry, entry.context)
+        entry.context.log("[${entry.record.ssid}] $reason")
+    }
+
+    private fun add(input: SecurityAuditNetworkInput, passwords: List<String>, context: TaskContext): Entry {
         val now = System.currentTimeMillis()
-        val source = Entry(AuditRecord.Dictionary(UUID.randomUUID().toString(), input, config,
+        val source = Entry(context, AuditRecord.Dictionary(UUID.randomUUID().toString(), input, config,
             now, now, SecurityAuditNetworkState.QUEUED, passwords.size,
             completed = input.startIndex.coerceIn(0, passwords.size)), passwords)
         entries += source
-        // 一次「运行」的多条并行实例：接进同一个候选池，各网卡领取互不相同的候选。
-        repeat(input.subtaskCount.coerceIn(1, MAX_SUBTASK_COUNT) - 1) { sharePool(source, input) }
+        return source
     }
 
     /**
      * 把一条新记录接进 [source] 的候选池；首次调用会把来源记录升级为共享池模式。
      * 正在跑的来源本轮作废，保证它仍占着的候选能被正确搬进新池。
      */
-    private fun sharePool(source: Entry, network: SecurityAuditNetworkInput): Entry {
+    private fun sharePool(source: Entry, network: SecurityAuditNetworkInput, context: TaskContext): Entry {
         if (running.containsKey(source.record.id)) source.attemptToken++
-        val held = source.heldIndex
+        val held = running[source.record.id]?.position ?: source.heldIndex
         val pool = source.pool ?: Pool(source.record.id, source.passwords,
-            startCursor = maxOf(source.record.completed, (held ?: -1) + 1)).also {
+            startCursor = maxOf(source.record.completed, (held ?: -1) + 1),
+            initialCompleted = source.record.completed).also {
                 source.pool = it
+                source.heldIndex = held
                 source.record = source.record.copy(groupId = it.id, poolCompleted = it.completed)
                 if (held != null) it.owners[held] = source.record.id
             }
         val now = System.currentTimeMillis()
-        val joined = Entry(AuditRecord.Dictionary(UUID.randomUUID().toString(), network, config, now, now,
+        val joined = Entry(context, AuditRecord.Dictionary(UUID.randomUUID().toString(), network, config, now, now,
             if (source.record.active) SecurityAuditNetworkState.QUEUED else SecurityAuditNetworkState.STOPPED,
             pool.passwords.size, completed = pool.completed,
             message = if (source.record.active) "排队中" else "共享来源记录已结束",
@@ -540,10 +597,20 @@ internal class SecurityAuditTask(
         return joined
     }
 
-    private fun publish(context: TaskContext) {
-        // 窗口清单只在多线程模式下发；通知与界面据此按窗口列出各网卡正在做什么。
-        context.publishAuditNetworks(config, entries.map { it.record },
-            if (parallel()) enumerateInterfaces() else emptyList())
+    private fun publish() {
+        entries.forEach { entry ->
+            if (!entry.record.active) return@forEach
+            val stats = groupStats[groupKey(entry)] ?: return@forEach
+            if (entry.record.groupElapsedMillis != stats.elapsedMillis ||
+                entry.record.groupAverageAttemptMillis != stats.averageAttemptMillis) {
+                entry.record = entry.record.copy(groupElapsedMillis = stats.elapsedMillis,
+                    groupAverageAttemptMillis = stats.averageAttemptMillis,
+                    updatedAt = System.currentTimeMillis())
+            }
+        }
+        // 所有内部测试记录归属同一个顶层任务；窗口清单是该调度器的资源视图。
+        val windows = if (parallel()) enumerateInterfaces() else emptyList()
+        entries.firstOrNull()?.context?.publishAuditNetworks(config, entries.map { it.record }, windows)
     }
 
     private fun forgetNetwork(entry: Entry, context: TaskContext) {
@@ -600,6 +667,23 @@ internal class SecurityAuditTask(
 
     private class AttemptChanged : InterruptedException()
 
+    private fun groupKey(entry: Entry): Pair<String, String> =
+        entry.record.input.ssid to (entry.record.groupId ?: entry.record.id)
+
+    private class GroupStats {
+        var elapsedMillis = 0L
+            private set
+        private val recent = ArrayDeque<Long>()
+        val averageAttemptMillis: Long?
+            get() = if (recent.isEmpty()) null else recent.sum() / recent.size
+
+        fun record(duration: Long) {
+            elapsedMillis += duration
+            recent.addLast(duration)
+            if (recent.size > 20) recent.removeFirst()
+        }
+    }
+
     /** 一次占用某张网卡的尝试；只有调度线程会创建和销毁它。 */
     private class Job(val recordId: String, val window: String, val ssid: String, val password: String,
         val mac: String?, val config: SecurityAuditConfig, val child: TaskContext,
@@ -615,7 +699,7 @@ internal class SecurityAuditTask(
             val cause: ConnectionCleanupException) : Outcome
     }
 
-    private class StageUpdate(val recordId: String, val stage: ConnectWifiStage)
+    private class StageUpdate(val recordId: String, val token: Long, val stage: ConnectWifiStage)
 
     /**
      * 共享字典池：同组成员共用一份候选，按领取法各占一个互不相同的下标。
@@ -624,9 +708,10 @@ internal class SecurityAuditTask(
      * [consume] 表示该下标已判定为错误并丢弃；[release] 表示结果未知、交还给别人重试。
      * 正被占领的下标在重试冷却期间保持归属，别的成员领不走。
      */
-    private class Pool(val id: String, val passwords: List<String>, startCursor: Int = 0) {
+    private class Pool(val id: String, val passwords: List<String>, startCursor: Int = 0,
+        initialCompleted: Int = 0) {
         /** 已判定为错误的候选数量，即公共进度。 */
-        var completed = 0
+        var completed = initialCompleted
             private set
         private var cursor = startCursor.coerceIn(0, passwords.size)
         val owners = mutableMapOf<Int, String>()
@@ -655,8 +740,9 @@ internal class SecurityAuditTask(
         }
     }
 
-    private data class Entry(var record: AuditRecord.Dictionary, val passwords: List<String>,
-        override var lastAttemptAt: Long = 0, override var readyAt: Long = 0, val costs: MutableList<Long> = mutableListOf(),
+    private data class Entry(val context: TaskContext,
+        var record: AuditRecord.Dictionary, val passwords: List<String>,
+        override var lastAttemptAt: Long = 0, override var readyAt: Long = 0,
         var pool: Pool? = null,
         /** 随机 MAC 策略下该网络当前保持的地址；null 表示使用设备原 MAC。 */
         var mac: String? = null,
@@ -672,16 +758,26 @@ internal class SecurityAuditTask(
         override val active get() = record.active
     }
 
+    private sealed interface Command {
+        data class AddGroup(val network: SecurityAuditNetworkInput, val passwords: List<String>,
+            val count: Int, val context: TaskContext) : Command
+        data class JoinGroup(val network: SecurityAuditNetworkInput,
+            val count: Int, val context: TaskContext) : Command
+        data class StopRecord(val recordId: String) : Command
+        data class StopNetwork(val ssid: String) : Command
+        data object StopAll : Command
+        data class Configure(val config: SecurityAuditConfig) : Command
+    }
+
     private companion object {
         val SECURE_RANDOM = java.security.SecureRandom()
         const val DEFAULT_INTERFACE = "wlan0"
+        const val SYSTEM_CONNECTION_FOCUS = "系统连接名额"
         val INTERFACE_NAME = Regex("[A-Za-z0-9_.-]{1,15}")
         const val INTERFACE_SCAN_INTERVAL_MS = 1000L
         const val POLL_WITH_RUNNING_MS = 200L
         const val IDLE_POLL_MS = 200L
         const val WINDOW_DRAIN_POLL_MS = 200L
         const val SHUTDOWN_DEADLINE_MS = 20_000L
-        /** 一次「运行」最多创建的并行实例数，与界面滑块 1～6 对齐。 */
-        const val MAX_SUBTASK_COUNT = 6
     }
 }

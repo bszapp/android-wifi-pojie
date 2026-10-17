@@ -44,11 +44,11 @@ import io.github.bszapp.wifitoolbox.uidefault.component.SingleOverlayBottomSheet
 import io.github.bszapp.wifitoolbox.uidefault.component.WeakPasswordResult
 import io.github.bszapp.wifitoolbox.uidefault.model.SecurityAuditUiState
 import io.github.bszapp.wifitoolbox.uidefault.model.WpsAuditSheetPage
-import io.github.bszapp.wifitoolbox.uidefault.widget.wifilist.displayStage
 import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
@@ -65,7 +65,7 @@ fun WpsAuditSheets(model: SecurityAuditUiState) {
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val maxHeight = LocalConfiguration.current.screenHeightDp.dp * .8f
     SingleOverlayBottomSheet(show = form.show, title = when (form.page) {
-        WpsAuditSheetPage.TARGET -> "WPS 安全测试 · ${form.ssid.ifEmpty { "<隐藏网络>" }}"
+        WpsAuditSheetPage.TARGET -> "WPS 安全测试"
         WpsAuditSheetPage.ACCESS_POINTS -> "选择已授权的接入点"
         WpsAuditSheetPage.CONFIGURATION -> "WPS 安全测试运行行为"
         WpsAuditSheetPage.DETAIL -> "WPS 安全测试详情"
@@ -76,40 +76,35 @@ fun WpsAuditSheets(model: SecurityAuditUiState) {
                 when (form.page) {
                     WpsAuditSheetPage.CONFIGURATION -> item { WpsAuditConfiguration(form.config, model::changeWpsConfig) }
                     WpsAuditSheetPage.ACCESS_POINTS -> {
-                        item { Text("隐藏网络无法通过名称区分，请明确选择拥有测试授权的接入点。", style = MiuixTheme.textStyles.body2) }
+                        item { Text("选择接入点", style = MiuixTheme.textStyles.subtitle) }
                         items(form.accessPoints, key = { it.BSSID }) { accessPoint ->
                             Card(Modifier.fillMaxWidth()) {
                                 AuditChoice(accessPoint.BSSID, accessPoint.BSSID.equals(form.selectedMac, true),
-                                    { model.selectWpsAccessPoint(accessPoint.BSSID) },
-                                    "${accessPoint.frequency} MHz · ${if (accessPoint.level == 0) "信号未知" else "${accessPoint.level} dBm"}")
+                                    { model.selectWpsAccessPoint(accessPoint.BSSID) })
+                                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("频率 ${accessPoint.frequency} 兆赫", style = MiuixTheme.textStyles.footnote1)
+                                    Text(if (accessPoint.level == 0) "信号未知" else "信号 ${accessPoint.level} 分贝毫瓦",
+                                        style = MiuixTheme.textStyles.footnote1)
+                                }
                             }
                         }
                         if (form.accessPoints.isEmpty()) item { Text("当前没有可选择的 WPS 接入点，请重新扫描。") }
                     }
                     WpsAuditSheetPage.TARGET -> {
-                        item {
-                            Text("依次执行三个阶段：先用 12345670 抓握手并离线计算随机数缺陷漏洞 PIN，再逐个尝试前四位 0000~9999，" +
-                                "收到 M5 确认前四位后逐个尝试后三位。全程走同一条 FIFO 会话，进度自动保存，可断点续跑。",
-                                style = MiuixTheme.textStyles.body2)
-                        }
                         if (!form.supportsWps) item { Text("此网络未广播 WPS 能力，无法进行 WPS 安全测试。", style = MiuixTheme.textStyles.body2) }
-                        form.selectedMac?.let { mac -> item { Text("目标接入点：$mac", style = MiuixTheme.textStyles.subtitle) } }
+                        form.selectedMac?.let { mac -> item {
+                            Card(Modifier.fillMaxWidth()) {
+                                BasicComponent(title = form.ssid.ifEmpty { "隐藏网络" }, summary = "接入点 $mac")
+                            }
+                        } }
                         history.filterIsInstance<AuditHistoryRecord.Wps>().firstOrNull { it.id == form.recordId }?.let { previous ->
                             item {
-                                Text("上次进度：${wpsPhaseLabel(previous.phase)}" +
-                                    (previous.firstHalf?.let {
-                                        if (previous.password != null) " · 前四位已确定" else " · 前四位 $it"
-                                    } ?: "") +
-                                    (previous.password?.let { "\n${wpsAssessmentSummary(previous)}" } ?: ""),
-                                    style = MiuixTheme.textStyles.body2)
+                                Text("上次停在${wpsPhaseLabel(previous.phase)}", style = MiuixTheme.textStyles.body2)
                             }
                         }
                         item {
-                            Text("评估内容", style = MiuixTheme.textStyles.subtitle)
-                            Text("① 弱 PIN：是否能直接使用默认 PIN 取得网络密码。\n" +
-                                "② 随机数缺陷（Pixie Dust）：能否用握手数据离线算出漏洞 PIN。\n" +
-                                "③ 批量 PIN 尝试：记录本次实际能否取得网络密码，不推断设备的锁定机制。",
-                                style = MiuixTheme.textStyles.footnote1)
+                            AuditDisclosure("测试内容", "依次检查默认 PIN、随机数缺陷和 PIN 分段尝试。详细过程保存在运行日志中。")
                         }
                         item { TextButton("调整运行行为", model::configureWps, Modifier.fillMaxWidth()) }
                     }
@@ -172,7 +167,6 @@ fun WpsAuditSheets(model: SecurityAuditUiState) {
 internal fun WpsAuditConfiguration(config: WpsSecurityAuditConfig, onChange: (WpsSecurityAuditConfig) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("MAC 策略", style = MiuixTheme.textStyles.subtitle)
-        Text("WPS 走网卡通道，任何策略都会实际改写本机 MAC；设备 MAC 表示沿用原地址。", style = MiuixTheme.textStyles.footnote1)
         LegacyTabRow(tabs = listOf("设备 MAC", "异常时更换", "每次更换"), selectedTabIndex = config.macMode.ordinal,
             onTabSelected = { onChange(config.copy(macMode = SecurityAuditMacMode.entries[it])) })
         AnimatedVisibility(config.macMode == SecurityAuditMacMode.ON_FAILURE) {
@@ -181,10 +175,7 @@ internal fun WpsAuditConfiguration(config: WpsSecurityAuditConfig, onChange: (Wp
             }
         }
         Text("异常重试", style = MiuixTheme.textStyles.subtitle, color = MiuixTheme.colorScheme.primary)
-        Text("走完 M3/M4 却没收到 M5，算一次 PIN 错误，直接试下一个。" +
-            "没走到 M3 就结束的（收到 M2 后被 NACK、未关联、超时、脚本异常）算异常：重试同一个 PIN、" +
-            "冷却时间翻倍，用尽后假装已试完继续下一个；6 表示无限重试，直到握手能重新走完 M3/M4。" +
-            "失败原因会写进任务日志。", style = MiuixTheme.textStyles.footnote1)
+        AuditDisclosure("重试规则", "连接异常时重试当前 PIN，达到次数后继续测试。失败原因可在运行日志查看。")
         AuditSlider("重试次数", config.retryCount.toLong(), 0, 6, 1, "次",
             valueText = if (config.retryCount == 6) "无限" else null) { onChange(config.copy(retryCount = it.toInt())) }
         AnimatedVisibility(config.retryCount != 0) {
@@ -192,9 +183,7 @@ internal fun WpsAuditConfiguration(config: WpsSecurityAuditConfig, onChange: (Wp
                 valueText = if (config.cooldownBaseMillis == 0L) "不冷却" else null) { onChange(config.copy(cooldownBaseMillis = it)) }
         }
         Text("单次尝试", style = MiuixTheme.textStyles.subtitle, color = MiuixTheme.colorScheme.primary)
-        Text("超过用时就中断本次尝试，无论当时正处在扫描还是发 M2；只掐这一次，wps.py 会话继续服务下一个。" +
-            "中断计为一次异常，按上面的重试次数与冷却处理。范围与密码字典破解的最大尝试时间一致（1000~10000ms）。",
-            style = MiuixTheme.textStyles.footnote1)
+        AuditDisclosure("尝试时间", "单次尝试超时后，按异常重试设置处理。")
         AuditSlider("单次尝试最大用时", config.attemptTimeoutMillis, 1000L, 10000L, 500L, "ms") {
             onChange(config.copy(attemptTimeoutMillis = it))
         }
@@ -207,31 +196,29 @@ fun WpsAuditNetworkProgress(record: AuditRecord.Wps?, onEdit: () -> Unit) {
     if (record != null) lastRecord = record
     AnimatedVisibility(visible = record != null, enter = expandVertically(), exit = shrinkVertically()) {
         val record = lastRecord ?: return@AnimatedVisibility
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (record.ssid.isEmpty()) Text("接入点：${record.mac}", style = MiuixTheme.textStyles.subtitle)
+        Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(12.dp),
+            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.tertiaryContainer)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(record.state.label(record.kind), style = MiuixTheme.textStyles.subtitle)
-                Text(wpsPhaseLabel(record.phase), style = MiuixTheme.textStyles.footnote1)
+                Text(record.state.label(record.kind), style = MiuixTheme.textStyles.subtitle,
+                    color = MiuixTheme.colorScheme.onTertiaryContainer)
+                if (record.active) TextButton("停止", onClick = onEdit)
             }
             val progress = record.progress
-            if (progress != null) {
-                LinearProgressIndicator(progress = progress, modifier = Modifier.fillMaxWidth())
-                val cursor = when (record.phase) {
-                    WpsSecurityAuditPhase.FIRST_HALF -> record.firstHalfIndex to 10000
-                    WpsSecurityAuditPhase.SECOND_HALF -> record.secondHalfIndex to 1000
-                    else -> 0 to 0
-                }
-                Text("${cursor.first} / ${cursor.second}", style = MiuixTheme.textStyles.footnote1)
-            } else Text("仙尘阶段无进度可统计", style = MiuixTheme.textStyles.footnote1)
-            Text(record.message, style = MiuixTheme.textStyles.body2)
-            record.handshakeProgress?.let {
-                Text("当前阶段：${it.displayStage()}", style = MiuixTheme.textStyles.body2)
+            LinearProgressIndicator(progress = progress, modifier = Modifier.fillMaxWidth())
+            val cursor = when (record.phase) {
+                WpsSecurityAuditPhase.FIRST_HALF -> record.firstHalfIndex to 10000
+                WpsSecurityAuditPhase.SECOND_HALF -> record.secondHalfIndex to 1000
+                else -> null
             }
-            Text("尝试 ${record.attempts} 次 · ${record.elapsedMillis} ms · 当前重试 ${record.retryCount} 次",
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(cursor?.let { "已试 ${it.first} 项，共 ${it.second} 项" }
+                    ?: "正在${wpsPhaseLabel(record.phase)}", style = MiuixTheme.textStyles.footnote1)
+                record.averageAttemptMillis?.takeIf { it > 0 }?.let { cost ->
+                    Text("每分钟 ${60000 / cost} 次", style = MiuixTheme.textStyles.footnote1)
+                }
+            }
+            Text("已尝试 ${record.attempts} 次，耗时 ${formatAuditDuration(record.elapsedMillis)}",
                 style = MiuixTheme.textStyles.footnote1)
-            record.vulnPin?.let { Text("已计算出随机数缺陷漏洞 PIN", style = MiuixTheme.textStyles.footnote1) }
-            if (record.active) TextButton("停止此网络", onClick = onEdit)
         }
     }
 }
@@ -241,12 +228,13 @@ internal fun WpsAuditRecordDetails(record: AuditHistoryRecord.Wps) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(record.historySummary(), style = MiuixTheme.textStyles.subtitle)
         Text("记录时间：${timestamp(record.updatedAt)}", style = MiuixTheme.textStyles.body2)
-        Text("目标 MAC：${record.mac ?: "待解析"}\n阶段：${wpsPhaseLabel(record.phase)}\n前四位：${
-            if (record.password != null && record.firstHalf != null) "已确定" else record.firstHalf ?: "未确定"}" +
-            "\n前四位游标：${record.firstHalfIndex}\n后三位游标：${record.secondHalfIndex}\n尝试次数：${record.attempts}\n累计耗时：${record.elapsedMillis} ms",
+        record.mac?.let { Text("接入点：$it", style = MiuixTheme.textStyles.body2) }
+        Text("最后阶段：${wpsPhaseLabel(record.phase)}", style = MiuixTheme.textStyles.body2)
+        Text("已尝试 ${record.attempts} 次，耗时 ${formatAuditDuration(record.elapsedMillis)}",
             style = MiuixTheme.textStyles.body2)
+        AuditDisclosure("详细进度", "前四位已试 ${record.firstHalfIndex} 项，后三位已试 ${record.secondHalfIndex} 项。")
         record.averageAttemptMillis?.takeIf { it > 0 }?.let {
-            Text("平均尝试耗时：$it ms\n平均速度：${60000 / it} 次/分", style = MiuixTheme.textStyles.body2)
+            Text("平均每分钟 ${60000 / it} 次", style = MiuixTheme.textStyles.body2)
         }
     }
 }
@@ -256,7 +244,7 @@ fun WpsSecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDism
     var show by rememberSaveable(task.snapshot.taskId) { mutableStateOf(true) }
     var logsExpanded by rememberSaveable(task.snapshot.taskId) { mutableStateOf(false) }
     val safeBottom = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
-    SingleOverlayBottomSheet(show = show, title = "WPS 安全测试 · #${task.snapshot.taskId}",
+    SingleOverlayBottomSheet(show = show, title = "WPS 安全测试",
         onDismissRequest = { show = false }, onDismissFinished = onDismiss) {
         Column(Modifier.fillMaxWidth().heightIn(max = LocalConfiguration.current.screenHeightDp.dp * .8f),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -264,11 +252,15 @@ fun WpsSecurityAuditTaskSheet(task: TrackedTaskState, onStop: () -> Unit, onDism
                 item { Text(if (task.snapshot.state == TaskExecutionState.RUNNING) "运行中" else "本批任务已结束",
                     style = MiuixTheme.textStyles.subtitle) }
                 items(task.auditNetworks.filterIsInstance<AuditRecord.Wps>(), key = { it.id }) { record ->
-                    Card(Modifier.fillMaxWidth(), onClick = { show = false; onInspect(record.id) }) {
-                        BasicComponent(title = record.ssid.ifEmpty { "<隐藏网络> · ${record.mac}" }, summary = when {
-                            record.password != null -> wpsAssessmentSummary(record)
-                            else -> "${record.state.label(record.kind)} · ${wpsPhaseLabel(record.phase)}\n${record.message}"
-                        })
+                    Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp),
+                        onClick = { show = false; onInspect(record.id) }) {
+                        Text(record.ssid.ifEmpty { "隐藏网络" }, style = MiuixTheme.textStyles.subtitle)
+                        Text(if (record.password != null) "已取得密码，点击查看结果"
+                            else record.state.label(record.kind), style = MiuixTheme.textStyles.body2)
+                        if (record.password == null) Text(wpsPhaseLabel(record.phase),
+                            style = MiuixTheme.textStyles.footnote1)
+                        LinearProgressIndicator(progress = record.progress,
+                            modifier = Modifier.fillMaxWidth())
                     }
                 }
                 item { TextButton(if (logsExpanded) "收起运行日志" else "展开运行日志", onClick = { logsExpanded = !logsExpanded }) }

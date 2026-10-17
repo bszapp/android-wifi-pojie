@@ -610,6 +610,18 @@ open class MainService(
     override fun joinSecurityAuditPool(request: TaskStartRequest): Long =
         communication.callFromApp { taskManager.joinSecurityAuditPool(request) }
 
+    override fun runSecurityAuditGroup(request: TaskStartRequest, dictionary: ParcelFileDescriptor, taskCount: Int): LongArray =
+        communication.callFromApp { dictionary.use { error("旧版批量顶层任务接口已停用，请更新应用") } }
+
+    override fun joinSecurityAuditPoolGroup(request: TaskStartRequest, taskCount: Int): LongArray =
+        communication.callFromApp { error("旧版批量顶层任务接口已停用，请更新应用") }
+
+    override fun runSecurityAuditRecords(request: TaskStartRequest, dictionary: ParcelFileDescriptor, taskCount: Int): Long =
+        communication.callFromApp { dictionary.use { taskManager.runSecurityAuditRecords(request, it, taskCount) } }
+
+    override fun joinSecurityAuditRecords(request: TaskStartRequest, taskCount: Int): Long =
+        communication.callFromApp { taskManager.joinSecurityAuditRecords(request, taskCount) }
+
     override fun getSecurityAuditNetworks(taskId: Long, fromIndex: Int): ParcelFileDescriptor =
         communication.callFromApp {
             io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(taskManager.auditNetworkPage(taskId, fromIndex))

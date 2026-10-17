@@ -91,7 +91,7 @@ internal class TaskManager(
         return createTask(request)
     }
 
-    private fun createTask(request: TaskStartRequest, dictionary: Pair<String, List<String>>? = null): Long {
+    private fun createTask(request: TaskStartRequest): Long {
         validate(request)
         val record = synchronized(lock) {
             check(!closed) { "任务管理器已关闭" }
@@ -106,7 +106,6 @@ internal class TaskManager(
                     progress = null,
                 ),
             ).also {
-                dictionary?.let { (key, passwords) -> it.auditDictionaries[key] = passwords }
                 records[taskId] = it
                 currentTaskId = taskId
             }
@@ -117,8 +116,13 @@ internal class TaskManager(
         return record.snapshot.taskId
     }
 
-    /** 字典流读完并校验后，按服务当前任务原子选择新建/追加。 */
-    fun runSecurityAudit(request: TaskStartRequest, fd: ParcelFileDescriptor): Long {
+    /** 单条内部记录沿用原有事务。 */
+    fun runSecurityAudit(request: TaskStartRequest, fd: ParcelFileDescriptor): Long =
+        runSecurityAuditRecords(request, fd, 1)
+
+    /** 一次读取字典，在同一个顶层任务内加入 taskCount 条测试记录。 */
+    fun runSecurityAuditRecords(request: TaskStartRequest, fd: ParcelFileDescriptor, taskCount: Int): Long {
+        require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
         val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
             ?: error("安全测试请求类型不正确")
         validateAudit(input)
@@ -126,46 +130,90 @@ internal class TaskManager(
         require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大" }
         val passwords = SecurityAuditDictionaryTransport.read(fd)
         require(passwords.isNotEmpty()) { "字典为空" }
-        return synchronized(lock) {
-            val running = currentTaskId?.let(records::get)
-            if (running != null) {
-                check(running.snapshot.request.payload is TaskRequestPayload.SecurityAudit) { "已有其他任务正在运行" }
-                val key = input.network.dictionaryId
-                check(key !in running.auditDictionaries) { "字典已经给定，不允许更新" }
-                running.auditDictionaries[key] = passwords
-                val update = TaskUpdateRequest(TaskUpdatePayload.SecurityAuditAdd(input.network))
-                val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
-                if (!accepted) {
-                    running.auditDictionaries.remove(key)
-                    error("无法将运行记录加入当前批次；或本批任务已结束")
-                }
-                running.snapshot.taskId
-            } else {
-                // start 在同一把可重入锁内分配任务；执行器读取字典前会等待该锁释放。
-                createTask(request, input.network.dictionaryId to passwords)
+        val (record, created) = synchronized(lock) {
+            check(!closed) { "任务管理器已关闭" }
+            val current = currentTaskId?.let(records::get)
+            check(current == null || current.snapshot.request.payload is TaskRequestPayload.SecurityAudit &&
+                current.snapshot.state == TaskExecutionState.RUNNING && !current.stopRequested) {
+                "已有其他任务正在运行或安全测试正在结束"
             }
+            val isNew = current == null
+            val dispatcher = current?.auditDispatcher ?: run {
+                check(isNew) { "安全测试调度器不可用" }
+                SecurityAuditDispatcher(input.config,
+                    SecurityAuditConnectWorker(androidApiProvider() ?: error("AndroidApi 尚未初始化"), wifiLogAnalyzer, terminalManager),
+                    ::managedInterfaces)
+            }
+            check(dispatcher.isAccepting()) { "安全测试正在结束" }
+            val parent = current ?: run {
+                check(nextTaskId < Long.MAX_VALUE) { "任务 ID 已耗尽" }
+                val id = nextTaskId++
+                TaskRecord(TaskSnapshot(id, request, TaskExecutionState.RUNNING, null),
+                    auditDispatcher = dispatcher).also {
+                    records[id] = it
+                    currentTaskId = id
+                }
+            }
+            if (dispatcher.currentConfig() != input.config) check(dispatcher.configure(input.config)) { "调度器已结束" }
+            if (!dispatcher.submitGroup(input.network, passwords, taskCount, TaskContext(parent.snapshot.taskId, this))) {
+                if (isNew) {
+                    records.remove(parent.snapshot.taskId)
+                    currentTaskId = null
+                    nextTaskId--
+                }
+                error("调度器已结束")
+            }
+            if (isNew) taskExecutor.execute { executeAudit(dispatcher, parent.snapshot.taskId) }
+            parent to isNew
         }
+        if (created) broadcastManagerChanged(record.snapshot)
+        appendLog(record.snapshot.taskId, if (created) "安全测试任务已创建：加入 $taskCount 条测试记录"
+            else "安全测试已加入 $taskCount 条测试记录")
+        return record.snapshot.taskId
     }
 
-    /** 复用运行中记录的字典；公共游标与成员关系由 SecurityAuditTask 持有。 */
-    fun joinSecurityAuditPool(request: TaskStartRequest): Long {
+    /** 单条内部记录沿用原有事务。 */
+    fun joinSecurityAuditPool(request: TaskStartRequest): Long =
+        joinSecurityAuditRecords(request, 1)
+
+    /** 一次将 taskCount 条内部记录接入同一个候选池。 */
+    fun joinSecurityAuditRecords(request: TaskStartRequest, taskCount: Int): Long {
+        require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
         val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
             ?: error("共享候选池请求类型不正确")
         validateAudit(input)
         val sourceId = input.network.sharedWithRecordId ?: error("未指定共享来源记录")
         require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "共享候选池请求元数据过大" }
-        return synchronized(lock) {
-            val running = currentTaskId?.let(records::get)
+        val taskId = synchronized(lock) {
+            check(!closed) { "任务管理器已关闭" }
+            val parent = currentTaskId?.let(records::get)?.takeIf {
+                it.snapshot.request.payload is TaskRequestPayload.SecurityAudit &&
+                    it.snapshot.state == TaskExecutionState.RUNNING && !it.stopRequested
+            } ?: error("没有运行中的安全测试")
+            val dispatcher = parent.auditDispatcher?.takeIf { it.isAccepting() }
                 ?: error("没有可共享的运行中安全测试")
-            check(running.snapshot.request.payload is TaskRequestPayload.SecurityAudit) { "当前运行的是其他类型任务" }
-            val source = running.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
+            val source = parent.auditNetworks.asSequence().filterIsInstance<AuditRecord.Dictionary>()
                 .firstOrNull { it.id == sourceId && it.active }
                 ?: error("共享来源记录已结束")
             require(source.input.dictionaryId == input.network.dictionaryId) { "共享字典标识与来源记录不一致" }
-            val update = TaskUpdateRequest(TaskUpdatePayload.SecurityAuditJoin(input.network))
-            val accepted = running.activeTask?.update(update) ?: run { running.pendingUpdates.addLast(update); true }
-            check(accepted) { "共享候选池已停止接受新记录" }
-            running.snapshot.taskId
+            if (!dispatcher.joinGroup(input.network, taskCount, TaskContext(parent.snapshot.taskId, this))) {
+                error("共享候选池已停止接受新任务")
+            }
+            parent.snapshot.taskId
+        }
+        appendLog(taskId, "安全测试已加入 $taskCount 条共享候选池测试记录")
+        return taskId
+    }
+
+    private fun executeAudit(dispatcher: SecurityAuditDispatcher, taskId: Long) {
+        try {
+            dispatcher.run()
+        } catch (_: InterruptedException) {
+            Thread.interrupted()
+        } catch (error: Throwable) {
+            appendLog(taskId, "调度器异常：${error.message ?: error.javaClass.name}")
+        } finally {
+            finish(taskId)
         }
     }
 
@@ -208,26 +256,40 @@ internal class TaskManager(
     }
 
     fun stop(taskId: Long): Boolean {
-        val update = synchronized(lock) {
+        val target = synchronized(lock) {
             val record = records[taskId]
-            if (currentTaskId != taskId || record?.snapshot?.state != TaskExecutionState.RUNNING) {
+            if (record?.snapshot?.state != TaskExecutionState.RUNNING) {
                 return false
             }
+            if (record.auditDispatcher != null && !record.auditDispatcher.stopAll()) return false
             record.stopRequested = true
-            record.runnerThread
+            record.auditDispatcher to record.runnerThread
         }
         appendLog(taskId, "收到停止任务指令")
-        update?.interrupt()
+        if (target.first == null) target.second?.interrupt()
         return true
     }
 
     fun update(taskId: Long, update: TaskUpdateRequest): Boolean {
         val task = synchronized(lock) {
             val record = records[taskId]
-            if (currentTaskId != taskId || record?.snapshot?.state != TaskExecutionState.RUNNING) {
+            if (record?.snapshot?.state != TaskExecutionState.RUNNING) {
                 return false
             }
             validateUpdate(record.snapshot.request, update)
+            record.auditDispatcher?.let { dispatcher ->
+                return when (val payload = update.payload) {
+                    is TaskUpdatePayload.SecurityAuditConfigure -> dispatcher.configure(payload.config)
+                    is TaskUpdatePayload.SecurityAuditStopRecord ->
+                        record.auditNetworks.any { it.id == payload.recordId && it.active } &&
+                            dispatcher.stopRecord(payload.recordId)
+                    is TaskUpdatePayload.SecurityAuditRemove ->
+                        record.auditNetworks.any { it is AuditRecord.Dictionary && it.ssid == payload.ssid && it.active } &&
+                            dispatcher.stopNetwork(payload.ssid)
+                    else -> error("安全测试不支持此更新")
+                }
+            }
+            if (currentTaskId != taskId) return false
             record.activeTask ?: run {
                 record.pendingUpdates.addLast(update)
                 return true
@@ -373,6 +435,23 @@ internal class TaskManager(
     }
 
     internal fun auditNotificationText(): String? = synchronized(lock) {
+        val auditTask = currentTaskId?.let(records::get)?.takeIf { it.auditDispatcher != null &&
+            it.snapshot.state == TaskExecutionState.RUNNING }
+        if (auditTask != null) {
+            val active = auditTask.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
+                .filter { it.active }
+            val windows = (auditTask.snapshot.progress as? TaskProgress.SecurityAudit)?.windows.orEmpty()
+            if (windows.isNotEmpty()) {
+                val busy = active.mapNotNull { entry -> entry.window?.let { it to entry } }.toMap()
+                return@synchronized "正在进行密码测试\n" + windows.joinToString("\n") { window ->
+                    val entry = busy[window]
+                    if (entry == null) "$window> IDLE" else "$window> ${entry.ssid},${entry.attemptPassword ?: "?"}"
+                }
+            }
+            val connecting = active.firstOrNull { it.state == SecurityAuditNetworkState.CONNECTING }
+            return@synchronized if (connecting != null) "网络安全测试：${connecting.ssid} · ${connecting.message}"
+                else "网络安全测试：${active.size} 个任务等待窗口或冷却"
+        }
         val record = currentTaskId?.let(records::get) ?: return@synchronized null
         val isDictionary = record.snapshot.request.payload is TaskRequestPayload.SecurityAudit
         if (!isDictionary && record.snapshot.request.payload !is TaskRequestPayload.WpsSecurityAudit) {
@@ -396,7 +475,12 @@ internal class TaskManager(
             val label = if (current != null) "${current.ssid} · ${current.message}" else "等待冷却"
             return "WPS 安全测试：$label"
         }
-        val estimates = active.map { (it as AuditRecord.Dictionary).averageAttemptMillis?.times(it.total - it.completed) }
+        val estimates = active.filterIsInstance<AuditRecord.Dictionary>()
+            .groupBy { it.ssid to (it.groupId ?: it.id) }.values.map { members ->
+                val latest = members.maxBy { it.updatedAt }
+                latest.groupAverageAttemptMillis?.times((latest.total -
+                    members.maxOf { it.poolCompleted ?: it.completed }).coerceAtLeast(0))
+            }
         val remaining = if (estimates.any { it == null } || estimates.isEmpty()) "剩余时间计算中"
             else "预计剩余 ${estimates.filterNotNull().sum() / 1000} 秒"
         if (current != null) "网络安全测试：${current.ssid} · ${current.message}；$remaining"
@@ -408,9 +492,10 @@ internal class TaskManager(
         val active = synchronized(lock) {
             if (closed) return
             closed = true
-            currentTaskId
+            records.values.filter { it.snapshot.state == TaskExecutionState.RUNNING }
+                .map { it.snapshot.taskId }
         }
-        if (active != null) stop(active)
+        active.forEach(::stop)
         taskExecutor.shutdownNow()
         check(taskExecutor.awaitTermination(20, TimeUnit.SECONDS)) {
             "任务清理尚未完成，不能退出服务"
@@ -426,12 +511,7 @@ internal class TaskManager(
             val androidApi = androidApiProvider()
                 ?: throw IllegalStateException("AndroidApi 尚未初始化")
             val task = when (val payload = request.payload) {
-                is TaskRequestPayload.SecurityAudit -> SecurityAuditTask(payload.input,
-                    dictionary = { key -> synchronized(lock) {
-                        records.getValue(taskId).auditDictionaries.remove(key) ?: error("运行字典不存在：$key")
-                    } },
-                    worker = SecurityAuditConnectWorker(androidApi, wifiLogAnalyzer, terminalManager),
-                    interfaces = ::managedInterfaces)
+                is TaskRequestPayload.SecurityAudit -> error("安全测试任务由共享窗口调度器执行")
                 TaskRequestPayload.UsbMonitor -> UsbMonitorTask(terminalManager, acquireUsbMonitor)
                 is TaskRequestPayload.ConnectWifi -> {
                     createConnectionTask(payload.request, androidApi)
@@ -498,7 +578,6 @@ internal class TaskManager(
             if (currentTaskId == taskId) currentTaskId = null
             record.activeTask = null
             record.pendingUpdates.clear()
-            record.auditDictionaries.clear()
             record.snapshot
         }
         broadcastManagerChanged(snapshot)
@@ -574,10 +653,11 @@ internal class TaskManager(
         if (request.payload is TaskRequestPayload.SecurityAudit) {
             when (val payload = update.payload) {
                 is TaskUpdatePayload.SecurityAuditConfigure -> validateAuditConfig(payload.config)
-                is TaskUpdatePayload.SecurityAuditStop -> require(payload.recordId.length in 1..64)
-                is TaskUpdatePayload.SecurityAuditAdd -> error("新增网络需要使用字典流接口")
-                is TaskUpdatePayload.SecurityAuditJoin -> error("共享候选池需要使用专用提交接口")
-                is TaskUpdatePayload.SecurityAuditRemove -> error("安全测试停止需要使用运行记录 ID")
+                is TaskUpdatePayload.SecurityAuditStopRecord -> java.util.UUID.fromString(payload.recordId)
+                is TaskUpdatePayload.SecurityAuditRemove -> {
+                    require(payload.mac == null) { "字典安全测试按 SSID 停止" }
+                    require(payload.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
+                }
                 else -> error("安全测试不支持此更新")
             }
             return
@@ -824,7 +904,7 @@ internal class TaskManager(
         var snapshot: TaskSnapshot,
         val logs: ArrayList<TaskLogEntry> = ArrayList(),
         val capturedNetworks: ArrayList<WpsCapturedNetwork> = ArrayList(),
-        val auditDictionaries: MutableMap<String, List<String>> = mutableMapOf(),
+        val auditDispatcher: SecurityAuditDispatcher? = null,
         var auditNetworks: List<AuditRecord> = emptyList(),
         var auditRevision: Long = 0,
         var nextLogId: Long = 0L,
