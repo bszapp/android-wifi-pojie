@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
+import top.yukonga.miuix.kmp.basic.SnackbarHostState
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Density
@@ -40,8 +42,15 @@ import io.github.bszapp.wifitoolbox.ui.widget.wifilist.MonitorCaptureSheetPrevie
 import io.github.bszapp.wifitoolbox.ui.widget.wifilist.MonitorDeviceDetailSheetHandshakeTestPreview
 import io.github.bszapp.wifitoolbox.ui.widget.wifilist.MonitorDeviceDetailSheetPreview
 import io.github.bszapp.wifitoolbox.ui.widget.wifilist.MonitorModeSheetPreview
+import io.github.bszapp.wifitoolbox.ui.psksecurityaudit.PskSecurityAuditHistoryContent
 import io.github.bszapp.wifitoolbox.ui.psksecurityaudit.PskSecurityAuditTaskSheet
 import io.github.bszapp.wifitoolbox.ui.psksecurityaudit.WpsSecurityAuditTaskSheet
+import io.github.bszapp.wifitoolbox.ui.hashcat.HashcatScreenActions
+import io.github.bszapp.wifitoolbox.ui.hashcat.HashcatScreenContent
+import io.github.bszapp.wifitoolbox.ui.hashcat.HashcatSheetPage
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelSnapshot
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskSnapshot
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskState
 import io.github.bszapp.wifitoolbox.ui.widget.wifilist.WifiDetailSheet
 import io.github.bszapp.wifitoolbox.ui.widget.wifilist.WifiListContent
 import io.github.bszapp.wifitoolbox.ui.widget.wifilist.WifiModeSwitchSheetPreview
@@ -93,6 +102,18 @@ private val qaScenes = listOf(
     "sheet-wifi-detail",
     "sheet-audit-task",
     "sheet-wps-audit-task",
+    // 补充：弱密码检测历史页
+    "page-history",
+    // 补充：WPA Hashcat 页面与全部子弹层状态
+    "page-hashcat",
+    "page-hashcat-empty",
+    "sheet-hashcat-preparation-compiling",
+    "sheet-hashcat-preparation-failed",
+    "sheet-hashcat-input",
+    "sheet-hashcat-dictionaries",
+    "sheet-hashcat-detail-running",
+    "sheet-hashcat-detail-paused",
+    "sheet-hashcat-detail-succeeded",
 )
 
 private data class QaVariant(val mode: String, val width: Int, val height: Int, val suffix: String? = null)
@@ -239,10 +260,101 @@ private fun qaSceneContent(name: String) {
                 onDismiss = {},
             )
         }
+        // 弱密码检测历史页
+        "page-history" -> PskSecurityAuditHistoryContent(
+            history = qaAuditHistory(),
+            onInspect = {},
+            onDelete = {},
+        )
+        // WPA Hashcat：整页与全部子弹层状态
+        "page-hashcat" -> QaHashcatScreen(page = null)
+        "page-hashcat-empty" -> QaHashcatScreen(page = null, empty = true)
+        "sheet-hashcat-preparation-compiling" -> PreviewSheetHost {
+            QaHashcatScreen(page = HashcatSheetPage.PREPARATION, kernels = qaHashcatKernelsCompiling())
+        }
+        "sheet-hashcat-preparation-failed" -> PreviewSheetHost {
+            QaHashcatScreen(page = HashcatSheetPage.PREPARATION, kernels = qaHashcatKernelsFailed())
+        }
+        "sheet-hashcat-input" -> PreviewSheetHost {
+            QaHashcatScreen(
+                page = HashcatSheetPage.INPUT,
+                input = "WPA*01*4913d600*28*2eb4fdc3a4*aa:bb:cc:dd:ee:ff*66:3b:97:af:9e:01*ChinaNet-Home*\n"
+                    .repeat(2),
+            )
+        }
+        "sheet-hashcat-dictionaries" -> PreviewSheetHost {
+            QaHashcatScreen(
+                page = HashcatSheetPage.DICTIONARIES,
+                selectedDictionaryIds = setOf("common-wifi-1000", "phone-numbers"),
+            )
+        }
+        "sheet-hashcat-detail-running" -> PreviewSheetHost {
+            QaHashcatScreen(page = HashcatSheetPage.DETAIL, taskId = "hashcat-1")
+        }
+        "sheet-hashcat-detail-paused" -> PreviewSheetHost {
+            val tasks = qaHashcatTasks()
+            QaHashcatScreen(
+                page = HashcatSheetPage.DETAIL,
+                taskId = "hashcat-9",
+                tasks = listOf(tasks.first().copy(
+                    id = "hashcat-9",
+                    state = HashcatTaskState.PAUSED,
+                    step = "已暂停，恢复文件已保存",
+                    speed = 0,
+                    stepCompleted = 0,
+                    stepTotal = 0,
+                    remainingSeconds = null,
+                )),
+            )
+        }
+        "sheet-hashcat-detail-succeeded" -> PreviewSheetHost {
+            val tasks = qaHashcatTasks()
+            QaHashcatScreen(page = HashcatSheetPage.DETAIL, taskId = "hashcat-2", tasks = listOf(tasks[1]))
+        }
         else -> Box(modifier = Modifier.fillMaxSize()) {
             Text(text = "场景 $name 尚未接线")
         }
     }
+}
+
+/** Hashcat 整页渲染；[page] 为 null 时不盖弹层。 */
+@Composable
+private fun QaHashcatScreen(
+    page: HashcatSheetPage?,
+    empty: Boolean = false,
+    tasks: List<HashcatTaskSnapshot>? = null,
+    kernels: HashcatKernelSnapshot? = null,
+    input: String = "",
+    selectedDictionaryIds: Set<String> = emptySet(),
+    taskId: String? = null,
+    busy: Boolean = false,
+) {
+    HashcatScreenContent(
+        tasks = tasks ?: if (empty) emptyList() else qaHashcatTasks(),
+        connected = true,
+        sheet = qaHashcatSheet(page ?: HashcatSheetPage.INPUT, input, selectedDictionaryIds, taskId, busy)
+            .copy(show = page != null),
+        dictionaries = qaHashcatDictionaries(),
+        kernels = kernels,
+        snackbarHostState = remember { SnackbarHostState() },
+        actions = QaHashcatScreenActions,
+    )
+}
+
+private object QaHashcatScreenActions : HashcatScreenActions {
+    override fun open() = Unit
+    override fun dismiss() = Unit
+    override fun input(value: String) = Unit
+    override fun next() = Unit
+    override fun previous() = Unit
+    override fun select(id: String) = Unit
+    override fun run() = Unit
+    override fun compileKernels() = Unit
+    override fun inspect(id: String) = Unit
+    override fun reselectDictionaries(id: String) = Unit
+    override fun deleteTask(id: String) = Unit
+    override fun toggleTask(id: String) = Unit
+    override fun pickFile() = Unit
 }
 
 private fun qaColorMode(mode: String): ColorMode = when (mode) {
@@ -282,7 +394,8 @@ private suspend fun renderOnce(name: String, variant: QaVariant, outputRoot: Fil
             LocalConfiguration provides qaConfiguration(variant),
         ) {
             MiuixTheme(controller = controller) {
-                if (name.startsWith("list-")) {
+                if (name.startsWith("list-") || name.startsWith("page-") ||
+                    name.startsWith("sheet-hashcat")) {
                     CompositionLocalProvider(
                         LocalSheetPresentationManager provides SheetPresentationManager(),
                         LocalNavigator provides rememberNavigator(Route.Main),

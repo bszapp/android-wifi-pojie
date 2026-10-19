@@ -427,7 +427,7 @@ private fun AboutContent(
                         ),
                     ) {
                         Text(
-                            text = "当前为预览版本，仅能尝鲜使用容器终端、抓包、扫描等功能。与GitHub上最后一个发行版不属于同一项目，故绝大多数功能未实现。\n源码位于https://github.com/bszapp/android-wifi-pojie中的master分支。\n\n借鉴（上一版本有名词注释）了以下内容：\nKernelSU的界面\niamr0s/Ruto-GLM的服务启动方式\nShizuku的服务常驻原理\nLSPosed的日志页面(逆向)\nInstallerxRevived的启动页部分样式\nStryker的终端原理(部分)\nAndroidStudio的日志分类方式(逆向)\nLogFox的日志logcat启动命令\n\n其他作者：Claude(应用最初的架构)、ChatGPT(应用的的最新架构、终端容器构建、monitor的几乎所有解析解密数据功能、hashcat性能优化、旧版本大量功能移植等)、Mimo（一些无道德的事情比如wpspin破解以及随机mac运行功能）",
+                            text = "当前为预览版本，与GitHub上最后一个发行版不属于同一项目。\n源码位于https://github.com/bszapp/android-wifi-pojie中的master分支。\n\n借鉴（上一版本有名词注释）了以下内容：\nKernelSU的界面\niamr0s/Ruto-GLM的服务启动方式\nShizuku的服务常驻原理\nLSPosed的日志页面(逆向)\nInstallerxRevived的零碎界面组件\nStryker的终端原理(部分)\nAndroidStudio的日志分类方式(逆向)\nLogFox的日志logcat启动命令\n\n其他作者：Claude(应用最初的架构)、ChatGPT(应用的的最新架构、终端容器构建、monitor的几乎所有解析解密数据功能、hashcat性能优化、旧版本大量功能移植等)，以及OpenCode众多开源免费模型（一些无道德的事情比如wpspin破解以及随机mac运行功能）",
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 14.dp),

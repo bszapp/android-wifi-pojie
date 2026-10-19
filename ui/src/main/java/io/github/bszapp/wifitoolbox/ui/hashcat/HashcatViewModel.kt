@@ -17,17 +17,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class HashcatSheetPage { PREPARATION, INPUT, DICTIONARIES, DETAIL }
-data class HashcatSheetState(
-    val show: Boolean = false,
-    val page: HashcatSheetPage = HashcatSheetPage.INPUT,
-    val input: String = "",
-    val selectedDictionaryIds: Set<String> = emptySet(),
-    val taskId: String? = null,
-    val busy: Boolean = false,
-    val message: String? = null,
-)
-
 class HashcatViewModel(application: Application) : AndroidViewModel(application) {
     private val controller = AppControllerProvider.get().hashcat
     val history = controller.history

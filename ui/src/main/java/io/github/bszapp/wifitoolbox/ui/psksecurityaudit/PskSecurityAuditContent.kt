@@ -767,8 +767,31 @@ internal fun AuditTaskLogView(
 
 @Composable
 fun PskSecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
-    val navigator = LocalNavigator.current
     val history by viewModel.pskSecurityAudit.history.collectAsStateWithLifecycle()
+    PskSecurityAuditHistoryContent(
+        history = history,
+        onInspect = { record ->
+            if (record is AuditHistoryRecord.Dictionary) viewModel.pskSecurityAudit.inspect(record.id)
+            else viewModel.pskSecurityAudit.inspectWps(record.id)
+        },
+        onDelete = { record ->
+            viewModel.showConfirmationDialog(
+                title = "删除历史记录",
+                content = "删除 ${record.ssid} 的这条弱密码检测记录？",
+                onConfirmed = {
+                    viewModel.pskSecurityAudit.deleteHistory(record.id)
+                })
+        },
+    )
+}
+
+@Composable
+fun PskSecurityAuditHistoryContent(
+    history: List<AuditHistoryRecord>,
+    onInspect: (AuditHistoryRecord) -> Unit,
+    onDelete: (AuditHistoryRecord) -> Unit,
+) {
+    val navigator = LocalNavigator.current
     val sorted = remember(history) {
         history.sortedWith(compareByDescending<AuditHistoryRecord> { it.password != null }
             .thenByDescending { it.updatedAt })
@@ -817,20 +840,8 @@ fun PskSecurityAuditHistoryScreen(viewModel: DefaultViewModel) {
                     key = { if (it is AuditHistoryRecord.Dictionary) "dictionary-${it.ssid}" else "wps-${it.id}" }) { record ->
                     Card(Modifier.fillMaxWidth()) {
                         BasicComponent(
-                            onClick = {
-                                if (record is AuditHistoryRecord.Dictionary) viewModel.pskSecurityAudit.inspect(
-                                    record.id
-                                )
-                                else viewModel.pskSecurityAudit.inspectWps(record.id)
-                            }, endActions = {
-                                IconButton(onClick = {
-                                    viewModel.showConfirmationDialog(
-                                        title = "删除历史记录",
-                                        content = "删除 ${record.ssid} 的这条弱密码检测记录？",
-                                        onConfirmed = {
-                                            viewModel.pskSecurityAudit.deleteHistory(record.id)
-                                        })
-                                }) {
+                            onClick = { onInspect(record) }, endActions = {
+                                IconButton(onClick = { onDelete(record) }) {
                                     Icon(Icons.Rounded.DeleteOutline, "删除历史")
                                 }
                             }) {

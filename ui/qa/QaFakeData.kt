@@ -8,6 +8,17 @@ import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskConfig
 import io.github.bszapp.wifitoolbox.contract.task.ConnectWifiTaskType
 import io.github.bszapp.wifitoolbox.contract.task.AuditHistoryRecord
 import io.github.bszapp.wifitoolbox.contract.task.AuditRecordKind
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFinding
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelSnapshot
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelState
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelStep
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatNetwork
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskSnapshot
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskState
+import io.github.bszapp.wifitoolbox.contract.task.WpsSecurityAuditPhase
+import io.github.bszapp.wifitoolbox.ui.dictionary.DictionaryResource
+import io.github.bszapp.wifitoolbox.ui.hashcat.HashcatSheetPage
+import io.github.bszapp.wifitoolbox.ui.hashcat.HashcatSheetState
 import io.github.bszapp.wifitoolbox.contract.settings.AuditLogPanelConfig
 import io.github.bszapp.wifitoolbox.contract.task.TaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.task.TrackedTaskState
@@ -284,6 +295,186 @@ class QaListPageActions : ListPageActions {
     override fun auditInspect(recordId: String) = Unit
     override fun auditInspectWps(recordId: String) = Unit
 }
+
+// ── 弱密码检测历史假数据 ──────────────────────────────────────────────────────
+
+/** 历史页：成功破解（字典）、未完成（字典）、未完成（第二段PIN）、隐藏网络记录。 */
+fun qaAuditHistory(): List<AuditHistoryRecord> = listOf(
+    AuditHistoryRecord.Dictionary(
+        id = "history-1",
+        ssid = "ChinaNet-Home",
+        passwords = List(1000) { "candidate-$it" },
+        completed = 384,
+        password = null,
+        updatedAt = 1_760_000_320_000,
+        groupElapsedMillis = 26 * 60_000L,
+        groupAverageAttemptMillis = 4200,
+        dictionaryPosition = 384,
+    ),
+    AuditHistoryRecord.Dictionary(
+        id = "history-2",
+        ssid = "Xiaomi_Router",
+        passwords = List(500) { "candidate-$it" },
+        completed = 500,
+        password = "778899123",
+        updatedAt = 1_760_000_000_000,
+        groupElapsedMillis = 41 * 60_000L,
+        groupAverageAttemptMillis = 4900,
+        dictionaryPosition = 193,
+    ),
+    AuditHistoryRecord.Wps(
+        id = "history-3",
+        ssid = "TP-LINK_A302",
+        mac = "1c:7c:59:a3:02:11",
+        updatedAt = 1_759_999_640_000,
+        phase = WpsSecurityAuditPhase.SECOND_HALF,
+        firstHalf = "994411222",
+        firstHalfIndex = 10000,
+        secondHalfIndex = 412,
+        attempts = 10012,
+        elapsedMillis = 95 * 60_000L,
+        averageAttemptMillis = 560,
+        pin = null,
+        password = null,
+        passwordFoundPhase = null,
+    ),
+    AuditHistoryRecord.Wps(
+        id = "history-4",
+        ssid = "",
+        mac = "aa:bb:cc:dd:ee:88",
+        updatedAt = 1_759_999_000_000,
+        phase = WpsSecurityAuditPhase.DONE,
+        firstHalf = "7788990011",
+        firstHalfIndex = 10000,
+        secondHalfIndex = 1000,
+        attempts = 20112,
+        elapsedMillis = 121 * 60_000L,
+        averageAttemptMillis = 560,
+        pin = "77889900",
+        password = "hidden-wifi-password",
+        passwordFoundPhase = WpsSecurityAuditPhase.SECOND_HALF,
+    ),
+)
+
+// ── WPA Hashcat 假数据 ────────────────────────────────────────────────────────
+
+private const val qaHashcatNetworkLine = "aa:bb:cc:dd:ee:ff"
+
+/** 列表页：运行中（有进度与速度）、已成功（含密码）、已失败（含错误）三条。 */
+fun qaHashcatTasks(): List<HashcatTaskSnapshot> = listOf(
+    HashcatTaskSnapshot(
+        id = "hashcat-1",
+        createdAt = 1_760_000_320_000,
+        state = HashcatTaskState.RUNNING,
+        step = "正在恢复第2个候选批次",
+        completed = 184_320,
+        total = 1_000_000,
+        progressUnit = "BYTES",
+        stepCompleted = 640,
+        stepTotal = 2048,
+        stepUnit = "BYTES",
+        remainingSeconds = 42,
+        speed = 183_200,
+        devices = "Intel Iris Xe (CPU), 8 GiB",
+        candidates = "common-wifi-1000.txt [184320-184320] bytes",
+        dictionaryNames = listOf("常用Wi-Fi密码1000"),
+        computeDurationMillis = 0,
+        averageSpeed = 0,
+        networks = listOf(HashcatNetwork("ChinaNet-Home", qaHashcatNetworkLine)),
+    ),
+    HashcatTaskSnapshot(
+        id = "hashcat-2",
+        createdAt = 1_759_990_000_000,
+        state = HashcatTaskState.SUCCEEDED,
+        completed = 1_000_000,
+        total = 1_000_000,
+        progressUnit = "BYTES",
+        devices = "Intel Iris Xe (CPU), 8 GiB",
+        candidates = "rockyou-top1000.txt [0-1000] bytes",
+        dictionaryNames = listOf("RockYou前1000"),
+        findings = listOf(
+            HashcatFinding("password123", 147),
+            HashcatFinding("wifi2024", 388),
+        ),
+        computeDurationMillis = 123_456,
+        averageSpeed = 152_000,
+        networks = listOf(HashcatNetwork("Xiaomi_Router", "50:64:2b:d1:ce:94")),
+    ),
+    HashcatTaskSnapshot(
+        id = "hashcat-3",
+        createdAt = 1_759_980_000_000,
+        state = HashcatTaskState.FAILED,
+        step = "内核准备失败",
+        completed = 0,
+        total = 0,
+        devices = "Intel Iris Xe (CPU), 8 GiB",
+        dictionaryNames = listOf("常用Wi-Fi密码1000"),
+        error = "设备内存不足，无法为本批候选分配缓冲区",
+        networks = listOf(HashcatNetwork("CMCC-Office", "66:3b:97:af:9e:01")),
+    ),
+)
+
+fun qaHashcatDictionaries(): List<DictionaryResource> = listOf(
+    DictionaryResource(
+        id = "common-wifi-1000",
+        name = "常用Wi-Fi密码1000",
+        description = "内置普通字典，共1000个候选",
+        type = 0,
+        content = "candidate",
+        author = null,
+        version = null,
+    ),
+    DictionaryResource(
+        id = "phone-numbers",
+        name = "手机号字典",
+        description = "以1开头的11位常见手机号组合",
+        type = 0,
+        content = "candidate",
+        author = "bsz",
+        version = "1.2",
+    ),
+    DictionaryResource(
+        id = "city-pinyin",
+        name = "地名拼音组合",
+        description = "中国主要城市拼音加年份组合",
+        type = 0,
+        content = "candidate",
+        author = null,
+        version = null,
+    ),
+)
+
+fun qaHashcatKernelsCompiling(): HashcatKernelSnapshot = HashcatKernelSnapshot(
+    state = HashcatKernelState.COMPILING,
+    stage = "正在编译PBKDF2内核（第2步, 共4步）",
+    steps = listOf(
+        HashcatKernelStep("step-1", "解压内核源码", 1_000L, 6_000L),
+        HashcatKernelStep("step-2", "编译PBKDF2内核", 6_000L, null),
+    ),
+    revision = 1L,
+)
+
+fun qaHashcatKernelsFailed(): HashcatKernelSnapshot = HashcatKernelSnapshot(
+    state = HashcatKernelState.FAILED,
+    stage = "内核编译失败",
+    error = "编译器输出超过64KiB限制，请更换工具链或重试",
+    revision = 1L,
+)
+
+fun qaHashcatSheet(
+    page: HashcatSheetPage,
+    input: String = "",
+    selectedDictionaryIds: Set<String> = emptySet(),
+    taskId: String? = null,
+    busy: Boolean = false,
+): HashcatSheetState = HashcatSheetState(
+    show = true,
+    page = page,
+    input = input,
+    selectedDictionaryIds = selectedDictionaryIds,
+    taskId = taskId,
+    busy = busy,
+)
 
 class QaWifiListPageActions : WifiListPageActions {
     override fun setWifiEnabled(enabled: Boolean) = Unit
