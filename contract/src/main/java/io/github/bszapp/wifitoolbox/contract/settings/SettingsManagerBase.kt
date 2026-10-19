@@ -22,7 +22,20 @@ abstract class SettingsManagerBase(
     }
 
     protected fun loadFromJson(json: JSONObject?) {
-        settings.loadRootJson(json)
+        val migrated = json?.let { JSONObject(it.toString()) }
+        // 旧名称与旧版分模式日志设置只在读取时兼容，后续保存统一使用新结构。
+        if (migrated != null) {
+            if (!migrated.has("pskSecurityAudit")) {
+                migrated.optJSONObject("securityAudit")?.let { migrated.put("pskSecurityAudit", it) }
+            }
+            if (!migrated.has("logPanel")) {
+                val previous = migrated.optJSONObject("pskSecurityAudit")
+                val panel = previous?.optJSONObject("password")?.optJSONObject("logPanel")
+                    ?: previous?.optJSONObject("wps")?.optJSONObject("logPanel")
+                panel?.let { migrated.put("logPanel", it) }
+            }
+        }
+        settings.loadRootJson(migrated)
         _revision.value = _revision.value + 1L
     }
 

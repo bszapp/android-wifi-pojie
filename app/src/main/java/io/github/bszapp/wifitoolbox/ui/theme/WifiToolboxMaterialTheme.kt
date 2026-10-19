@@ -17,7 +17,6 @@ import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamiccolor.ColorSpec
 import com.materialkolor.rememberDynamicColorScheme
 import io.github.bszapp.wifitoolbox.contract.settings.ISettingsManager
-import io.github.bszapp.wifitoolbox.uidefault.theme.ColorMode
 
 private val PaletteStyle.supportsSpec2025: Boolean
     get() = this == PaletteStyle.TonalSpot ||

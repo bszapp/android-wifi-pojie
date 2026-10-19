@@ -17,6 +17,26 @@ enum class HashcatTaskState { RUNNING, PAUSING, PAUSED, SUCCEEDED, EXHAUSTED, FA
 
 data class HashcatFinding(val password: String, val dictionaryPosition: Long)
 
+data class HashcatNetwork(val ssid: String, val mac: String) {
+    companion object {
+        fun fromHandshake(text: String): List<HashcatNetwork> = text.lineSequence().mapNotNull { line ->
+            val fields = line.trim().split('*')
+            if (fields.size != 9 || fields[0] != "WPA" || fields[1] !in setOf("01", "02")) return@mapNotNull null
+            val mac = fields[3]
+            val ssid = fields[5]
+            if (mac.length != 12 || mac.any { it.digitToIntOrNull(16) == null } ||
+                ssid.length % 2 != 0 || ssid.any { it.digitToIntOrNull(16) == null }) return@mapNotNull null
+            val bytes = ByteArray(ssid.length / 2) { ssid.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+            val name = runCatching {
+                Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+            }.getOrElse { "\$HEX[$ssid]" }
+            HashcatNetwork(name, mac.chunked(2).joinToString(":") { it.lowercase(java.util.Locale.ROOT) })
+        }.distinct().toList()
+    }
+}
+
 /** 启动元数据尺寸固定；字典、握手及恢复文件均由 FD 提供。 */
 @Parcelize
 data class HashcatLaunch(val id: String, val createdAt: Long, val revision: Long, val memoryLimitMiB: Int? = null) : Parcelable
@@ -44,6 +64,7 @@ data class HashcatTaskSnapshot(
     val memoryLimitMiB: Int? = null,
     val computeDurationMillis: Long = 0,
     val averageSpeed: Long = 0,
+    val networks: List<HashcatNetwork> = emptyList(),
 ) {
     val active get() = state == HashcatTaskState.RUNNING || state == HashcatTaskState.PAUSING
 
@@ -60,6 +81,9 @@ data class HashcatTaskSnapshot(
         put("error", error)
         put("memoryLimitMiB", memoryLimitMiB)
         put("computeDurationMillis", computeDurationMillis); put("averageSpeed", averageSpeed)
+        put("networks", JSONArray().apply {
+            networks.forEach { put(JSONObject().put("ssid", it.ssid).put("mac", it.mac)) }
+        })
     }
 
     companion object {
@@ -78,6 +102,9 @@ data class HashcatTaskSnapshot(
             error = if (json.isNull("error")) null else json.getString("error"),
             memoryLimitMiB = if (json.isNull("memoryLimitMiB")) null else json.getInt("memoryLimitMiB"),
             computeDurationMillis = json.optLong("computeDurationMillis"), averageSpeed = json.optLong("averageSpeed"),
+            networks = json.optJSONArray("networks")?.let { array -> List(array.length()) { index ->
+                array.getJSONObject(index).let { HashcatNetwork(it.getString("ssid"), it.getString("mac")) }
+            } }.orEmpty(),
         )
     }
 }
@@ -90,6 +117,8 @@ interface IHashcatController {
     suspend fun refreshKernels()
     suspend fun compileKernels()
     suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String
+    suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String
+    suspend fun delete(taskId: String)
     suspend fun pause(taskId: String)
     suspend fun resume(taskId: String)
     suspend fun setMemoryLimit(taskId: String, memoryLimitMiB: Int)

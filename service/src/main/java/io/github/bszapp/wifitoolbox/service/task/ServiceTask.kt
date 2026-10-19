@@ -20,12 +20,20 @@ internal class TaskContext(
     private val progressReceiver: ((TaskProgress) -> Unit)? = null,
     private val checkAttempt: (() -> Unit)? = null,
     private val logPrefix: String = "",
-    val auditConfiguration: (() -> io.github.bszapp.wifitoolbox.contract.task.SecurityAuditConfig)? = null,
+    val auditConfiguration: (() -> io.github.bszapp.wifitoolbox.contract.task.PskSecurityAuditConfig)? = null,
 ) {
     fun recordCapturedNetwork(network: io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetwork) =
         manager.recordCapturedNetwork(taskId, network)
 
     fun log(text: String) = manager.appendLog(taskId, logPrefix + text)
+
+    /** 每次尝试的精简结果或异常，不受详细日志开关过滤。 */
+    fun logAuditResult(text: String) = manager.appendLog(taskId, text, compactAuditEntry = true)
+
+    @Volatile var attemptError: String? = null
+        private set
+
+    fun recordAttemptError(text: String) { attemptError = text }
 
     fun updateProgress(progress: TaskProgress) {
         if (progressReceiver != null) progressReceiver.invoke(progress)
@@ -33,14 +41,14 @@ internal class TaskContext(
     }
 
     fun forAttempt(ssid: String, onProgress: (TaskProgress) -> Unit, check: () -> Unit,
-        configuration: () -> io.github.bszapp.wifitoolbox.contract.task.SecurityAuditConfig) =
+        configuration: () -> io.github.bszapp.wifitoolbox.contract.task.PskSecurityAuditConfig) =
         TaskContext(taskId, manager, onProgress, check, "[$ssid] ", configuration)
 
-    fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.SecurityAuditConfig,
+    fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.PskSecurityAuditConfig,
         networks: List<io.github.bszapp.wifitoolbox.contract.task.AuditRecord>,
         windows: List<String> = emptyList()) =
         manager.updateAuditNetworks(taskId, networks) { revision, active ->
-            TaskProgress.SecurityAudit(revision, active, config, windows)
+            TaskProgress.PskSecurityAudit(revision, active, config, windows)
         }
 
     fun publishAuditNetworks(config: io.github.bszapp.wifitoolbox.contract.task.WpsSecurityAuditConfig,

@@ -31,6 +31,8 @@ data class TrackedTaskState(
     val logs: TaskLogState,
     val capturedNetworks: List<WpsCapturedNetwork> = emptyList(),
     val auditNetworks: List<AuditRecord> = emptyList(),
+    /** 日志面板的显示起点，仅用于本地展示，不裁剪任务日志。 */
+    val logPanelMinIndex: Long = 0L,
 )
 
 data class TaskControllerState(

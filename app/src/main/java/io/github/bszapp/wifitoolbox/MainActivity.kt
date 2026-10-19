@@ -22,10 +22,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
-import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.HasDefaultViewModelProviderFactory
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
@@ -44,8 +42,8 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupStatus
 import io.github.bszapp.wifitoolbox.ui.component.DebugWatermark
 import io.github.bszapp.wifitoolbox.ui.startup.StartupScreen
 import io.github.bszapp.wifitoolbox.ui.theme.WifiToolboxMaterialTheme
-import io.github.bszapp.wifitoolbox.uidefault.DefaultUI
-import io.github.bszapp.wifitoolbox.uidefault.dictionary.DictionaryViewModel
+import io.github.bszapp.wifitoolbox.ui.DefaultUI
+import io.github.bszapp.wifitoolbox.ui.dictionary.DictionaryViewModel
 
 class MainActivity : ComponentActivity() {
 
@@ -54,7 +52,7 @@ class MainActivity : ComponentActivity() {
     private val controller by lazy { AppControllerProvider.get() }
     private var errorReportFile: File? = null
     private var errorReportLogFile: File? = null
-    private var openSecurityAudit by mutableStateOf(false)
+    private var openPskSecurityAudit by mutableStateOf(false)
     private val exportErrorReport = registerForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri ->
@@ -93,7 +91,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         app.startNormalRuntime()
-        openSecurityAudit = intent.getBooleanExtra("open_security_audit", false)
+        openPskSecurityAudit = intent.getBooleanExtra("open_security_audit", false)
         enableEdgeToEdge()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
@@ -123,8 +121,8 @@ class MainActivity : ComponentActivity() {
                     CompositionLocalProvider(LocalViewModelStoreOwner provides sessionOwner) {
                         key(state.connectionId) {
                             DefaultUI(dictionaryViewModel = dictionaryViewModel,
-                                openSecurityAudit = openSecurityAudit, onSecurityAuditOpened = {
-                                    openSecurityAudit = false
+                                openPskSecurityAudit = openPskSecurityAudit, onPskSecurityAuditOpened = {
+                                    openPskSecurityAudit = false
                                     intent.removeExtra("open_security_audit")
                                 })
                         }
@@ -145,7 +143,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (errorReportFile == null) openSecurityAudit = intent.getBooleanExtra("open_security_audit", false)
+        if (errorReportFile == null) openPskSecurityAudit = intent.getBooleanExtra("open_security_audit", false)
     }
 
     /** This branch creates framework Views only; no Compose or UI ViewModel is loaded. */

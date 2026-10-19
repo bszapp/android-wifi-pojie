@@ -73,7 +73,7 @@ internal class ServiceNotificationManager(
                     if (hashcatCount > 0) "正在运行${hashcatCount}个 WPA Hashcat 任务" else null,
                 ).takeIf { it.isNotEmpty() }?.joinToString("；")
                 val api = backend ?: NotificationBackend(appUserIdProvider(), {
-                    taskProvider()?.request?.payload is TaskRequestPayload.SecurityAudit
+                    taskProvider()?.request?.payload is TaskRequestPayload.PskSecurityAudit
                 }).also { backend = it }
                 update(api, MODE_NOTIFICATION_ID, modeText)
                 update(api, TASK_NOTIFICATION_ID, taskText)
@@ -121,8 +121,8 @@ internal class ServiceNotificationManager(
         TaskRequestPayload.UsbMonitor -> "电脑控制"
         is TaskRequestPayload.WpsPbc -> "WPS-PBC"
         is TaskRequestPayload.WpsPin -> "WPS PIN"
-        is TaskRequestPayload.SecurityAudit -> "网络安全测试"
-        is TaskRequestPayload.WpsSecurityAudit -> "WPS 安全测试"
+        is TaskRequestPayload.PskSecurityAudit -> "弱密码检测"
+        is TaskRequestPayload.WpsSecurityAudit -> "PIN漏洞检测"
         is TaskRequestPayload.ConnectWifi -> {
             val input = payload.request.input
             when {

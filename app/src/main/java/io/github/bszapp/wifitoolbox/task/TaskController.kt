@@ -6,6 +6,8 @@ import io.github.bszapp.wifitoolbox.contract.PagedDataTransport
 import io.github.bszapp.wifitoolbox.contract.task.TaskProgress
 import io.github.bszapp.wifitoolbox.contract.task.WpsCapturedNetworkPage
 import io.github.bszapp.wifitoolbox.contract.task.ITaskController
+import io.github.bszapp.wifitoolbox.contract.settings.ISettingsManager
+import io.github.bszapp.wifitoolbox.contract.settings.AuditLogPanelConfig
 import io.github.bszapp.wifitoolbox.contract.task.TaskControllerState
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogBatch
 import io.github.bszapp.wifitoolbox.contract.task.TaskLogEntry
@@ -34,6 +36,7 @@ import java.io.File
 
 class TaskController(
     context: android.content.Context,
+    private val settingsManager: ISettingsManager,
     private val scope: CoroutineScope,
     private val reportError: (
         source: String,
@@ -42,29 +45,36 @@ class TaskController(
         remoteDetails: String?,
     ) -> Unit,
 ) : ITaskController {
-    private val auditStore = SecurityAuditHistoryStore(context)
+    private val auditStore = PskSecurityAuditHistoryStore(context)
     override val auditHistory = auditStore.state
-    private val _auditConfig = MutableStateFlow(SecurityAuditConfig())
-    override val auditConfig = _auditConfig.asStateFlow()
-    private val _wpsAuditConfig = MutableStateFlow(WpsSecurityAuditConfig())
-    override val wpsAuditConfig = _wpsAuditConfig.asStateFlow()
-    override fun configureSecurityAudit(config: SecurityAuditConfig) {
-        _auditConfig.value = config
-        val running = state.value.currentTaskId?.let(state.value.tasks::get)
-        if (running?.snapshot?.request?.payload is TaskRequestPayload.SecurityAudit) {
-            updateTask(running.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.SecurityAuditConfigure(config)))
-        }
+    private val auditSettings = settingsManager.settings.pskSecurityAudit
+    private val logPanelSetting = settingsManager.settings.logPanel
+    override val logPanelConfig = logPanelSetting.value
+    override val auditConfig = auditSettings.password.value
+    override val wpsAuditConfig = auditSettings.wps.value
+    override fun configurePskSecurityAudit(config: PskSecurityAuditConfig) {
+        auditSettings.password.set(config)
+        val target = state.value.tasks.values.filter {
+            it.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit
+        }.maxByOrNull { it.snapshot.taskId }
+        target?.let { updateTask(it.snapshot.taskId, TaskUpdateRequest(TaskUpdatePayload.PskSecurityAuditConfigure(config))) }
     }
 
     override fun configureWpsSecurityAudit(config: WpsSecurityAuditConfig) {
-        _wpsAuditConfig.value = config
-        val running = state.value.currentTaskId?.let(state.value.tasks::get)
-        if (running?.snapshot?.request?.payload is TaskRequestPayload.WpsSecurityAudit) {
+        auditSettings.wps.set(config)
+        val target = state.value.tasks.values.filter {
+            it.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit
+        }.maxByOrNull { it.snapshot.taskId }
+        if (target != null) {
             updateTask(
-                running.snapshot.taskId,
+                target.snapshot.taskId,
                 TaskUpdateRequest(TaskUpdatePayload.WpsSecurityAuditConfigure(config)),
             )
         }
+    }
+
+    override fun configureLogPanel(config: AuditLogPanelConfig) {
+        logPanelSetting.set(config)
     }
     init { scope.launch(Dispatchers.IO) { auditStore.load() } }
     private val connectionLock = Any()
@@ -132,7 +142,7 @@ class TaskController(
                 }
                 var offset = 0
                 while (isCurrent(binding)) {
-                    val ids = service.getSecurityAuditTaskIds(offset)
+                    val ids = service.getPskSecurityAuditTaskIds(offset)
                     if (ids.isEmpty()) break
                     synchronized(binding.pendingLock) { binding.pendingTaskIds.addAll(ids.toList()) }
                     offset += ids.size
@@ -193,17 +203,17 @@ class TaskController(
         }
     }
 
-    override suspend fun runSecurityAudit(input: SecurityAuditTaskInput, dictionary: File, taskCount: Int): Long = withContext(Dispatchers.IO) {
+    override suspend fun runPskSecurityAudit(input: PskSecurityAuditTaskInput, dictionary: File, taskCount: Int): Long = withContext(Dispatchers.IO) {
         val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
         var accepted = false
         try {
             check(isCurrent(binding)) { "服务未连接" }
             require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
-            val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
-            require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大，请减少字典选择" }
+            val request = TaskStartRequest(TaskRequestPayload.PskSecurityAudit(input))
+            require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "弱密码检测请求元数据过大，请减少字典选择" }
             auditStore.saveDictionary(input.network.dictionaryId, dictionary)
-            val id = SecurityAuditDictionaryTransport.open(dictionary).use { fd ->
-                binding.service.runSecurityAuditRecords(request, fd, taskCount)
+            val id = PskSecurityAuditDictionaryTransport.open(dictionary).use { fd ->
+                binding.service.runPskSecurityAuditRecords(request, fd, taskCount)
             }
             accepted = true
             val snapshot = binding.service.getTaskSnapshot(id)
@@ -223,19 +233,19 @@ class TaskController(
             id
         } catch (error: Throwable) {
             if (!accepted) auditStore.discardDictionary(input.network.dictionaryId)
-            if (isCurrent(binding)) reportError("App.TaskController", "运行网络安全测试", error, null)
+            if (isCurrent(binding)) reportError("App.TaskController", "运行弱密码检测", error, null)
             throw error
         }
     }
 
-    override suspend fun joinSecurityAuditPool(input: SecurityAuditTaskInput, taskCount: Int): Long = withContext(Dispatchers.IO) {
+    override suspend fun joinPskSecurityAuditPool(input: PskSecurityAuditTaskInput, taskCount: Int): Long = withContext(Dispatchers.IO) {
         val binding = synchronized(connectionLock) { activeBinding } ?: error("服务未连接")
         try {
             check(isCurrent(binding)) { "服务未连接" }
             require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
-            val request = TaskStartRequest(TaskRequestPayload.SecurityAudit(input))
+            val request = TaskStartRequest(TaskRequestPayload.PskSecurityAudit(input))
             require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "共享候选池请求元数据过大" }
-            val id = binding.service.joinSecurityAuditRecords(request, taskCount)
+            val id = binding.service.joinPskSecurityAuditRecords(request, taskCount)
             val snapshot = binding.service.getTaskSnapshot(id)
             val currentTaskId = synchronized(binding.pendingLock) {
                 binding.service.getCurrentTaskId().takeIf { it > 0L }.also { binding.currentTaskId = it }
@@ -263,8 +273,8 @@ class TaskController(
             try {
                 check(isCurrent(binding)) { "服务未连接" }
                 require(input.targets.isNotEmpty()) { "至少选择一个网络" }
-                val request = TaskStartRequest.wpsSecurityAudit(input)
-                require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "WPS 安全测试请求元数据过大，请减少网络选择" }
+                val request = TaskStartRequest.wpsPskSecurityAudit(input)
+                require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "PIN漏洞检测请求元数据过大，请减少网络选择" }
                 val id = binding.service.startTask(request)
                 val snapshot = binding.service.getTaskSnapshot(id)
                 val currentTaskId = synchronized(binding.pendingLock) {
@@ -283,7 +293,7 @@ class TaskController(
                 binding.signal.trySend(Unit)
                 id
             } catch (error: Throwable) {
-                if (isCurrent(binding)) reportError("App.TaskController", "运行 WPS 安全测试", error, null)
+                if (isCurrent(binding)) reportError("App.TaskController", "运行PIN漏洞检测", error, null)
                 throw error
             }
         }
@@ -291,7 +301,7 @@ class TaskController(
     override fun deleteAuditHistory(recordId: String) {
         scope.launch(Dispatchers.IO) {
             runCatching { auditStore.delete(recordId) }.onFailure {
-                reportError("App.TaskController", "删除安全测试历史", it, null)
+                reportError("App.TaskController", "删除弱密码检测历史", it, null)
             }
         }
     }
@@ -315,7 +325,7 @@ class TaskController(
         scope.launch(Dispatchers.IO) {
             if (!isCurrent(binding) || !binding.service.asBinder().isBinderAlive) return@launch
             runCatching {
-                check(binding.service.updateTask(taskId, update)) { "任务 $taskId 已经结束" }
+                check(binding.service.updateTask(taskId, update)) { "任务更新未被接受，请查看最新运行状态" }
             }.onFailure { error ->
                 if (isCurrent(binding)) {
                     reportError("App.TaskController", "更新服务任务", error, null)
@@ -337,13 +347,31 @@ class TaskController(
         val binding = synchronized(connectionLock) { activeBinding } ?: return
         scope.launch(Dispatchers.IO) {
             if (isCurrent(binding) && binding.service.asBinder().isBinderAlive) {
+                val panelResetBoundaries = _state.value.tasks.mapValues { (_, task) -> task.logs.latestId + 1L }
                 runCatching { binding.service.clearTaskLogs() }
+                    .onSuccess {
+                        synchronized(binding.pendingLock) {
+                            binding.pendingLogPanelResets.putAll(panelResetBoundaries)
+                            binding.pendingLogIds.addAll(panelResetBoundaries.keys)
+                            binding.globalLogsDirty = true
+                        }
+                        binding.signal.trySend(Unit)
+                    }
                     .onFailure { error ->
                         if (isCurrent(binding)) {
                             Log.w(TAG, "清空任务日志失败：${error.message}", error)
                         }
                     }
             }
+        }
+    }
+
+    override fun clearLogPanel(taskId: Long) {
+        val binding = synchronized(connectionLock) { activeBinding } ?: return
+        updateState(binding) { current ->
+            val task = current.tasks[taskId] ?: return@updateState current
+            current.copy(tasks = current.tasks +
+                (taskId to task.copy(logPanelMinIndex = task.logs.latestId + 1L)))
         }
     }
 
@@ -369,8 +397,8 @@ class TaskController(
                         ?: TaskLogState(scopeTaskId = taskId)
                     current.copy(
                         tasks = current.tasks + (
-                            taskId to TrackedTaskState(snapshot, existingLogs, current.tasks[taskId]?.capturedNetworks.orEmpty(),
-                                current.tasks[taskId]?.auditNetworks.orEmpty())
+                            taskId to (current.tasks[taskId]?.copy(snapshot = snapshot)
+                                ?: TrackedTaskState(snapshot, existingLogs))
                         ),
                     )
                 }
@@ -391,6 +419,33 @@ class TaskController(
             it.copy(
                 currentTaskId = synchronized(binding.pendingLock) { binding.currentTaskId },
             )
+        }
+        acceptServiceConfigurations(binding)
+    }
+
+    /** 完整同步后只接受每种类型最新任务的配置；保存设置时不再次向服务发送更新。 */
+    private fun acceptServiceConfigurations(binding: Binding) {
+        val tasks = _state.value.tasks.values
+        val password = tasks.filter { it.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit }
+            .maxByOrNull { it.snapshot.taskId }?.snapshot?.let { snapshot ->
+                snapshot.taskId to ((snapshot.progress as? TaskProgress.PskSecurityAudit)?.config
+                    ?: (snapshot.request.payload as TaskRequestPayload.PskSecurityAudit).input.config)
+            }
+        val wps = tasks.filter { it.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit }
+            .maxByOrNull { it.snapshot.taskId }?.snapshot?.let { snapshot ->
+                snapshot.taskId to ((snapshot.progress as? TaskProgress.WpsSecurityAudit)?.config
+                    ?: (snapshot.request.payload as TaskRequestPayload.WpsSecurityAudit).input.config)
+            }
+        scope.launch(Dispatchers.Main.immediate) {
+            if (!isCurrent(binding)) return@launch
+            if (password != null && password != binding.lastPasswordConfig) {
+                binding.lastPasswordConfig = password
+                auditSettings.password.set(password.second)
+            }
+            if (wps != null && wps != binding.lastWpsConfig) {
+                binding.lastWpsConfig = wps
+                auditSettings.wps.set(wps.second)
+            }
         }
     }
 
@@ -421,7 +476,7 @@ class TaskController(
         val progress = _state.value.tasks[taskId]?.snapshot?.progress
         val revisionOf: (TaskProgress) -> Long? = {
             when (it) {
-                is TaskProgress.SecurityAudit -> it.revision
+                is TaskProgress.PskSecurityAudit -> it.revision
                 is TaskProgress.WpsSecurityAudit -> it.revision
                 else -> null
             }
@@ -436,14 +491,14 @@ class TaskController(
             do {
                 if (!isCurrent(binding)) return
                 val page = PagedDataTransport.decode(
-                    binding.service.getSecurityAuditNetworks(taskId, records.size),
+                    binding.service.getPskSecurityAuditNetworks(taskId, records.size),
                     AuditRecordPage::class.java,
                 )
                 if (pageRevision != null && pageRevision != page.revision) { changed = true; break }
                 pageRevision = page.revision
                 total = page.totalCount
-                require(page.fromIndex == records.size) { "安全测试分页不连续" }
-                require(page.records.isNotEmpty() || total == records.size) { "安全测试分页为空" }
+                require(page.fromIndex == records.size) { "弱密码检测分页不连续" }
+                require(page.records.isNotEmpty() || total == records.size) { "弱密码检测分页为空" }
                 records.addAll(page.records)
             } while (records.size < total)
             if (!changed) {
@@ -528,9 +583,17 @@ class TaskController(
                 current.copy(globalLogs = logState)
             } else {
                 val task = current.tasks[scopeTaskId] ?: return@updateState current
+                val resetPanel = synchronized(binding.pendingLock) {
+                    val boundary = binding.pendingLogPanelResets[scopeTaskId]
+                    if (boundary != null && range.oldestAvailableId >= boundary) {
+                        binding.pendingLogPanelResets.remove(scopeTaskId)
+                        true
+                    } else false
+                }
                 current.copy(
                     tasks = current.tasks + (
-                        scopeTaskId to task.copy(logs = logState)
+                        scopeTaskId to task.copy(logs = logState,
+                            logPanelMinIndex = if (resetPanel) 0L else task.logPanelMinIndex)
                     ),
                 )
             }
@@ -599,8 +662,12 @@ class TaskController(
         val registrationLock: Any = Any(),
         val pendingTaskIds: MutableSet<Long> = mutableSetOf(),
         val pendingLogIds: MutableSet<Long> = mutableSetOf(),
+        /** 整体清空前的日志末尾，只在确认同步到了清空后的范围时重置面板起点。 */
+        val pendingLogPanelResets: MutableMap<Long, Long> = mutableMapOf(),
         val auditRevisions: MutableMap<Long, Long> = mutableMapOf(),
         val auditHistoryRevisions: MutableMap<Long, Long> = mutableMapOf(),
+        var lastPasswordConfig: Pair<Long, PskSecurityAuditConfig>? = null,
+        var lastWpsConfig: Pair<Long, WpsSecurityAuditConfig>? = null,
         var globalLogsDirty: Boolean = false,
         var currentTaskId: Long? = null,
         @Volatile var registered: Boolean = false,

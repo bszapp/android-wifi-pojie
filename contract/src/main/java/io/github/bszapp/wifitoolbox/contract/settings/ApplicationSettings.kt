@@ -30,8 +30,12 @@ class ThemeSettings : SettingGroup("theme") {
 
 class ApplicationSettings : RootSettings() {
     val theme = ThemeSettings()
+    val pskSecurityAudit = PskSecurityAuditSettings()
+    val logPanel = AuditLogPanelConfigSetting()
 
     override val children: List<SettingItem> = listOf(
         theme,
+        pskSecurityAudit,
+        logPanel,
     )
 }

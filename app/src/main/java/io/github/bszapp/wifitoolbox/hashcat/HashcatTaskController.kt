@@ -30,6 +30,8 @@ class HashcatTaskController(
     private val root = File(context.filesDir, "hashcat-tasks")
     private val snapshots = linkedMapOf<String, HashcatTaskSnapshot>()
     private val dirtySnapshots = linkedSetOf<String>()
+    private val changingTasks = mutableSetOf<String>()
+    private val deletedTasks = mutableSetOf<String>()
     private var writeScheduled = false
     private val snapshotWriter = Executors.newSingleThreadScheduledExecutor {
         Thread(it, "hashcat-history-writer").apply { isDaemon = true }
@@ -91,6 +93,7 @@ class HashcatTaskController(
                 return try {
                     check(isCurrent(next)) { "服务会话已改变" }
                     synchronized(storeLock) {
+                        if (synchronized(lock) { taskId in deletedTasks }) return true
                         val dir = taskDirectory(taskId)
                         val staging = File(root, ".backup-${UUID.randomUUID()}")
                         try {
@@ -155,7 +158,8 @@ class HashcatTaskController(
         require(dictionary.isFile && dictionary.length() > 0) { "字典为空" }
         val id = UUID.randomUUID().toString()
         require(memoryLimitMiB > 0) { "内存预算必须大于 0 MiB" }
-        val snapshot = HashcatTaskSnapshot(id, System.currentTimeMillis(), dictionaryNames = dictionaryNames, memoryLimitMiB = memoryLimitMiB)
+        val snapshot = HashcatTaskSnapshot(id, System.currentTimeMillis(), dictionaryNames = dictionaryNames,
+            memoryLimitMiB = memoryLimitMiB, networks = HashcatNetwork.fromHandshake(handshake))
         synchronized(storeLock) {
             val dir = taskDirectory(id)
             AtomicFile(File(dir, "handshake.hc22000")).let { atomic ->
@@ -174,6 +178,84 @@ class HashcatTaskController(
             throw error
         }
         id
+    }
+
+    override suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String = withContext(Dispatchers.IO) {
+        val active = requireBinding()
+        require(dictionary.isFile && dictionary.length() > 0) { "字典为空" }
+        require(memoryLimitMiB > 0) { "内存预算必须大于0MiB" }
+        synchronized(lock) {
+            check(taskId in snapshots && taskId !in deletedTasks) { "任务不存在" }
+            check(changingTasks.add(taskId)) { "任务正在修改" }
+        }
+        try {
+            val handshake = synchronized(storeLock) {
+                File(taskDirectory(taskId), "handshake.hc22000").also {
+                    check(it.isFile) { "任务未保留握手文件，无法重新运行" }
+                }.readText()
+            }
+            val stoppedRevision = active.service.deleteHashcat(taskId)
+            val before = synchronized(lock) { snapshots[taskId] } ?: error("任务不存在")
+            val restarted = HashcatTaskSnapshot(
+                id = taskId, createdAt = before.createdAt, revision = maxOf(before.revision, stoppedRevision) + 1,
+                dictionaryNames = dictionaryNames, memoryLimitMiB = memoryLimitMiB,
+                networks = HashcatNetwork.fromHandshake(handshake),
+            )
+            try {
+                synchronized(storeLock) {
+                    val dir = taskDirectory(taskId)
+                    listOf("session.restore", "result.txt", "run.log").forEach { name ->
+                        val file = File(dir, name)
+                        check(!file.exists() || file.delete()) { "无法清理旧任务数据：$name" }
+                    }
+                    atomicCopy(dictionary, File(dir, "dictionary.txt"))
+                    save(restarted)
+                }
+                upload(active, taskId, resume = false)
+            } catch (error: Throwable) {
+                synchronized(storeLock) {
+                    save(restarted.copy(state = HashcatTaskState.FAILED, step = "重新运行失败",
+                        error = error.message, revision = restarted.revision + 1))
+                }
+                throw error
+            }
+        } finally {
+            synchronized(lock) { changingTasks.remove(taskId) }
+        }
+        fetch(active, taskId)
+        taskId
+    }
+
+    override suspend fun delete(taskId: String) = withContext(Dispatchers.IO) {
+        require(UUID.fromString(taskId).toString() == taskId) { "任务ID无效" }
+        val snapshot = synchronized(lock) {
+            val existing = snapshots[taskId] ?: error("任务不存在")
+            check(changingTasks.add(taskId)) { "任务正在修改" }
+            existing
+        }
+        try {
+            val active = synchronized(lock) { binding }
+            if (active != null) {
+                active.ready.get()
+                check(isCurrent(active)) { "服务会话已改变" }
+                active.service.deleteHashcat(taskId)
+            } else check(!snapshot.active) { "请连接服务后停止并删除运行中的任务" }
+            synchronized(storeLock) {
+                val directory = File(root, taskId).canonicalFile
+                check(directory.parentFile == root.canonicalFile) { "任务存储目录无效" }
+                if (directory.exists()) directory.walkBottomUp().forEach { file ->
+                    check(file.delete()) { "无法删除任务文件：$file" }
+                }
+                synchronized(lock) {
+                    deletedTasks.add(taskId)
+                    snapshots.remove(taskId)
+                    dirtySnapshots.remove(taskId)
+                    publish()
+                }
+            }
+        } finally {
+            synchronized(lock) { changingTasks.remove(taskId) }
+        }
     }
 
     override suspend fun refreshKernels() = withContext(Dispatchers.IO) { fetchKernels(requireBinding()) }
@@ -240,14 +322,20 @@ class HashcatTaskController(
         }
     }
     private fun fetch(active: Binding, id: String) {
-        val snapshot = active.service.getHashcatTask(id).let { fd ->
-            ParcelFileDescriptor.AutoCloseInputStream(fd).bufferedReader().use { HashcatTaskSnapshot.fromJson(JSONObject(it.readText())) }
+        if (synchronized(lock) { id in changingTasks || id in deletedTasks || binding !== active }) return
+        val snapshot = try {
+            active.service.getHashcatTask(id).let { fd ->
+                ParcelFileDescriptor.AutoCloseInputStream(fd).bufferedReader().use { HashcatTaskSnapshot.fromJson(JSONObject(it.readText())) }
+            }
+        } catch (error: Throwable) {
+            if (synchronized(lock) { id in changingTasks || id in deletedTasks }) return
+            throw error
         }
         synchronized(lock) {
-            if (binding !== active) return
+            if (binding !== active || id in changingTasks || id in deletedTasks) return
             val old = snapshots[id]
             if (old != null && old.revision >= snapshot.revision) return
-            snapshots[id] = snapshot
+            snapshots[id] = if (snapshot.networks.isEmpty() && old != null) snapshot.copy(networks = old.networks) else snapshot
             publish()
             dirtySnapshots.add(id)
             scheduleSnapshotWrite()
@@ -269,6 +357,7 @@ class HashcatTaskController(
     }
     private fun save(snapshot: HashcatTaskSnapshot) {
         synchronized(lock) {
+            if (snapshot.id in deletedTasks) return
             val old = snapshots[snapshot.id]
             if (old != null && old.revision > snapshot.revision) return
         }
@@ -316,7 +405,12 @@ class HashcatTaskController(
         try { source.inputStream().use { it.copyTo(out, 64 * 1024) }; atomic.finishWrite(out) }
         catch (error: Throwable) { atomic.failWrite(out); throw error }
     }
-    private fun readSnapshot(file: File) = HashcatTaskSnapshot.fromJson(JSONObject(AtomicFile(file).openRead().bufferedReader().use { it.readText() }))
+    private fun readSnapshot(file: File): HashcatTaskSnapshot {
+        val snapshot = HashcatTaskSnapshot.fromJson(JSONObject(AtomicFile(file).openRead().bufferedReader().use { it.readText() }))
+        if (snapshot.networks.isNotEmpty()) return snapshot
+        val handshake = File(file.parentFile, "handshake.hc22000")
+        return if (handshake.isFile) snapshot.copy(networks = HashcatNetwork.fromHandshake(handshake.readText())) else snapshot
+    }
     private fun requireBinding(): Binding {
         val active = synchronized(lock) { binding } ?: error("服务未连接")
         active.ready.get()

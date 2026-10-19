@@ -48,6 +48,7 @@ data class SmartInterfacesState(
     val addedInterfaces: List<String> = emptyList(),
     val interfaceCount: Int = 0,
     val isRunning: Boolean = false,
+    val managedInterfaces: List<String> = emptyList(),
 ) : Parcelable {
     val enabled: Boolean get() = addedInterfaces.isNotEmpty()
 }

@@ -3,6 +3,7 @@ package io.github.bszapp.wifitoolbox.service.hashcat
 import android.os.ParcelFileDescriptor
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFiles
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatFinding
+import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatNetwork
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskState
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatMemorySnapshot
@@ -25,12 +26,14 @@ internal class HashcatManager(
         var controller = HashcatController()
         var completion = CompletableFuture<Unit>()
         @Volatile var backedUp = false
+        @Volatile var discarding = false
         var endState: HashcatTaskState? = null
         var lastNotify = 0L
         var notifyPending = false
     }
     private val lock = Any()
     private val records = linkedMapOf<String, Record>()
+    private val deletingIds = mutableSetOf<String>()
     private val workers = Executors.newCachedThreadPool { Thread(it, "hashcat-task").apply { isDaemon = true } }
     private val callbacks = Executors.newSingleThreadScheduledExecutor { Thread(it, "hashcat-callback").apply { isDaemon = true } }
     @Volatile private var callback: IHashcatCallback? = null
@@ -82,7 +85,9 @@ internal class HashcatManager(
         synchronized(lock) { records.values.toList() }.forEach { record ->
             record.completion.thenRunAsync({
                 synchronized(record.operationLock) {
-                    if (!record.backedUp) runCatching { backup(record) }.onFailure { onError("保存 Hashcat 历史", it) }
+                    if (!record.discarding && synchronized(lock) { records[record.snapshot.id] === record } && !record.backedUp) {
+                        runCatching { backup(record) }.onFailure { onError("保存 Hashcat 历史", it) }
+                    }
                 }
             }, workers)
         }
@@ -91,9 +96,9 @@ internal class HashcatManager(
 
     fun start(id: String, input: ParcelFileDescriptor, resume: Boolean, initialRevision: Long = 0, createdAt: Long = System.currentTimeMillis(), memoryLimitMiB: Int? = null) {
         require(UUID.fromString(id).toString() == id) { "Hashcat 任务 ID 无效" }
-        synchronized(lock) { check(!exiting) { "服务正在退出" } }
+        synchronized(lock) { check(!exiting && id !in deletingIds) { "服务正在退出或任务正在删除" } }
         val existing = synchronized(lock) { records[id] }
-        check(existing == null || (resume && existing.snapshot.state == HashcatTaskState.PAUSED && existing.completion.isDone && existing.backedUp)) { "Hashcat 任务尚未完成暂停" }
+        check(existing == null || (resume && !existing.discarding && existing.snapshot.state == HashcatTaskState.PAUSED && existing.completion.isDone && existing.backedUp)) { "Hashcat 任务尚未完成暂停" }
         val directory = File(HashcatController.runtimeBaseDirectory(), "hashcat-$id")
         val record = Record((existing?.snapshot ?: HashcatTaskSnapshot(id, createdAt)).copy(
             state = HashcatTaskState.RUNNING, step = "接收运行文件", error = null,
@@ -102,7 +107,7 @@ internal class HashcatManager(
         ), directory)
         val ownedInput = ParcelFileDescriptor.dup(input.fileDescriptor)
         try { synchronized(lock) {
-            check(!exiting && records[id] === existing) { "Hashcat 任务启动状态已改变" }
+            check(!exiting && id !in deletingIds && records[id] === existing) { "Hashcat 任务启动状态已改变" }
             memoryLimitMiB?.let { budget ->
                 require(budget > 0) { "内存预算必须大于 0 MiB" }
                 val measured = readMemory()
@@ -123,6 +128,42 @@ internal class HashcatManager(
             record.completion.get()
             if (!record.backedUp) backup(record)
             return record.backedUp
+        }
+    }
+
+    fun delete(id: String): Long {
+        require(UUID.fromString(id).toString() == id) { "Hashcat任务ID无效" }
+        val record = synchronized(lock) {
+            check(!exiting) { "服务正在退出" }
+            check(deletingIds.add(id)) { "任务正在删除" }
+            records[id]
+        }
+        var revision = -1L
+        try {
+            if (record != null) synchronized(record.operationLock) {
+                synchronized(lock) {
+                    check(records[id] === record) { "任务状态已改变" }
+                    record.discarding = true
+                }
+                record.controller.checkpointAndStop()
+                record.controller.stop()
+                record.completion.get()
+                synchronized(lock) {
+                    revision = record.snapshot.revision
+                    if (records[id] === record) records.remove(id)
+                }
+            }
+            val base = HashcatController.runtimeBaseDirectory().canonicalFile
+            val directory = File(base, "hashcat-$id").canonicalFile
+            check(directory.parentFile == base) { "Hashcat运行目录无效" }
+            if (directory.exists()) directory.walkBottomUp().forEach { file ->
+                check(file.delete()) { "无法删除Hashcat运行文件：$file" }
+            }
+            return revision
+        } finally {
+            synchronized(lock) { deletingIds.remove(id); latestMemory = null }
+            runCatching { callback?.onHashcatMemoryChanged() }
+            onActivityChanged()
         }
     }
 
@@ -161,6 +202,7 @@ internal class HashcatManager(
             val saved = HashcatTaskSnapshot.fromJson(JSONObject(File(incoming, "snapshot.json").readText()))
             require(saved.id == record.snapshot.id)
             change(record) { copy(createdAt = saved.createdAt, dictionaryNames = saved.dictionaryNames, findings = saved.findings,
+                networks = HashcatNetwork.fromHandshake(File(incoming, "handshake.hc22000").readText()),
                 computeDurationMillis = saved.computeDurationMillis, averageSpeed = saved.averageSpeed,
                 revision = maxOf(revision, saved.revision)) }
             val previousDuration = saved.computeDurationMillis
@@ -234,15 +276,15 @@ internal class HashcatManager(
                 },
                 error = if (state == HashcatTaskState.FAILED) File(dir, "run.log").takeIf { it.isFile }?.let { tail(it) } else null,
             ) }
-            if (state == HashcatTaskState.FAILED) onError("WPA Hashcat 运行", IllegalStateException(record.snapshot.error ?: record.snapshot.step))
+            if (state == HashcatTaskState.FAILED && !record.discarding) onError("WPA Hashcat 运行", IllegalStateException(record.snapshot.error ?: record.snapshot.step))
         } catch (error: Throwable) {
             record.endState = HashcatTaskState.FAILED
             change(record) { copy(state = HashcatTaskState.FAILED, step = "运行失败", error = error.message) }
-            onError("WPA Hashcat 运行", error)
+            if (!record.discarding) onError("WPA Hashcat 运行", error)
         } finally {
             runCatching { input.close() }
-            try { backup(record) }
-            catch (error: Throwable) { onError("保存 Hashcat 任务", error) }
+            try { if (!record.discarding) backup(record) }
+            catch (error: Throwable) { if (!record.discarding) onError("保存 Hashcat 任务", error) }
             finally { record.completion.complete(Unit); notify(record, true) }
         }
     }
@@ -283,15 +325,18 @@ internal class HashcatManager(
     }
     private fun notify(record: Record, force: Boolean) {
         synchronized(lock) {
+            if (record.discarding || records[record.snapshot.id] !== record) return
             val now = android.os.SystemClock.elapsedRealtime()
             if (record.notifyPending) return
             record.notifyPending = true
             val delay = if (force) 0 else (50 - (now - record.lastNotify)).coerceAtLeast(0)
             callbacks.schedule({
-                synchronized(lock) {
+                val present = synchronized(lock) {
                     record.notifyPending = false
                     record.lastNotify = android.os.SystemClock.elapsedRealtime()
+                    !record.discarding && records[record.snapshot.id] === record
                 }
+                if (!present) return@schedule
                 runCatching { callback?.onHashcatChanged(record.snapshot.id) }
                 onActivityChanged()
             }, delay, TimeUnit.MILLISECONDS)

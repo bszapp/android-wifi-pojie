@@ -21,13 +21,15 @@ internal class WpsPbcTask(
     private var ignoreRepeatedDevices = input.ignoreRepeatedDevices
     private var scriptSettingsRevision = 0L
     private val targetMac = input.targetMac?.lowercase()
+    private val interfaceName = input.interfaceName
+    private val localMac = input.localMac
     private var context: TaskContext? = null
     private var handshake: WpsHandshakeProgress? = null
 
     override fun run(context: TaskContext) {
         synchronized(lock) { this.context = context }
         publishProgress(context)
-        val session = WpsFifoSession(terminalManager, context) { current ->
+        val session = WpsFifoSession(terminalManager, context, interfaceName) { current ->
             synchronized(lock) { handshake = current }
             publishProgress(context)
         }
@@ -39,6 +41,7 @@ internal class WpsPbcTask(
                 val (revision, command) = synchronized(lock) {
                     scriptSettingsRevision to JSONObject().put("mode", "pbc")
                         .put("mac", targetMac ?: JSONObject.NULL)
+                        .put("localMac", localMac ?: JSONObject.NULL)
                         .put("completeProtocol", !useIncompleteProtocol)
                         .put("excludeMacs", JSONArray(if (ignoreRepeatedDevices) {
                             networks.map { it.mac.lowercase() }.distinct()
@@ -56,7 +59,7 @@ internal class WpsPbcTask(
                     }
                 }
                 if (result.settingsChanged) {
-                    context.log("脚本选项已更新，使用最新参数重新执行；系统 supplicant 保持挂起")
+                    context.log("脚本选项已更新，使用最新参数重新执行")
                     continue
                 }
                 if (!synchronized(lock) { continuousCapture }) return

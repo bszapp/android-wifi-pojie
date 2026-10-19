@@ -85,7 +85,7 @@ fun getGitCommitId(): String {
 
 
 dependencies {
-    implementation(project(":ui-default"))
+    implementation(project(":ui"))
     implementation(project(":contract"))
     implementation(project(":service"))
 

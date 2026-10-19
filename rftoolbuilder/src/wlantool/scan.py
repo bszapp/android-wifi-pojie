@@ -726,11 +726,12 @@ class Nl80211Scanner:
 
     def _dump_scan(self) -> Tuple[List[bytes], Optional[int]]:
         last_error: Optional[Exception] = None
-        for _attempt in range(2):
+        for attempt in range(6):
             try:
                 return self._dump_scan_once()
             except ScanError as error:
                 last_error = error
+                time.sleep(0.3 * (attempt + 1))
         raise last_error or ScanError("无法读取扫描结果")
 
     @staticmethod

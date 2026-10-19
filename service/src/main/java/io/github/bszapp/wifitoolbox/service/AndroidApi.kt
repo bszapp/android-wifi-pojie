@@ -582,15 +582,15 @@ class AndroidApi(
         }
     }
 
-    /** 安全测试沿用旧版配置更新流程；每轮不删除配置，也不备份、还原密码。 */
-    internal fun connectSecurityAuditNetwork(
+    /** 弱密码检测沿用旧版配置更新流程；每轮不删除配置，也不备份、还原密码。 */
+    internal fun connectPskSecurityAuditNetwork(
         ssid: String,
         password: String,
         onSubmitting: (networkId: Int) -> Unit,
-    ): SecurityAuditConnectionSubmission = androidBusinessCall(
-        operation = "连接安全测试网络",
+    ): PskSecurityAuditConnectionSubmission = androidBusinessCall(
+        operation = "连接弱密码检测网络",
         details = "ssid=$ssid",
-        successMessage = { "连接安全测试网络提交返回：ssid=$ssid networkId=${it.networkId} accepted=${it.accepted}" },
+        successMessage = { "连接弱密码检测网络提交返回：ssid=$ssid networkId=${it.networkId} accepted=${it.accepted}" },
     ) {
         val networkId = if (password.isEmpty()) {
             getSavedWifiListInternal().firstOrNull {
@@ -615,13 +615,13 @@ class AndroidApi(
                 "enableNetwork", Int::class.java, Boolean::class.java,
             ).invoke(service, networkId, true)
         } as? Boolean ?: error("enableNetwork 返回类型不是 Boolean")
-        SecurityAuditConnectionSubmission(networkId, accepted)
+        PskSecurityAuditConnectionSubmission(networkId, accepted)
     }
 
     /** 对齐旧版高权限断开：先关闭当前配置自动加入，随后断开并保留配置。 */
-    internal fun disconnectSecurityAuditNetwork() = androidBusinessCall(
-        operation = "断开安全测试网络并保留配置",
-        successMessage = { "安全测试断开请求已接受，配置保留；等待实际断开确认" },
+    internal fun disconnectPskSecurityAuditNetwork() = androidBusinessCall(
+        operation = "断开弱密码检测网络并保留配置",
+        successMessage = { "弱密码检测断开请求已接受，配置保留；等待实际断开确认" },
     ) {
         val service = getWifiService()
         val info = systemApi("getConnectionInfo") {
@@ -670,14 +670,14 @@ class AndroidApi(
     }
 
     /** 清理确认只读取真实状态，不产生每次轮询的业务日志。 */
-    internal fun readSecurityAuditConnectionState(): SupplicantState =
+    internal fun readPskSecurityAuditConnectionState(): SupplicantState =
         getConnectionInfoInternal().supplicantState
 
-    /** 仅在安全测试网络移出队列时调用；成功的网络配置由调度器保留。 */
-    internal fun forgetSecurityAuditNetwork(ssid: String): Boolean = androidBusinessCall(
-        operation = "遗忘安全测试网络",
+    /** 仅在弱密码检测网络移出队列时调用；成功的网络配置由调度器保留。 */
+    internal fun forgetPskSecurityAuditNetwork(ssid: String): Boolean = androidBusinessCall(
+        operation = "遗忘弱密码检测网络",
         details = "ssid=$ssid",
-        successMessage = { "遗忘安全测试网络已提交：ssid=$ssid found=$it" },
+        successMessage = { "遗忘弱密码检测网络已提交：ssid=$ssid found=$it" },
     ) {
         val networkId = getSavedWifiListInternal().firstOrNull {
             it.SSID?.removeSurrounding("\"") == ssid
@@ -1015,4 +1015,4 @@ class AndroidApi(
 }
 
 /** 连接请求回执，不代表已经与路由器连接成功。 */
-internal data class SecurityAuditConnectionSubmission(val networkId: Int, val accepted: Boolean)
+internal data class PskSecurityAuditConnectionSubmission(val networkId: Int, val accepted: Boolean)

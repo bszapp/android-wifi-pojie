@@ -64,7 +64,7 @@ internal class TaskManager(
     private var closed = false
 
     fun start(request: TaskStartRequest): Long {
-        require(request.payload !is TaskRequestPayload.SecurityAudit) { "安全测试必须通过字典流接口启动" }
+        require(request.payload !is TaskRequestPayload.PskSecurityAudit) { "弱密码检测必须通过字典流接口启动" }
         val wps = request.payload as? TaskRequestPayload.WpsSecurityAudit
         if (wps != null) {
             validate(request)
@@ -117,34 +117,34 @@ internal class TaskManager(
     }
 
     /** 单条内部记录沿用原有事务。 */
-    fun runSecurityAudit(request: TaskStartRequest, fd: ParcelFileDescriptor): Long =
-        runSecurityAuditRecords(request, fd, 1)
+    fun runPskSecurityAudit(request: TaskStartRequest, fd: ParcelFileDescriptor): Long =
+        runPskSecurityAuditRecords(request, fd, 1)
 
     /** 一次读取字典，在同一个顶层任务内加入 taskCount 条测试记录。 */
-    fun runSecurityAuditRecords(request: TaskStartRequest, fd: ParcelFileDescriptor, taskCount: Int): Long {
+    fun runPskSecurityAuditRecords(request: TaskStartRequest, fd: ParcelFileDescriptor, taskCount: Int): Long {
         require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
-        val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
-            ?: error("安全测试请求类型不正确")
+        val input = (request.payload as? TaskRequestPayload.PskSecurityAudit)?.input
+            ?: error("弱密码检测请求类型不正确")
         validateAudit(input)
         require(input.network.sharedWithRecordId == null) { "共享候选池不能重复提交字典" }
-        require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "安全测试请求元数据过大" }
-        val passwords = SecurityAuditDictionaryTransport.read(fd)
+        require(PagedDataTransport.bytes(request).size <= 64 * 1024) { "弱密码检测请求元数据过大" }
+        val passwords = PskSecurityAuditDictionaryTransport.read(fd)
         require(passwords.isNotEmpty()) { "字典为空" }
         val (record, created) = synchronized(lock) {
             check(!closed) { "任务管理器已关闭" }
             val current = currentTaskId?.let(records::get)
-            check(current == null || current.snapshot.request.payload is TaskRequestPayload.SecurityAudit &&
+            check(current == null || current.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit &&
                 current.snapshot.state == TaskExecutionState.RUNNING && !current.stopRequested) {
-                "已有其他任务正在运行或安全测试正在结束"
+                "已有其他任务正在运行或弱密码检测正在结束"
             }
             val isNew = current == null
             val dispatcher = current?.auditDispatcher ?: run {
-                check(isNew) { "安全测试调度器不可用" }
-                SecurityAuditDispatcher(input.config,
-                    SecurityAuditConnectWorker(androidApiProvider() ?: error("AndroidApi 尚未初始化"), wifiLogAnalyzer, terminalManager),
+                check(isNew) { "弱密码检测调度器不可用" }
+                PskSecurityAuditDispatcher(input.config,
+                    PskSecurityAuditConnectWorker(androidApiProvider() ?: error("AndroidApi 尚未初始化"), wifiLogAnalyzer, terminalManager),
                     ::managedInterfaces)
             }
-            check(dispatcher.isAccepting()) { "安全测试正在结束" }
+            check(dispatcher.isAccepting()) { "弱密码检测正在结束" }
             val parent = current ?: run {
                 check(nextTaskId < Long.MAX_VALUE) { "任务 ID 已耗尽" }
                 val id = nextTaskId++
@@ -167,19 +167,19 @@ internal class TaskManager(
             parent to isNew
         }
         if (created) broadcastManagerChanged(record.snapshot)
-        appendLog(record.snapshot.taskId, if (created) "安全测试任务已创建：加入 $taskCount 条测试记录"
-            else "安全测试已加入 $taskCount 条测试记录")
+        appendLog(record.snapshot.taskId, if (created) "弱密码检测任务已创建：加入 $taskCount 条测试记录"
+            else "弱密码检测已加入 $taskCount 条测试记录")
         return record.snapshot.taskId
     }
 
     /** 单条内部记录沿用原有事务。 */
-    fun joinSecurityAuditPool(request: TaskStartRequest): Long =
-        joinSecurityAuditRecords(request, 1)
+    fun joinPskSecurityAuditPool(request: TaskStartRequest): Long =
+        joinPskSecurityAuditRecords(request, 1)
 
     /** 一次将 taskCount 条内部记录接入同一个候选池。 */
-    fun joinSecurityAuditRecords(request: TaskStartRequest, taskCount: Int): Long {
+    fun joinPskSecurityAuditRecords(request: TaskStartRequest, taskCount: Int): Long {
         require(taskCount in 1..8) { "测试记录数量应为 1～8 条" }
-        val input = (request.payload as? TaskRequestPayload.SecurityAudit)?.input
+        val input = (request.payload as? TaskRequestPayload.PskSecurityAudit)?.input
             ?: error("共享候选池请求类型不正确")
         validateAudit(input)
         val sourceId = input.network.sharedWithRecordId ?: error("未指定共享来源记录")
@@ -187,11 +187,11 @@ internal class TaskManager(
         val taskId = synchronized(lock) {
             check(!closed) { "任务管理器已关闭" }
             val parent = currentTaskId?.let(records::get)?.takeIf {
-                it.snapshot.request.payload is TaskRequestPayload.SecurityAudit &&
+                it.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit &&
                     it.snapshot.state == TaskExecutionState.RUNNING && !it.stopRequested
-            } ?: error("没有运行中的安全测试")
+            } ?: error("没有运行中的弱密码检测")
             val dispatcher = parent.auditDispatcher?.takeIf { it.isAccepting() }
-                ?: error("没有可共享的运行中安全测试")
+                ?: error("没有可共享的运行中弱密码检测")
             val source = parent.auditNetworks.asSequence().filterIsInstance<AuditRecord.Dictionary>()
                 .firstOrNull { it.id == sourceId && it.active }
                 ?: error("共享来源记录已结束")
@@ -201,18 +201,20 @@ internal class TaskManager(
             }
             parent.snapshot.taskId
         }
-        appendLog(taskId, "安全测试已加入 $taskCount 条共享候选池测试记录")
+        appendLog(taskId, "弱密码检测已加入 $taskCount 条共享候选池测试记录")
         return taskId
     }
 
-    private fun executeAudit(dispatcher: SecurityAuditDispatcher, taskId: Long) {
+    private fun executeAudit(dispatcher: PskSecurityAuditDispatcher, taskId: Long) {
         try {
+            appendLog(taskId, "任务开始", compactAuditEntry = true)
             dispatcher.run()
         } catch (_: InterruptedException) {
             Thread.interrupted()
         } catch (error: Throwable) {
             appendLog(taskId, "调度器异常：${error.message ?: error.javaClass.name}")
         } finally {
+            appendLog(taskId, "[任务结束]", compactAuditEntry = true)
             finish(taskId)
         }
     }
@@ -220,7 +222,7 @@ internal class TaskManager(
     fun auditTaskIds(offset: Int): LongArray = synchronized(lock) {
         require(offset >= 0)
         records.values.asSequence().filter {
-            it.snapshot.request.payload is TaskRequestPayload.SecurityAudit ||
+            it.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit ||
                 it.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit
         }
             .drop(offset).take(100).map { it.snapshot.taskId }.toList().toLongArray()
@@ -234,7 +236,7 @@ internal class TaskManager(
         while (true) {
             val page = AuditRecordPage(record.auditRevision, fromIndex, networks.size, networks.subList(fromIndex, end).toList())
             if (PagedDataTransport.bytes(page).size <= PagedDataTransport.MAX_PAGE_BYTES) return@synchronized page
-            check(end > fromIndex + 1) { "单条安全测试记录超过传输预算" }
+            check(end > fromIndex + 1) { "单条弱密码检测记录超过传输预算" }
             end--
         }
         @Suppress("UNREACHABLE_CODE") error("不可达")
@@ -272,23 +274,59 @@ internal class TaskManager(
 
     fun update(taskId: Long, update: TaskUpdateRequest): Boolean {
         val task = synchronized(lock) {
-            val record = records[taskId]
-            if (record?.snapshot?.state != TaskExecutionState.RUNNING) {
-                return false
-            }
-            validateUpdate(record.snapshot.request, update)
-            record.auditDispatcher?.let { dispatcher ->
-                return when (val payload = update.payload) {
-                    is TaskUpdatePayload.SecurityAuditConfigure -> dispatcher.configure(payload.config)
-                    is TaskUpdatePayload.SecurityAuditStopRecord ->
-                        record.auditNetworks.any { it.id == payload.recordId && it.active } &&
-                            dispatcher.stopRecord(payload.recordId)
-                    is TaskUpdatePayload.SecurityAuditRemove ->
-                        record.auditNetworks.any { it is AuditRecord.Dictionary && it.ssid == payload.ssid && it.active } &&
-                            dispatcher.stopNetwork(payload.ssid)
-                    else -> error("安全测试不支持此更新")
+            val record = records[taskId] ?: return false
+            // 已结束任务仍可接受配置更新，只更新快照，不重新运行任务。
+            if (record.snapshot.state == TaskExecutionState.FINISHED) {
+                when (val payload = update.payload) {
+                    is TaskUpdatePayload.PskSecurityAuditConfigure -> {
+                        require(record.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit)
+                        val previous = record.snapshot.progress as? TaskProgress.PskSecurityAudit
+                        updateProgress(taskId, previous?.copy(config = payload.config)
+                            ?: TaskProgress.PskSecurityAudit(record.auditRevision, 0, payload.config), allowFinished = true)
+                        return true
+                    }
+                    is TaskUpdatePayload.WpsSecurityAuditConfigure -> {
+                        require(record.snapshot.request.payload is TaskRequestPayload.WpsSecurityAudit)
+                        val previous = record.snapshot.progress as? TaskProgress.WpsSecurityAudit
+                        updateProgress(taskId, previous?.copy(config = payload.config)
+                            ?: TaskProgress.WpsSecurityAudit(record.auditRevision, 0, payload.config), allowFinished = true)
+                        return true
+                    }
+                    else -> Unit
                 }
             }
+            record.auditDispatcher?.let { dispatcher ->
+                validateUpdate(record.snapshot, update)
+                return when (val payload = update.payload) {
+                    is TaskUpdatePayload.PskSecurityAuditConfigure ->
+                        record.snapshot.state == TaskExecutionState.RUNNING && dispatcher.configure(payload.config)
+                    is TaskUpdatePayload.PskSecurityAuditStopRecord -> {
+                        val target = record.auditNetworks.firstOrNull { it.id == payload.recordId }
+                            ?: error("目标测试记录不存在")
+                        // 停止是幂等操作，重复点击或快照延迟不应被报告为顶层任务结束。
+                        record.stopRequested || !target.active ||
+                            dispatcher.stopRecord(payload.recordId)
+                    }
+                    is TaskUpdatePayload.PskSecurityAuditStopGroup -> {
+                        val members = record.auditNetworks.filterIsInstance<AuditRecord.Dictionary>().filter {
+                            it.ssid == payload.ssid && (it.groupId ?: it.id) == payload.groupId
+                        }
+                        require(members.isNotEmpty()) { "目标网络的候选池不存在" }
+                        record.stopRequested || members.none { it.active } ||
+                            dispatcher.stopGroup(payload.ssid, payload.groupId)
+                    }
+                    is TaskUpdatePayload.PskSecurityAuditRemove -> {
+                        val members = record.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
+                            .filter { it.ssid == payload.ssid }
+                        require(members.isNotEmpty()) { "目标网络的测试记录不存在" }
+                        record.stopRequested || members.none { it.active } ||
+                            dispatcher.stopNetwork(payload.ssid)
+                    }
+                    else -> error("弱密码检测不支持此更新")
+                }
+            }
+            if (record.snapshot.state != TaskExecutionState.RUNNING) return false
+            validateUpdate(record.snapshot, update)
             if (currentTaskId != taskId) return false
             record.activeTask ?: run {
                 record.pendingUpdates.addLast(update)
@@ -395,9 +433,20 @@ internal class TaskManager(
         callbacks.unregister(callback)
     }
 
-    internal fun appendLog(taskId: Long, text: String) {
+    internal fun appendLog(taskId: Long, text: String, compactAuditEntry: Boolean = false) {
         val ranges = synchronized(lock) {
             val record = records[taskId] ?: return
+            // 在分配日志ID、缓存和广播之前过滤，关闭详细日志时不积累原始输出。
+            val detailedLogging = when (val payload = record.snapshot.request.payload) {
+                is TaskRequestPayload.PskSecurityAudit -> record.auditDispatcher?.currentConfig()?.detailedLogging
+                    ?: (record.snapshot.progress as? TaskProgress.PskSecurityAudit)?.config?.detailedLogging
+                    ?: payload.input.config.detailedLogging
+                is TaskRequestPayload.WpsSecurityAudit -> (record.activeTask as? WpsSecurityAuditTask)?.currentConfig()?.detailedLogging
+                    ?: (record.snapshot.progress as? TaskProgress.WpsSecurityAudit)?.config?.detailedLogging
+                    ?: payload.input.config.detailedLogging
+                else -> true
+            }
+            if (!detailedLogging && !compactAuditEntry) return
             val entry = TaskLogEntry(
                 taskId = taskId,
                 taskLineId = record.nextLogId++,
@@ -418,10 +467,11 @@ internal class TaskManager(
     internal fun updateProgress(
         taskId: Long,
         progress: TaskProgress,
+        allowFinished: Boolean = false,
     ) {
         val snapshot = synchronized(lock) {
             val record = records[taskId] ?: return
-            if (record.snapshot.state != TaskExecutionState.RUNNING) return
+            if (record.snapshot.state != TaskExecutionState.RUNNING && !allowFinished) return
             record.snapshot = record.snapshot.copy(
                 progress = progress,
             )
@@ -440,7 +490,7 @@ internal class TaskManager(
         if (auditTask != null) {
             val active = auditTask.auditNetworks.filterIsInstance<AuditRecord.Dictionary>()
                 .filter { it.active }
-            val windows = (auditTask.snapshot.progress as? TaskProgress.SecurityAudit)?.windows.orEmpty()
+            val windows = (auditTask.snapshot.progress as? TaskProgress.PskSecurityAudit)?.windows.orEmpty()
             if (windows.isNotEmpty()) {
                 val busy = active.mapNotNull { entry -> entry.window?.let { it to entry } }.toMap()
                 return@synchronized "正在进行密码测试\n" + windows.joinToString("\n") { window ->
@@ -448,18 +498,18 @@ internal class TaskManager(
                     if (entry == null) "$window> IDLE" else "$window> ${entry.ssid},${entry.attemptPassword ?: "?"}"
                 }
             }
-            val connecting = active.firstOrNull { it.state == SecurityAuditNetworkState.CONNECTING }
-            return@synchronized if (connecting != null) "网络安全测试：${connecting.ssid} · ${connecting.message}"
-                else "网络安全测试：${active.size} 个任务等待窗口或冷却"
+            val connecting = active.firstOrNull { it.state == PskSecurityAuditNetworkState.CONNECTING }
+            return@synchronized if (connecting != null) "弱密码检测：${connecting.ssid} · ${connecting.message}"
+                else "弱密码检测：${active.size} 个任务等待窗口或冷却"
         }
         val record = currentTaskId?.let(records::get) ?: return@synchronized null
-        val isDictionary = record.snapshot.request.payload is TaskRequestPayload.SecurityAudit
+        val isDictionary = record.snapshot.request.payload is TaskRequestPayload.PskSecurityAudit
         if (!isDictionary && record.snapshot.request.payload !is TaskRequestPayload.WpsSecurityAudit) {
             return@synchronized null
         }
         val active = record.auditNetworks.filter { it.active }
         // 多线程：按窗口逐行列出每张网卡此刻在做什么，空闲窗口也占一行。
-        val windows = (record.snapshot.progress as? TaskProgress.SecurityAudit)?.windows.orEmpty()
+        val windows = (record.snapshot.progress as? TaskProgress.PskSecurityAudit)?.windows.orEmpty()
         if (windows.isNotEmpty()) {
             val busy = active.filterIsInstance<AuditRecord.Dictionary>()
                 .mapNotNull { entry -> entry.window?.let { it to entry } }.toMap()
@@ -470,10 +520,10 @@ internal class TaskManager(
             }
             return "正在进行密码测试\n$body"
         }
-        val current = active.firstOrNull { it.state == SecurityAuditNetworkState.CONNECTING }
+        val current = active.firstOrNull { it.state == PskSecurityAuditNetworkState.CONNECTING }
         if (!isDictionary) {
             val label = if (current != null) "${current.ssid} · ${current.message}" else "等待冷却"
-            return "WPS 安全测试：$label"
+            return "PIN漏洞检测：$label"
         }
         val estimates = active.filterIsInstance<AuditRecord.Dictionary>()
             .groupBy { it.ssid to (it.groupId ?: it.id) }.values.map { members ->
@@ -481,11 +531,25 @@ internal class TaskManager(
                 latest.groupAverageAttemptMillis?.times((latest.total -
                     members.maxOf { it.poolCompleted ?: it.completed }).coerceAtLeast(0))
             }
-        val remaining = if (estimates.any { it == null } || estimates.isEmpty()) "剩余时间计算中"
-            else "预计剩余 ${estimates.filterNotNull().sum() / 1000} 秒"
-        if (current != null) "网络安全测试：${current.ssid} · ${current.message}；$remaining"
-        else if (active.isNotEmpty()) "网络安全测试：等待冷却；$remaining"
-        else "网络安全测试：准备中"
+        val remaining = if (estimates.any { it == null } || estimates.isEmpty()) "计算剩余时间"
+            else "预计剩余 ${formatDurationMinutes(estimates.filterNotNull().sum())}"
+        if (current != null) "弱密码检测：${current.ssid} · ${current.message}；$remaining"
+        else if (active.isNotEmpty()) "弱密码检测：等待冷却；$remaining"
+        else "弱密码检测：准备中"
+    }
+
+    /** 旧版剩余时间格式：不足1分钟为「<1m」，其余按「Xd Xh Xm」拼接。 */
+    private fun formatDurationMinutes(millis: Long): String {
+        val totalMinutes = millis.coerceAtLeast(0) / 60000
+        if (totalMinutes < 1) return "<1m"
+        val days = totalMinutes / (24 * 60)
+        val hours = (totalMinutes % (24 * 60)) / 60
+        val minutes = totalMinutes % 60
+        val parts = mutableListOf<String>()
+        if (days > 0) parts.add("${days}d")
+        if (hours > 0 || days > 0) parts.add("${hours}h")
+        parts.add("${minutes}m")
+        return parts.joinToString(" ")
     }
 
     override fun close() {
@@ -511,7 +575,7 @@ internal class TaskManager(
             val androidApi = androidApiProvider()
                 ?: throw IllegalStateException("AndroidApi 尚未初始化")
             val task = when (val payload = request.payload) {
-                is TaskRequestPayload.SecurityAudit -> error("安全测试任务由共享窗口调度器执行")
+                is TaskRequestPayload.PskSecurityAudit -> error("弱密码检测任务由共享窗口调度器执行")
                 TaskRequestPayload.UsbMonitor -> UsbMonitorTask(terminalManager, acquireUsbMonitor)
                 is TaskRequestPayload.ConnectWifi -> {
                     createConnectionTask(payload.request, androidApi)
@@ -585,7 +649,7 @@ internal class TaskManager(
 
     private fun validate(request: TaskStartRequest) {
         when (val payload = request.payload) {
-            is TaskRequestPayload.SecurityAudit -> validateAudit(payload.input)
+            is TaskRequestPayload.PskSecurityAudit -> validateAudit(payload.input)
             is TaskRequestPayload.WpsSecurityAudit -> validateWpsAudit(payload.input)
             TaskRequestPayload.UsbMonitor -> {
                 require(android.os.Process.myUid() == 0) { "电脑控制需要 Root 工作模式" }
@@ -625,6 +689,13 @@ internal class TaskManager(
                 validateConnectionConfig(connect.config)
             }
             is TaskRequestPayload.WpsPbc -> {
+                require(payload.input.interfaceName.matches(Regex("[A-Za-z0-9_.-]{1,15}"))) { "非法网卡名" }
+                payload.input.localMac?.let { mac ->
+                    require(MAC_ADDRESS.matches(mac)) { "本机MAC格式非法" }
+                    require((mac.substringBefore(':').toInt(16) and 1) == 0 && mac != "00:00:00:00:00:00") {
+                        "本机MAC必须为有效单播地址"
+                    }
+                }
                 payload.input.targetMac?.let { mac ->
                     require(MAC_ADDRESS.matches(mac)) { "目标设备 MAC 格式非法：$mac" }
                 }
@@ -633,6 +704,7 @@ internal class TaskManager(
                 }
             }
             is TaskRequestPayload.WpsPin -> {
+                require(payload.input.interfaceName.matches(Regex("[A-Za-z0-9_.-]{1,15}"))) { "非法网卡名" }
                 require(android.os.Process.myUid() == 0) { "WPS PIN 需要 Root 工作模式" }
                 check(normalModeTaskReadyProvider()) { "WPS PIN 只能在普通模式运行" }
                 require(payload.input.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
@@ -649,26 +721,43 @@ internal class TaskManager(
         }
     }
 
-    private fun validateUpdate(request: TaskStartRequest, update: TaskUpdateRequest) {
-        if (request.payload is TaskRequestPayload.SecurityAudit) {
+    private fun validateUpdate(snapshot: TaskSnapshot, update: TaskUpdateRequest) {
+        val request = snapshot.request
+        val requestPayload = request.payload
+        if (requestPayload is TaskRequestPayload.PskSecurityAudit) {
             when (val payload = update.payload) {
-                is TaskUpdatePayload.SecurityAuditConfigure -> validateAuditConfig(payload.config)
-                is TaskUpdatePayload.SecurityAuditStopRecord -> java.util.UUID.fromString(payload.recordId)
-                is TaskUpdatePayload.SecurityAuditRemove -> {
-                    require(payload.mac == null) { "字典安全测试按 SSID 停止" }
+                is TaskUpdatePayload.PskSecurityAuditConfigure -> {
+                    val previous = (snapshot.progress as? TaskProgress.PskSecurityAudit)?.config
+                        ?: requestPayload.input.config
+                    // 展示与日志开关不需要重新检查连接环境。
+                    if (payload.config.copy(detailedLogging = previous.detailedLogging) != previous)
+                        validateAuditConfig(payload.config)
+                }
+                is TaskUpdatePayload.PskSecurityAuditStopRecord -> java.util.UUID.fromString(payload.recordId)
+                is TaskUpdatePayload.PskSecurityAuditStopGroup -> {
+                    java.util.UUID.fromString(payload.groupId)
+                    require(payload.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "网络名称长度应为1到32字节" }
+                }
+                is TaskUpdatePayload.PskSecurityAuditRemove -> {
+                    require(payload.mac == null) { "弱密码检测按 SSID 停止" }
                     require(payload.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
                 }
-                else -> error("安全测试不支持此更新")
+                else -> error("弱密码检测不支持此更新")
             }
             return
         }
-        if (request.payload is TaskRequestPayload.WpsSecurityAudit) {
+        if (requestPayload is TaskRequestPayload.WpsSecurityAudit) {
             when (val payload = update.payload) {
-                is TaskUpdatePayload.WpsSecurityAuditConfigure -> validateWpsAuditConfig(payload.config)
-                is TaskUpdatePayload.SecurityAuditRemove -> validateWpsTarget(WpsSecurityAuditTarget(payload.ssid, payload.mac))
+                is TaskUpdatePayload.WpsSecurityAuditConfigure -> {
+                    val previous = (snapshot.progress as? TaskProgress.WpsSecurityAudit)?.config
+                        ?: requestPayload.input.config
+                    if (payload.config.copy(detailedLogging = previous.detailedLogging) != previous)
+                        validateWpsAuditConfig(payload.config)
+                }
+                is TaskUpdatePayload.PskSecurityAuditRemove -> validateWpsTarget(WpsSecurityAuditTarget(payload.ssid, payload.mac))
                 is TaskUpdatePayload.WpsSecurityAuditAdd -> validateWpsAudit(WpsSecurityAuditTaskInput(
                     (request.payload as TaskRequestPayload.WpsSecurityAudit).input.config, payload.targets))
-                else -> error("WPS 安全测试不支持此更新")
+                else -> error("PIN漏洞检测不支持此更新")
             }
             return
         }
@@ -694,6 +783,12 @@ internal class TaskManager(
     }
 
     private fun validateWpsTarget(target: WpsSecurityAuditTarget) {
+            require(target.resumePhase != WpsSecurityAuditPhase.DONE) { "请选择有效的起始阶段" }
+            require(target.resumeFirstHalfIndex in 0..10000 && target.resumeSecondHalfIndex in 0..1000) { "起始数字超出范围" }
+            target.resumeFirstHalf?.let { require(it.matches(Regex("[0-9]{4}"))) { "已知前四位必须为四位数字" } }
+            require(target.resumePhase != WpsSecurityAuditPhase.SECOND_HALF || target.resumeFirstHalf != null) {
+                "从后三位阶段开始必须提供已知前四位"
+            }
             require(target.ssid.toByteArray(Charsets.UTF_8).size in 0..32) { "SSID 长度不能超过32字节" }
             require(target.ssid.isNotEmpty() || target.mac != null) { "隐藏网络必须先选择具体接入点" }
             target.mac?.let { mac ->
@@ -705,8 +800,9 @@ internal class TaskManager(
     }
 
     private fun validateWpsAuditConfig(config: WpsSecurityAuditConfig) {
-        require(android.os.Process.myUid() == 0) { "WPS 安全测试需要 Root 工作模式" }
-        check(normalModeTaskReadyProvider()) { "WPS 安全测试只能在普通模式且容器环境已配置时运行" }
+        require(config.interfaceName.matches(Regex("[A-Za-z0-9_.-]{1,15}"))) { "非法网卡名" }
+        require(android.os.Process.myUid() == 0) { "PIN漏洞检测需要 Root 工作模式" }
+        check(normalModeTaskReadyProvider()) { "PIN漏洞检测只能在普通模式且容器环境已配置时运行" }
         require(config.retryCount in 0..6 && config.cooldownBaseMillis in 0..8000) { "重试/冷却配置非法" }
         require(config.macChangeThreshold in 1..5) { "异常时更换的连续重试次数应为 1～5" }
         require(config.maxAttemptsPerNetwork >= 0) { "单网络尝试上限不能为负" }
@@ -715,7 +811,7 @@ internal class TaskManager(
         require(terminalManager.hasRootfsFile("bin/pixiewps")) { "容器缺少 pixiewps，请更新容器系统" }
     }
 
-    private fun validateAudit(input: SecurityAuditTaskInput) {
+    private fun validateAudit(input: PskSecurityAuditTaskInput) {
         require(input.network.ssid.toByteArray(Charsets.UTF_8).size in 1..32) { "SSID 长度应为 1～32 字节" }
         java.util.UUID.fromString(input.network.dictionaryId)
         input.network.sharedWithRecordId?.let(java.util.UUID::fromString)
@@ -724,16 +820,14 @@ internal class TaskManager(
         validateAuditConfig(input.config)
     }
 
-    private fun validateAuditConfig(config: SecurityAuditConfig) {
-        check(normalModeTaskReadyProvider()) { "安全测试只能在普通网卡模式运行" }
+    private fun validateAuditConfig(config: PskSecurityAuditConfig) {
+        check(normalModeTaskReadyProvider()) { "弱密码检测只能在普通网卡模式运行" }
         require(config.retryCount in 0..6 && config.cooldownBaseMillis in 0..8000) { "重试/冷却配置非法" }
         require(config.macChangeThreshold in 1..5) { "异常时更换的连续重试次数应为 1～5" }
-        // 多线程要多开脚本各占一张网卡，只有网卡方式具备这个条件。
-        require(!config.multithreaded || config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) {
-            "多线程运行仅在测试连通性（网卡）方式下可用"
-        }
+        require(config.selectedInterfaces.distinct().size == config.selectedInterfaces.size &&
+            config.selectedInterfaces.all { it.matches(Regex("[A-Za-z0-9_.-]{1,15}")) }) { "所选网卡名称非法或重复" }
         validateConnectionConfig(config.connection)
-        if (config.connectionMethod == SecurityAuditConnectionMethod.NETWORK_CARD) validateNetworkCardEnvironment()
+        if (config.connectionMethod == PskSecurityAuditConnectionMethod.NETWORK_CARD) validateNetworkCardEnvironment()
     }
 
     /** 可作为普通 Wi-Fi 客户端的网卡；多线程模式下由任务当作可分配的窗口。 */
@@ -904,7 +998,7 @@ internal class TaskManager(
         var snapshot: TaskSnapshot,
         val logs: ArrayList<TaskLogEntry> = ArrayList(),
         val capturedNetworks: ArrayList<WpsCapturedNetwork> = ArrayList(),
-        val auditDispatcher: SecurityAuditDispatcher? = null,
+        val auditDispatcher: PskSecurityAuditDispatcher? = null,
         var auditNetworks: List<AuditRecord> = emptyList(),
         var auditRevision: Long = 0,
         var nextLogId: Long = 0L,

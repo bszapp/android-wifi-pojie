@@ -33,14 +33,15 @@ internal class SmartInterfacesController(
         val added = devices.filter {
             MARK.matches(it.name) && File(it, "phy80211").exists()
         }.map { it.name }.sorted()
-        val count = if (added.isEmpty()) 0 else runCatching {
-            WirelessInterfaceNetlink.managedInterfaceNames().size
+        val managed = runCatching {
+            WirelessInterfaceNetlink.managedInterfaceNames()
         }.getOrElse { error ->
-            // 名称仍按实际存在性更新；数量读取失败时保留最后一次成功读取的数值。
-            Log.w(TAG, "读取 managed 网卡数量失败", error)
-            state.interfaceCount
+            // 标记网卡仍按实际存在性更新；枚举失败时保留最后一次成功读取的managed列表。
+            Log.w(TAG, "读取managed网卡列表失败", error)
+            state.managedInterfaces
         }
-        val next = SmartInterfacesState(added, count, running)
+        val count = if (added.isEmpty()) 0 else managed.size
+        val next = SmartInterfacesState(added, count, running, managed)
         if (next != state) {
             state = next
             onStateChanged(next)

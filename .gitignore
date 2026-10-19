@@ -18,5 +18,7 @@ local.properties
 /.kotlin
 /rftoolbuilder/build/
 /rftoolbuilder/distfiles/
+/rftoolbuilder/src/wlantool/__pycache__/
+__pycache__/
 /scripta/build/
 /app/release

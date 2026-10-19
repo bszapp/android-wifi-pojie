@@ -4,7 +4,7 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 /**
- * # 安全测试运行快照
+ * # 弱密码检测运行快照
  *
  * 服务调度与 App 实时同步使用本类型，运行现场不直接持久化。
  * 持久历史使用独立的 [AuditHistoryRecord]。
@@ -18,15 +18,17 @@ sealed class AuditRecord : Parcelable {
     abstract val ssid: String
     abstract val startedAt: Long
     abstract val updatedAt: Long
-    abstract val state: SecurityAuditNetworkState
+    abstract val state: PskSecurityAuditNetworkState
     abstract val attempts: Long
     abstract val message: String
     abstract val password: String?
+    /** 最后实际尝试的候选下标，从0开始；尚未尝试为-1，仅用于运行快照。 */
+    abstract val lastAttemptIndex: Int
 
     val active: Boolean
-        get() = state == SecurityAuditNetworkState.QUEUED ||
-            state == SecurityAuditNetworkState.CONNECTING ||
-            state == SecurityAuditNetworkState.COOLDOWN
+        get() = state == PskSecurityAuditNetworkState.QUEUED ||
+            state == PskSecurityAuditNetworkState.CONNECTING ||
+            state == PskSecurityAuditNetworkState.COOLDOWN
 
     /** 已得到凭据或已给出确定结论的记录。 */
     val settled: Boolean
@@ -38,11 +40,11 @@ sealed class AuditRecord : Parcelable {
     @Parcelize
     data class Dictionary(
         override val id: String,
-        val input: SecurityAuditNetworkInput,
-        val config: SecurityAuditConfig,
+        val input: PskSecurityAuditNetworkInput,
+        val config: PskSecurityAuditConfig,
         override val startedAt: Long,
         override val updatedAt: Long,
-        override val state: SecurityAuditNetworkState,
+        override val state: PskSecurityAuditNetworkState,
         val total: Int,
         val completed: Int = 0,
         override val attempts: Long = 0,
@@ -67,6 +69,7 @@ sealed class AuditRecord : Parcelable {
         /** 最近一次完成尝试的全局顺序；只在尝试结束时更新，供历史按事件顺序写入。 */
         val historyRevision: Long = 0,
         val historyUpdatedAt: Long = 0,
+        override val lastAttemptIndex: Int = -1,
     ) : AuditRecord() {
         override val kind: AuditRecordKind get() = AuditRecordKind.DICTIONARY
         override val ssid: String get() = input.ssid
@@ -81,7 +84,7 @@ sealed class AuditRecord : Parcelable {
         val config: WpsSecurityAuditConfig,
         override val startedAt: Long,
         override val updatedAt: Long,
-        override val state: SecurityAuditNetworkState,
+        override val state: PskSecurityAuditNetworkState,
         override val attempts: Long = 0,
         override val message: String = "排队中",
         override val password: String? = null,
@@ -104,6 +107,9 @@ sealed class AuditRecord : Parcelable {
         val pin: String? = null,
         /** 取得密码时所处阶段；[phase] 在完成后统一为 DONE。旧记录未知时保留 null。 */
         val passwordFoundPhase: WpsSecurityAuditPhase? = null,
+        override val lastAttemptIndex: Int = -1,
+        /** 本轮实际提交的PIN，仅用于实时快照；本轮结束后清除，不写入历史。 */
+        val attemptPin: String? = null,
     ) : AuditRecord() {
         override val kind: AuditRecordKind get() = AuditRecordKind.WPS
         override val progress: Float?
@@ -159,7 +165,7 @@ sealed class AuditHistoryRecord {
     }
 }
 
-/** 分页读取安全测试历史；[revision] 变化表示本任务的网络列表已更新。 */
+/** 分页读取弱密码检测历史；[revision] 变化表示本任务的网络列表已更新。 */
 @Parcelize
 data class AuditRecordPage(
     val revision: Long,

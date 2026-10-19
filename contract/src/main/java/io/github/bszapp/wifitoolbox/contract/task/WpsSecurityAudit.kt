@@ -4,7 +4,7 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 /**
- * # WPS 安全测试
+ * # PIN漏洞检测
  *
  * 评估弱 PIN、随机数缺陷（pixie dust）漏洞与本次批量 PIN 尝试的实际结果。
  * 一批网络占用一个通用任务；同一 SSID 在运行队列中只出现一次。
@@ -37,9 +37,9 @@ import kotlinx.parcelize.Parcelize
  * 就一直重试同一个 PIN，直到防护解除、握手重新走完 M3/M4，那一次的"错误"才把游标推到下一个。
  *
  * 脚本会把 NACK 的具体原因（前/后半段不匹配、CONFIG_ERROR）随结果回传，仅用于日志与展示，
- * 不参与游标推进判断。MAC 策略复用 [SecurityAuditMacMode]。
+ * 不参与游标推进判断。MAC 策略复用 [PskSecurityAuditMacMode]。
  *
- * 字典内容不涉及本任务；凭据与安全测试历史使用同一数据源，按
+ * 字典内容不涉及本任务；凭据与弱密码检测历史使用同一数据源，按
  * [AuditRecordKind] 区分。
  */
 enum class WpsSecurityAuditPhase { FAIRY_DUST, FIRST_HALF, SECOND_HALF, DONE }
@@ -65,23 +65,26 @@ data class WpsHandshake(
 
 @Parcelize
 data class WpsSecurityAuditConfig(
-    /** 复用安全测试的 MAC 策略；WPS 走网卡通道，任何策略都会实际改写本机 MAC。 */
-    val macMode: SecurityAuditMacMode = SecurityAuditMacMode.DEVICE,
+    /** 复用弱密码检测的 MAC 策略；WPS 走网卡通道，任何策略都会实际改写本机 MAC。 */
+    val macMode: PskSecurityAuditMacMode = PskSecurityAuditMacMode.DEVICE,
     val macChangeThreshold: Int = 1,
-    /** 超时/异常的重试次数；6 表示无限，与字典安全测试一致。 */
+    /** 超时/异常的重试次数；6 表示无限，与弱密码检测一致。 */
     val retryCount: Int = 6,
     val cooldownBaseMillis: Long = 1000,
-    /** 单次尝试最大用时，到点中断本次尝试（不论走到哪一步）并按一次异常处理；范围同字典安全测试。 */
+    /** 单次尝试最大用时，到点中断本次尝试（不论走到哪一步）并按一次异常处理；范围同弱密码检测。 */
     val attemptTimeoutMillis: Long = 5000,
     /** 单网络握手次数上限，0 表示不限。达到上限只记录测试已结束，不推断防护结论。 */
     val maxAttemptsPerNetwork: Int = 0,
+    val detailedLogging: Boolean = false,
+    /** 单会话使用的普通网卡；只有wlan0接管系统supplicant。 */
+    val interfaceName: String = "wlan0",
 ) : Parcelable
 
 @Parcelize
 data class WpsSecurityAuditTarget(
     val ssid: String,
     val mac: String? = null,
-    /** 断点续跑：从历史记录恢复的阶段。 */
+    /** 手动选择的起始阶段，或从历史记录恢复的阶段。 */
     val resumePhase: WpsSecurityAuditPhase = WpsSecurityAuditPhase.FAIRY_DUST,
     val resumeFirstHalf: String? = null,
     val resumeFirstHalfIndex: Int = 0,

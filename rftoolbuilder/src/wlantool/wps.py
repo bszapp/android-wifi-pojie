@@ -708,7 +708,8 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
     cancelled = set()
     guard = None
     writer = None
-    restored = False
+    # Secondary interfaces leave Android's main Wi-Fi controller running.
+    restored = interface != 'wlan0'
     emit_lock = threading.RLock()
     original_stdout, original_stderr = sys.stdout, sys.stderr
 
@@ -826,8 +827,9 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
         sys.stdout = FifoConsole(original_stdout)
         sys.stderr = FifoConsole(original_stderr)
         threading.Thread(target=read_commands, name='wps-command-fifo', daemon=True).start()
-        guard = SupplicantPauseGuard(None, guard_log)
-        guard.start(check_running)
+        if interface == 'wlan0':
+            guard = SupplicantPauseGuard(None, guard_log)
+            guard.start(check_running)
         # Reuse the exact managed diagnostic disconnect path, including socket ownership handling.
         managed_connect.supplicant_guard = guard
         managed_connect.overall_deadline = time.monotonic() + 10
@@ -856,7 +858,8 @@ def persistent_fifo_main(interface, command_pipe, event_pipe):
             try:
                 request = pending.get(timeout=.25)
             except queue.Empty:
-                guard.ensure_active()
+                if guard is not None:
+                    guard.ensure_active()
                 continue
             if request is None:
                 break

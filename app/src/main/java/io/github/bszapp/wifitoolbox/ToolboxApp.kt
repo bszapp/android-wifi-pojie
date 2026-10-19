@@ -199,6 +199,7 @@ class ToolboxApp : Application(), IAppController {
         )
         taskController = TaskController(
             context = this,
+            settingsManager = settings,
             scope = appScope,
             reportError = ::publishError,
         )

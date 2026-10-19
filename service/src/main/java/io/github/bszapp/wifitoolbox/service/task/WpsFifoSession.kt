@@ -20,9 +20,11 @@ import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
-/** PIN 与 PBC 共用，任务结束前必须收到系统 supplicant 恢复确认。 */
+/** PIN与PBC共用；使用wlan0时，任务结束前必须收到系统supplicant恢复确认。 */
 internal class WpsFifoSession(private val terminals: TerminalManager, private val context: TaskContext,
+    val interfaceName: String = "wlan0",
     private val onProgress: (WpsHandshakeProgress) -> Unit = {}) {
+    init { require(interfaceName.matches(Regex("[A-Za-z0-9_.-]{1,15}"))) { "非法网卡名：$interfaceName" } }
     private val sessionId = UUID.randomUUID().toString()
     private val commandFifoId = UUID.randomUUID().toString()
     private val eventFifoId = UUID.randomUUID().toString()
@@ -37,6 +39,8 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
     @Volatile private var readerStopping = false
     private var restored: Boolean? = null
     private var exitDelivered = false
+    private var closed = false
+    private var exitLogged = false
 
     fun start() {
         context.ensureRunning()
@@ -55,7 +59,7 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
             onExit = { _, code -> exitCode = code; exited = true },
         )
         terminals.writeInput(requireNotNull(terminalId),
-            "exec python wps.py -i wlan0 --command-pipe /tmp/wlantool-ipc/$sessionId/$commandFifoId " +
+            "exec python wps.py -i $interfaceName --command-pipe /tmp/wlantool-ipc/$sessionId/$commandFifoId " +
                 "--event-pipe /tmp/wlantool-ipc/$sessionId/$eventFifoId")
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
         while (true) {
@@ -63,7 +67,11 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
             check(System.nanoTime() < deadline) { "等待 WPS FIFO 初始化超时，请更新容器系统" }
             when (val event = nextEvent()) {
                 is Event.Pipe -> when (event.value.optString("type")) {
-                    "ready" -> { check(event.value.optInt("protocol") == 3) { "请更新容器系统以支持 WPS 日志和进度回传" }; return }
+                    "ready" -> {
+                        check(event.value.optInt("protocol") == 3) { "请更新容器系统以支持 WPS 日志和进度回传" }
+                        context.logAuditResult("${interfaceName}控制终端已启动")
+                        return
+                    }
                     "error" -> error(event.value.optString("message"))
                     "stopped" -> { restored = event.value.optBoolean("supplicantRestored"); error("WPS 会话初始化失败") }
                 }
@@ -141,7 +149,7 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                             WpsCapturedNetwork(it.getString("ssid"), it.getString("mac"), it.getString("password"))
                         }
                         val failure = readFailure(event.value.optJSONObject("failure"))
-                        context.log("WPS 本轮结束：${event.value.optString("message")}" + when {
+                        context.log("WPS协议终态：${event.value.optString("message")}" + when {
                             timedOut -> "，原因=单次尝试超时（${timeoutMillis}ms）被中断"
                             failure == null -> ""
                             else -> "，原因=${failure.code}${if (failure.detail.isEmpty()) "" else " · ${failure.detail}"}"
@@ -205,6 +213,7 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
     }
 
     fun close() {
+        if (closed) return
         var interrupted = Thread.interrupted()
         var stopped = terminalId == null
         try {
@@ -220,7 +229,8 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                     when (event) {
                         is Event.Pipe -> if (event.value.optString("type") == "stopped") {
                             restored = event.value.optBoolean("supplicantRestored")
-                            context.log("WPS 系统 supplicant 恢复确认：$restored")
+                            context.log(if (interfaceName == "wlan0") "WPS系统supplicant恢复确认：$restored"
+                                else "${interfaceName}会话已结束，系统supplicant保持运行")
                         }
                         is Event.Exit -> exitReceived = true
                         is Event.Failure -> { context.log("WPS FIFO 关闭阶段读取失败：${event.error.message}"); break }
@@ -229,7 +239,11 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                 }
                 terminals.stopTerminalAndAwait(requireNotNull(terminalId), "WPS FIFO 会话结束")
                 stopped = true
-                check(restored == true) { "WPS 会话未确认系统 supplicant 已恢复，请检查任务日志" }
+                if (!exitLogged) {
+                    exitLogged = true
+                    context.logAuditResult("${interfaceName}控制终端已退出")
+                }
+                if (interfaceName == "wlan0") check(restored == true) { "WPS 会话未确认系统 supplicant 已恢复，请检查任务日志" }
             }
         } finally {
             if (stopped) {
@@ -247,6 +261,7 @@ internal class WpsFifoSession(private val terminals: TerminalManager, private va
                     val event = events.poll() ?: break
                     if (event is Event.Pipe) recordLog(event.value)
                 }
+                closed = true
             }
             if (interrupted) Thread.currentThread().interrupt()
         }

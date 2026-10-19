@@ -15,7 +15,7 @@ internal class WpsPinTask(private val input: WpsPinTaskInput, private val target
         var progress = TaskProgress.WpsPin(targetMac, 0)
         context.updateProgress(progress)
         context.log("使用 PIN 配网：${input.ssid}，本次最强接入点=$targetMac")
-        val session = WpsFifoSession(terminals, context) { handshake ->
+        val session = WpsFifoSession(terminals, context, input.interfaceName) { handshake ->
             progress = progress.copy(handshake = handshake)
             context.updateProgress(progress)
         }

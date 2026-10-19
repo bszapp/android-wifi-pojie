@@ -109,6 +109,8 @@ class Netlink(scan.Nl80211Scanner):
         except OSError as error:
             if error.errno != errno.EPERM:
                 raise
+        if self.interface != 'wlan0':
+            raise PermissionError(errno.EPERM, 'Selected interface is owned by another controller; system supplicant was left unchanged')
         # A SOCKET_OWNER connection can only be disconnected through its original
         # Netlink socket. SIGSTOP preserves that socket and its port ID.
         if not hasattr(os, 'pidfd_open'):
@@ -663,7 +665,7 @@ def compatible_rsn(data):
 def run(args, session_guard=None):
     global log_file, pcap_file, SSID, overall_deadline, handshake_deadline
     global supplicant_guard
-    owns_supplicant_guard = session_guard is None
+    owns_supplicant_guard = session_guard is None and args.interface == 'wlan0'
     if session_guard is not None:
         supplicant_guard = session_guard
     SSID = args.ssid.encode('utf-8')
@@ -717,15 +719,15 @@ def run(args, session_guard=None):
         mode = struct.unpack('=I', scan.first_attr(info, 5))[0]
         if mode != 2:
             raise RuntimeError('Interface is not managed: iftype=%s' % mode)
-        # Pause Android's controller before changing the interface or associating.
-        # Its independent recovery process survives termination of this terminal.
+        # Only wlan0 belongs to Android's main Wi-Fi connection. Secondary
+        # interfaces must leave its controller running throughout this session.
         if owns_supplicant_guard:
             supplicant_guard = SupplicantPauseGuard(args.timeout_millis + 15000, report)
             supplicant_guard.start(ensure_running)
-        info = nl.command(5, name='read interface after pausing system supplicant', reply=True)[0]
+        info = nl.command(5, name='read interface after controller preparation', reply=True)[0]
         mode = struct.unpack('=I', scan.first_attr(info, 5))[0]
         if mode != 2:
-            raise RuntimeError('Interface is no longer managed after pausing the system controller: iftype=%s' % mode)
+            raise RuntimeError('Interface is no longer managed after controller preparation: iftype=%s' % mode)
         own = original_mac = scan.first_attr(info, 6)
         report('interface', interface=args.interface, mode=mode, mac=own.hex(':'))
         initial_addresses = read_addresses(nl.ifindex)
@@ -1149,22 +1151,33 @@ def persistent_fifo_main(command_pipe, event_pipe, interface='wlan0'):
             cleanup_completed = False
         if event == 'end':
             cleanup_completed = fields.get('cleanupCompleted', False)
-        _write_fifo_event(event_writer, 'output', requestId=request_id, text=line)
+        lifecycle = {}
+        if event in ('supplicantGuardReady', 'supplicantGuardFinished', 'supplicantResumeError',
+                     'supplicantGuardError', 'begin', 'failed', 'cleanupError'):
+            lifecycle = dict(diagnosticEvent=event, diagnosticError=fields.get('error'),
+                             restored=fields.get('restored'))
+        _write_fifo_event(event_writer, 'output', requestId=request_id, text=line, **lifecycle)
 
     try:
         event_writer = open(event_pipe, 'w', encoding='utf-8', buffering=1)
         fifo_log_sink = forward_log
         reader.start()
         report('ready', protocol=2)
-        # One guard owns the whole script session. Per-attempt runs reuse it.
-        supplicant_guard = SupplicantPauseGuard(None, report)
-        supplicant_guard.start(ensure_running)
+        # Only the wlan0 session owns the pause guard. Other interfaces never
+        # pause Android's supplicant, including between password attempts.
+        if interface == 'wlan0':
+            supplicant_guard = SupplicantPauseGuard(None, report)
+            supplicant_guard.start(ensure_running)
+        else:
+            supplicant_guard = None
+            report('supplicantUnchanged', interface=interface)
         _write_fifo_event(event_writer, 'ready', protocol=2)
         while True:
             try:
                 kind, payload = requests.get(timeout=.25)
             except queue.Empty:
-                supplicant_guard.ensure_active()
+                if supplicant_guard is not None:
+                    supplicant_guard.ensure_active()
                 continue
             if kind == 'shutdown':
                 break
@@ -1211,7 +1224,7 @@ def persistent_fifo_main(command_pipe, event_pipe, interface='wlan0'):
             request_id = None
             if not cleanup_completed:
                 break
-            if supplicant_guard is None or supplicant_guard.process.poll() is not None:
+            if supplicant_guard is not None and supplicant_guard.process.poll() is not None:
                 # A failed guard cannot safely own another attempt; end this session.
                 break
     except BaseException as error:

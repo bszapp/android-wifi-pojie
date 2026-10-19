@@ -13,7 +13,7 @@ import kotlinx.parcelize.Parcelize
  *
  * ## 并发与任务 ID
  *
- * 普通任务同时只允许一个运行；安全测试任务共享一个调度器，可各自排队、冷却或占用窗口。
+ * 普通任务同时只允许一个运行；弱密码检测任务共享一个调度器，可各自排队、冷却或占用窗口。
  * 任务请求被接受后才分配 ID；
  * ID 从 1 开始，在 Service 生命周期内严格递增且不复用。被任务占用或参数校验拒绝的请求
  * 不分配 ID。Service 重启后任务及其 ID 空间重新开始。
@@ -66,7 +66,7 @@ import kotlinx.parcelize.Parcelize
  * WPS-PBC 任务只允许在普通网卡模式且容器环境已配置时启动，与系统扫描或底层扫描来源无关。
  * 终端创建统一检查 Root 权限及容器安装情况。任务通过 Service 管理的
  * chroot 终端运行 `/wlantool` 工作目录中的 wps.py 双 FIFO 会话。run 命令指定 mode=pbc、
- * mac、excludeMacs、completeProtocol。FIFO log 事件原样携带脚本每条非空输出，包括
+ * mac、localMac、excludeMacs、completeProtocol；终端使用输入中的interfaceName。FIFO log事件原样携带脚本每条非空输出，包括
  * E-Hash、AuthKey 等调试内容；控制台保留相同输出，Service 只把 FIFO 日志写入任务日志一次。
  * progress 事件携带 requestId、stage、packet、direction；阶段及 M1～M8 的发送/接收
  * 更新 [WpsHandshakeProgress]，调试内容留在通用日志中，不塞进任务快照。
@@ -80,7 +80,8 @@ import kotlinx.parcelize.Parcelize
  * 保存网络时只新增或更新 Android 网络配置，并明确关闭该配置的自动加入，不触发连接。捕获
  * 结果按每次获取顺序保留，不按 BSSID、SSID 或密码去重；其中 mac 表示目标接入点 BSSID。
  * 普通网卡模式只约束任务的启动时机。任务获得 ID 后独立运行，切换扫描来源不得停止任务；
- * 会话初始化时挂起系统 supplicant 并释放当前连接，整个任务保持挂起，退出前确认恢复。
+ * 会话初始化时释放所选网卡的当前连接；仅wlan0挂起系统supplicant，整个任务保持挂起，退出前确认恢复。
+ * 其他网卡不暂停系统控制。本机MAC在每轮结束或取消后恢复。
  * 只有显式停止任务、任务自行结束或 Service 进程结束时才结束当前任务终端。
  *
  * ## WpsPinTask
@@ -89,7 +90,8 @@ import kotlinx.parcelize.Parcelize
  * 选择同 SSID、带 WPS 广播的最强接入点，PIN 是否可用由实际握手返回。通过 chroot 中 wps.py 的双 FIFO 会话发送
  * run 请求（requestId、mac、pin、可选 localMac），接收 ready/log/progress/result/stopped。localMac 为本机
  * MAC，留空使用该轮开始时网卡的 MAC；每轮结束或取消后恢复原 MAC 和网卡 flags。会话初始化时复用
- * managed_connect 的 supplicant 挂起及当前连接释放逻辑，结束时恢复并确认后才结束任务。
+ * managed_connect的当前连接释放逻辑。终端使用输入中的interfaceName，仅wlan0挂起系统supplicant，
+ * 结束时恢复并确认后才结束任务；其他网卡不暂停系统控制。
  * 脚本普通控制台输出原样进入任务日志；凭据通过 FIFO 结果进入现有 WPS 结果分页。
  * 获取后自动调用同一保存网络 API，不自动连接；保存失败通过错误广播报告并保留结果。
  * FINISHED 仍仅表示执行结束，具体成败写入日志。
@@ -111,11 +113,11 @@ enum class TaskExecutionState {
 
 @Parcelize
 sealed class TaskProgress : Parcelable {
-    data class SecurityAudit(
+    data class PskSecurityAudit(
         val revision: Long,
         val networkCount: Int,
-        val config: SecurityAuditConfig,
-        /** 当前可分配的网卡窗口；仅多线程模式下发，串行模式为空列表。 */
+        val config: PskSecurityAuditConfig,
+        /** 当前选中且可用的网卡窗口；系统连接方式为空列表。 */
         val windows: List<String> = emptyList(),
     ) : TaskProgress()
 
@@ -244,6 +246,8 @@ data class WpsPbcTaskInput(
     val useIncompleteProtocol: Boolean = true,
     val ignoreRepeatedDevices: Boolean = true,
     val targetMac: String? = null,
+    val interfaceName: String = "wlan0",
+    val localMac: String? = null,
 ) : Parcelable
 
 @Parcelize
@@ -254,11 +258,12 @@ data class WpsCapturedNetwork(
 ) : Parcelable
 
 @Parcelize
-data class WpsPinTaskInput(val ssid: String, val pin: String, val localMac: String? = null) : Parcelable
+data class WpsPinTaskInput(val ssid: String, val pin: String, val localMac: String? = null,
+    val interfaceName: String = "wlan0") : Parcelable
 
 @Parcelize
 sealed class TaskRequestPayload : Parcelable {
-    data class SecurityAudit(val input: SecurityAuditTaskInput) : TaskRequestPayload()
+    data class PskSecurityAudit(val input: PskSecurityAuditTaskInput) : TaskRequestPayload()
 
     data class WpsSecurityAudit(val input: WpsSecurityAuditTaskInput) : TaskRequestPayload()
 
@@ -277,12 +282,14 @@ sealed class TaskRequestPayload : Parcelable {
 
 @Parcelize
 sealed class TaskUpdatePayload : Parcelable {
-    data class SecurityAuditRemove(val ssid: String, val mac: String? = null) : TaskUpdatePayload()
-    data class SecurityAuditStopRecord(val recordId: String) : TaskUpdatePayload()
-    data class SecurityAuditConfigure(val config: SecurityAuditConfig) : TaskUpdatePayload()
+    data class PskSecurityAuditRemove(val ssid: String, val mac: String? = null) : TaskUpdatePayload()
+    data class PskSecurityAuditStopRecord(val recordId: String) : TaskUpdatePayload()
+    /** 停止当前网络在指定候选池内的全部成员，不影响共享该池的其他网络。 */
+    data class PskSecurityAuditStopGroup(val ssid: String, val groupId: String) : TaskUpdatePayload()
+    data class PskSecurityAuditConfigure(val config: PskSecurityAuditConfig) : TaskUpdatePayload()
 
     data class WpsSecurityAuditAdd(val targets: List<WpsSecurityAuditTarget>) : TaskUpdatePayload()
-    /** WPS 安全测试运行中可追加网络、更新配置、移除明确目标。 */
+    /** PIN漏洞检测运行中可追加网络、更新配置、移除明确目标。 */
     data class WpsSecurityAuditConfigure(val config: WpsSecurityAuditConfig) : TaskUpdatePayload()
 
     data class WpsPbcContinuousCapture(
@@ -314,8 +321,8 @@ data class TaskStartRequest(
     companion object {
         fun usbMonitor() = TaskStartRequest(TaskRequestPayload.UsbMonitor)
 
-        fun wpsPin(ssid: String, pin: String, localMac: String? = null) =
-            TaskStartRequest(TaskRequestPayload.WpsPin(WpsPinTaskInput(ssid, pin, localMac)))
+        fun wpsPin(ssid: String, pin: String, localMac: String? = null, interfaceName: String = "wlan0") =
+            TaskStartRequest(TaskRequestPayload.WpsPin(WpsPinTaskInput(ssid, pin, localMac, interfaceName)))
 
         fun connectWifi(
             input: ConnectWifiTaskInput,
@@ -332,7 +339,7 @@ data class TaskStartRequest(
             payload = TaskRequestPayload.WpsPbc(input),
         )
 
-        fun wpsSecurityAudit(input: WpsSecurityAuditTaskInput) = TaskStartRequest(
+        fun wpsPskSecurityAudit(input: WpsSecurityAuditTaskInput) = TaskStartRequest(
             payload = TaskRequestPayload.WpsSecurityAudit(input),
         )
     }

@@ -604,30 +604,30 @@ open class MainService(
         taskManager.start(request)
     }
 
-    override fun runSecurityAudit(request: TaskStartRequest, dictionary: ParcelFileDescriptor): Long =
-        communication.callFromApp { dictionary.use { taskManager.runSecurityAudit(request, it) } }
+    override fun runPskSecurityAudit(request: TaskStartRequest, dictionary: ParcelFileDescriptor): Long =
+        communication.callFromApp { dictionary.use { taskManager.runPskSecurityAudit(request, it) } }
 
-    override fun joinSecurityAuditPool(request: TaskStartRequest): Long =
-        communication.callFromApp { taskManager.joinSecurityAuditPool(request) }
+    override fun joinPskSecurityAuditPool(request: TaskStartRequest): Long =
+        communication.callFromApp { taskManager.joinPskSecurityAuditPool(request) }
 
-    override fun runSecurityAuditGroup(request: TaskStartRequest, dictionary: ParcelFileDescriptor, taskCount: Int): LongArray =
+    override fun runPskSecurityAuditGroup(request: TaskStartRequest, dictionary: ParcelFileDescriptor, taskCount: Int): LongArray =
         communication.callFromApp { dictionary.use { error("旧版批量顶层任务接口已停用，请更新应用") } }
 
-    override fun joinSecurityAuditPoolGroup(request: TaskStartRequest, taskCount: Int): LongArray =
+    override fun joinPskSecurityAuditPoolGroup(request: TaskStartRequest, taskCount: Int): LongArray =
         communication.callFromApp { error("旧版批量顶层任务接口已停用，请更新应用") }
 
-    override fun runSecurityAuditRecords(request: TaskStartRequest, dictionary: ParcelFileDescriptor, taskCount: Int): Long =
-        communication.callFromApp { dictionary.use { taskManager.runSecurityAuditRecords(request, it, taskCount) } }
+    override fun runPskSecurityAuditRecords(request: TaskStartRequest, dictionary: ParcelFileDescriptor, taskCount: Int): Long =
+        communication.callFromApp { dictionary.use { taskManager.runPskSecurityAuditRecords(request, it, taskCount) } }
 
-    override fun joinSecurityAuditRecords(request: TaskStartRequest, taskCount: Int): Long =
-        communication.callFromApp { taskManager.joinSecurityAuditRecords(request, taskCount) }
+    override fun joinPskSecurityAuditRecords(request: TaskStartRequest, taskCount: Int): Long =
+        communication.callFromApp { taskManager.joinPskSecurityAuditRecords(request, taskCount) }
 
-    override fun getSecurityAuditNetworks(taskId: Long, fromIndex: Int): ParcelFileDescriptor =
+    override fun getPskSecurityAuditNetworks(taskId: Long, fromIndex: Int): ParcelFileDescriptor =
         communication.callFromApp {
             io.github.bszapp.wifitoolbox.contract.PagedDataTransport.encode(taskManager.auditNetworkPage(taskId, fromIndex))
         }
 
-    override fun getSecurityAuditTaskIds(offset: Int): LongArray = communication.callFromApp { taskManager.auditTaskIds(offset) }
+    override fun getPskSecurityAuditTaskIds(offset: Int): LongArray = communication.callFromApp { taskManager.auditTaskIds(offset) }
 
     override fun stopTask(taskId: Long): Boolean = communication.callFromApp {
         taskManager.stop(taskId)
@@ -756,6 +756,7 @@ open class MainService(
         inputs.use { hashcatManager.start(request.id, it, true, request.revision, request.createdAt, request.memoryLimitMiB) }
     }
     override fun pauseHashcat(taskId: String): Boolean = communication.callFromApp { hashcatManager.pause(taskId) }
+    override fun deleteHashcat(taskId: String): Long = communication.callFromApp { hashcatManager.delete(taskId) }
     override fun prepareHashcatShutdown(): Boolean = communication.callFromApp { hashcatManager.prepareShutdown() }
     override fun getHashcatKernelStatus(programHash: String): ParcelFileDescriptor = communication.callFromApp {
         val snapshot = hashcatManager.kernelStatus(programHash)

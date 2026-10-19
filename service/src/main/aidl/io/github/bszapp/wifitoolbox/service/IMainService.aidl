@@ -104,6 +104,7 @@ interface IMainService {
     boolean prepareHashcatShutdown();
     ParcelFileDescriptor getHashcatKernelStatus(String programHash);
     void compileHashcatKernels(String programHash, in ParcelFileDescriptor program);
+    long deleteHashcat(String taskId);
 
     ParcelFileDescriptor getWifiStateChunk(IMainServiceCallback cb, long generation, int chunkIndex);
     ParcelFileDescriptor getSavedWifiListChunk(IMainServiceCallback cb, long generation, int chunkIndex);
@@ -119,19 +120,19 @@ interface IMainService {
     // 追加在末尾，保持已有事务编号；仅在确认服务版本不旧后调用。
     long getContainerVersionCode();
     // 字典只走流，事务编号追加；网络快照按最多 100 项分页。
-    long runSecurityAudit(in TaskStartRequest request, in ParcelFileDescriptor dictionary);
-    long joinSecurityAuditPool(in TaskStartRequest request);
-    ParcelFileDescriptor getSecurityAuditNetworks(long taskId, int fromIndex);
-    long[] getSecurityAuditTaskIds(int offset);
+    long runPskSecurityAudit(in TaskStartRequest request, in ParcelFileDescriptor dictionary);
+    long joinPskSecurityAuditPool(in TaskStartRequest request);
+    ParcelFileDescriptor getPskSecurityAuditNetworks(long taskId, int fromIndex);
+    long[] getPskSecurityAuditTaskIds(int offset);
     // width / height / sensorOrientation；只传 Surface 句柄，不传视频字节。
     int[] getRearCameraConfiguration();
     void startCameraPreview(String sessionId, in Surface preview, in Surface analysis, ICameraPreviewCallback callback);
     void stopCameraPreview(String sessionId);
     void toggleSmartInterfaces();
     // 旧批量顶层任务事务保留编号；新服务拒绝调用，避免创建多个通用任务。
-    long[] runSecurityAuditGroup(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
-    long[] joinSecurityAuditPoolGroup(in TaskStartRequest request, int taskCount);
-    // 新事务只返回一个顶层安全测试任务 ID；taskCount 是内部测试记录数。
-    long runSecurityAuditRecords(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
-    long joinSecurityAuditRecords(in TaskStartRequest request, int taskCount);
+    long[] runPskSecurityAuditGroup(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
+    long[] joinPskSecurityAuditPoolGroup(in TaskStartRequest request, int taskCount);
+    // 新事务只返回一个顶层弱密码检测任务 ID；taskCount 是内部测试记录数。
+    long runPskSecurityAuditRecords(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
+    long joinPskSecurityAuditRecords(in TaskStartRequest request, int taskCount);
 }
