@@ -83,7 +83,7 @@ fun DefaultUI(
         if (openPskSecurityAudit) {
             navigator.backStack.clear()
             navigator.backStack.add(Route.Main)
-            viewModel.pskSecurityAudit.selectSubmode(io.github.bszapp.wifitoolbox.ui.model.NormalWifiSubmode.PSK_SECURITY_AUDIT)
+            viewModel.wifiList.selectSubmode(io.github.bszapp.wifitoolbox.ui.model.NormalWifiSubmode.PSK_SECURITY_AUDIT)
         }
     }
 
@@ -143,6 +143,7 @@ fun DefaultUI(
                                 )
                             }
                             entry<Route.ColorPalette> { ColorPaletteScreen() }
+                            entry<Route.About> { io.github.bszapp.wifitoolbox.ui.about.MiuixAboutScreen() }
                             entry<Route.WifiQrScanner> {
                                 io.github.bszapp.wifitoolbox.ui.screen.WifiQrScannerScreen(
                                     controller = viewModel.wifiQrCamera,

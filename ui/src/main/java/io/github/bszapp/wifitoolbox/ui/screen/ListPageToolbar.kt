@@ -24,7 +24,7 @@ internal enum class ListPageSubmode(val title: String, val normalSubmode: Normal
     SCAN("扫描模式", NormalWifiSubmode.SCAN),
     PSK_AUDIT("弱密码检测", NormalWifiSubmode.PSK_SECURITY_AUDIT),
     PIN_AUDIT("PIN漏洞检测", NormalWifiSubmode.WPS_SECURITY_AUDIT),
-    MONITOR("监听器", null);
+    MONITOR("监听模式", null);
 
     val toolbarActions: List<ListToolbarAction>
         get() = when (this) {
@@ -38,7 +38,7 @@ internal enum class ListPageSubmode(val title: String, val normalSubmode: Normal
         get() = when (this) {
             SCAN -> emptyList()
             PSK_AUDIT, PIN_AUDIT -> listOf(ListFloatingAction.CONFIGURE, ListFloatingAction.TASK)
-            MONITOR -> listOf(ListFloatingAction.CAPTURE)
+            MONITOR -> listOf(ListFloatingAction.CAPTURE, ListFloatingAction.FREQUENCY)
         }
 
     companion object {
@@ -62,7 +62,7 @@ internal enum class ListToolbarAction(val description: String, val icon: ImageVe
     EXPORT("导出全部PCAP", Icons.Rounded.Download),
     CLEAR("清理抓取数据", Icons.Rounded.DeleteSweep),
 }
-internal enum class ListFloatingAction { CAPTURE, CONFIGURE, TASK }
+internal enum class ListFloatingAction { CAPTURE, FREQUENCY, CONFIGURE, TASK }
 
 internal data class ListPageToolbarButton(
     val action: ListToolbarAction,

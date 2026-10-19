@@ -439,6 +439,10 @@ open class MainService(
         wifiListController.setMonitorCapture(enabled, frequencyMhz, hopping)
     }
 
+    override fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean) = communication.callFromApp {
+        wifiListController.setMonitorFrequency(frequencyMhz, hopping)
+    }
+
     override fun clearMonitorCapture(handshakesOnly: Boolean) = communication.callFromApp {
         wifiListController.clearMonitorCapture(handshakesOnly)
     }
@@ -750,10 +754,10 @@ open class MainService(
     }
 
     override fun startHashcat(request: io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch, inputs: ParcelFileDescriptor) = communication.callFromApp {
-        inputs.use { hashcatManager.start(request.id, it, false, request.revision, request.createdAt, request.memoryLimitMiB) }
+        inputs.use { hashcatManager.start(request.id, it, false, request.revision, request.createdAt) }
     }
     override fun resumeHashcat(request: io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch, inputs: ParcelFileDescriptor) = communication.callFromApp {
-        inputs.use { hashcatManager.start(request.id, it, true, request.revision, request.createdAt, request.memoryLimitMiB) }
+        inputs.use { hashcatManager.start(request.id, it, true, request.revision, request.createdAt) }
     }
     override fun pauseHashcat(taskId: String): Boolean = communication.callFromApp { hashcatManager.pause(taskId) }
     override fun deleteHashcat(taskId: String): Long = communication.callFromApp { hashcatManager.delete(taskId) }

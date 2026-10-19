@@ -43,6 +43,8 @@ import io.github.bszapp.wifitoolbox.ui.component.DebugWatermark
 import io.github.bszapp.wifitoolbox.ui.startup.StartupScreen
 import io.github.bszapp.wifitoolbox.ui.theme.WifiToolboxMaterialTheme
 import io.github.bszapp.wifitoolbox.ui.DefaultUI
+import io.github.bszapp.wifitoolbox.ui.about.misc.LocalVersionInfo
+import io.github.bszapp.wifitoolbox.ui.about.misc.VersionInfo
 import io.github.bszapp.wifitoolbox.ui.dictionary.DictionaryViewModel
 
 class MainActivity : ComponentActivity() {
@@ -118,7 +120,13 @@ class MainActivity : ComponentActivity() {
                 label = "startup_state",
             ) { isRunning ->
                 if (isRunning && running && sessionOwner != null) {
-                    CompositionLocalProvider(LocalViewModelStoreOwner provides sessionOwner) {
+                    CompositionLocalProvider(
+                        LocalViewModelStoreOwner provides sessionOwner,
+                        LocalVersionInfo provides VersionInfo(
+                            versionName = BuildConfig.VERSION_NAME,
+                            versionCode = BuildConfig.VERSION_CODE,
+                        ),
+                    ) {
                         key(state.connectionId) {
                             DefaultUI(dictionaryViewModel = dictionaryViewModel,
                                 openPskSecurityAudit = openPskSecurityAudit, onPskSecurityAuditOpened = {

@@ -135,4 +135,5 @@ interface IMainService {
     // 新事务只返回一个顶层弱密码检测任务 ID；taskCount 是内部测试记录数。
     long runPskSecurityAuditRecords(in TaskStartRequest request, in ParcelFileDescriptor dictionary, int taskCount);
     long joinPskSecurityAuditRecords(in TaskStartRequest request, int taskCount);
+    void setMonitorFrequency(int frequencyMhz, boolean hopping);
 }

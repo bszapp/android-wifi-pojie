@@ -26,11 +26,17 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+enum class NormalWifiSubmode { SCAN, PSK_SECURITY_AUDIT, WPS_SECURITY_AUDIT }
+
 class WifiListUiState(
     private val controller: IAppController,
     private val scope: CoroutineScope,
     assets: AssetManager,
 ) {
+
+    /** 当前列表会话选择的子模式，运行任务的显示覆盖不写回此状态。 */
+    private val _submode = MutableStateFlow(NormalWifiSubmode.SCAN)
+    val submode = _submode.asStateFlow()
 
     /** Service 独立维护并传输的 Wi-Fi 运行状态。 */
     val state = controller.wifiList.state
@@ -134,6 +140,8 @@ class WifiListUiState(
 
     fun updateSavedNetworks() = controller.wifiList.updateSavedNetworks()
 
+    fun selectSubmode(value: NormalWifiSubmode) { _submode.value = value }
+
     fun setMode(mode: WifiMode) =
         controller.wifiList.setMode(mode)
 
@@ -142,6 +150,8 @@ class WifiListUiState(
     fun toggleSmartInterfaces() = controller.wifiList.toggleSmartInterfaces()
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false) =
         controller.wifiList.setMonitorCapture(enabled, frequencyMhz, hopping)
+    fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean) =
+        controller.wifiList.setMonitorFrequency(frequencyMhz, hopping)
     fun clearMonitorCapture(handshakesOnly: Boolean) = controller.wifiList.clearMonitorCapture(handshakesOnly)
     fun interruptModeSwitch(operationId: Long) = controller.wifiList.interruptModeSwitch(operationId)
     fun interruptMonitorClear(operationId: Long) = controller.wifiList.interruptMonitorClear(operationId)

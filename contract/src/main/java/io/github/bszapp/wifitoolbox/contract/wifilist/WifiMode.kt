@@ -40,6 +40,8 @@ data class WifiModeState(
     val modeSwitch: WifiModeSwitch? = null,
     val captureClearProgress: MonitorCaptureClearProgress? = null,
     val smartInterfaces: SmartInterfacesState = SmartInterfacesState(),
+    val monitorFrequencyMhz: Int = 0,
+    val autoHoppingEnabled: Boolean = false,
 ) : Parcelable
 
 /** 由服务读取实际网卡得到；运行标记只表示创建/撤销脚本尚未退出。 */

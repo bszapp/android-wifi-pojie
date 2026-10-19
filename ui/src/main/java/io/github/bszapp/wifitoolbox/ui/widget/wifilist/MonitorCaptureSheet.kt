@@ -6,44 +6,34 @@ import android.net.wifi.ScanResult
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorChannel
 import io.github.bszapp.wifitoolbox.contract.wifilist.createScanResultCompat
 import io.github.bszapp.wifitoolbox.ui.component.PreviewSheetHost
 import io.github.bszapp.wifitoolbox.ui.component.SingleOverlayBottomSheet
-import top.yukonga.miuix.kmp.basic.BasicComponent
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.RadioButton
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
-@Preview(name = "选择录制信道", showBackground = true, widthDp = 411, heightDp = 891)
+@Preview(name = "监听频率", showBackground = true, widthDp = 411, heightDp = 891)
 @Composable
 internal fun MonitorCaptureSheetPreview() {
     PreviewSheetHost {
@@ -80,8 +70,12 @@ internal fun MonitorCaptureSheetPreview() {
                     frequency = 5180
                 },
             ),
+            frequencyMhz = 2412,
+            configuredFrequencyMhz = 2412,
+            hopping = false,
+            capturing = false,
             onDismiss = {},
-            onStart = { _, _ -> },
+            onChange = { _, _ -> },
         )
     }
 }
@@ -98,14 +92,20 @@ internal fun MonitorCaptureSheet(
     show: Boolean,
     channels: List<MonitorChannel>,
     scanResults: List<ScanResult>,
+    frequencyMhz: Int,
+    configuredFrequencyMhz: Int,
+    hopping: Boolean,
+    capturing: Boolean,
+    enabled: Boolean = true,
     onDismiss: () -> Unit,
-    onStart: (frequencyMhz: Int, hopping: Boolean) -> Unit,
+    onChange: (frequencyMhz: Int, hopping: Boolean) -> Unit,
 ) {
-    var selectedFrequency by rememberSaveable(show) { mutableStateOf<Int?>(null) }
-    var hopping by rememberSaveable(show) { mutableStateOf(false) }
+    val selectedFrequency = (if (hopping) frequencyMhz else configuredFrequencyMhz.takeIf { it > 0 }
+        ?: frequencyMhz).takeIf { it > 0 }
     val bottomPadding = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val maxHeight = LocalWindowInfo.current.containerDpSize.height * 0.7f
     val selectedChannel = channels.firstOrNull { it.frequencyMhz == selectedFrequency }
+    val currentChannel = channels.firstOrNull { it.frequencyMhz == frequencyMhz }
     val hitNetworks = remember(scanResults, selectedFrequency) {
         selectedFrequency?.let { chartHitNetworks(scanResults, it) }.orEmpty()
     }
@@ -115,7 +115,7 @@ internal fun MonitorCaptureSheet(
     }
     SingleOverlayBottomSheet(
         show = show,
-        title = "选择录制信道",
+        title = "监听频率",
         enableNestedScroll = true,
         renderInRootScaffold = true,
         onDismissRequest = onDismiss,
@@ -132,30 +132,42 @@ internal fun MonitorCaptureSheet(
                     when (item) {
                         CaptureSelectionItem.Empty -> Text("尚未获取到可用信道")
                         CaptureSelectionItem.Hopping -> Card {
-                            BasicComponent(
-                                title = "跳频录制",
+                            SwitchPreference(
+                                title = "自动跳频",
                                 summary = "按上次扫描的信号指数分配停留时间，指数越高停留越久",
-                                role = Role.RadioButton,
-                                onClick = { hopping = true },
-                                endActions = { RadioButton(selected = hopping, onClick = null) },
+                                checked = hopping,
+                                enabled = enabled,
+                                onCheckedChange = { automatic ->
+                                    onChange(frequencyMhz.takeIf { it > 0 } ?: selectedFrequency ?: 0, automatic)
+                                },
                             )
                         }
                         is CaptureSelectionItem.Band -> MonitorChannelChart(
                             band = item.band,
                             channels = channels,
                             scanResults = scanResults,
-                            selectedFrequency = selectedFrequency.takeUnless { hopping },
-                            onSelect = { frequency -> hopping = false; selectedFrequency = frequency },
+                            selectedFrequency = selectedFrequency,
+                            enabled = enabled && !hopping,
+                            onSelect = { frequency -> onChange(frequency, false) },
                         )
                     }
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = if (hopping) "跳频录制 · ${channels.size} 个可用信道" else selectedChannel?.let {
-                        "信道 ${it.channel} · ${frequencyBand(it.frequencyMhz)} · ${it.frequencyMhz} MHz"
-                    } ?: "点击图表选择信道，或选择跳频录制",
+                    text = currentChannel?.let {
+                        "当前信道：${it.channel}，${frequencyBand(it.frequencyMhz)}，${it.frequencyMhz}MHz"
+                    } ?: "尚未获取到当前信道",
                     style = MiuixTheme.textStyles.body2,
+                )
+                Text(
+                    text = when {
+                        hopping && capturing -> "自动跳频中，手动信道选择已禁用"
+                        hopping -> "自动跳频已开启，开始抓包后生效"
+                        else -> "点击图表选择信道，修改立即生效"
+                    },
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
                 io.github.bszapp.wifitoolbox.ui.component.ImmediateContent(
                     targetState = selectedChannel?.takeUnless { hopping }?.let { it to hitNetworks.toList() },
@@ -176,13 +188,7 @@ internal fun MonitorCaptureSheet(
                 }
                 }
             }
-            Row(Modifier.fillMaxWidth()) {
-                TextButton(text = "取消", onClick = onDismiss, modifier = Modifier.weight(1f))
-                Spacer(Modifier.width(20.dp))
-                TextButton(text = "开始录制", enabled = channels.isNotEmpty() && (hopping || selectedChannel != null),
-                    onClick = { if (hopping) onStart(0, true) else selectedFrequency?.let { onStart(it, false) } }, modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.textButtonColorsPrimary())
-            }
+            TextButton(text = "关闭", onClick = onDismiss, modifier = Modifier.fillMaxWidth())
         }
     }
 }

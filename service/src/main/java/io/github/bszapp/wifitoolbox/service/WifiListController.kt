@@ -69,14 +69,26 @@ internal class WifiListController(
     private var monitorCaptureChangeActive = false
     private var monitorCaptureOperationId = 0L
     private var monitorRestoreCompletion: CompletableFuture<Unit>? = null
-    private val monitorScanner = MonitorWifiScanner(terminalManager) { error ->
-        val generation = modeGeneration
-        execute {
-            if (isCurrentMode(generation, WifiMode.MONITOR)) {
-                failMonitorReception("跳频录制", error)
+    private var monitorFrequencyChange: CompletableFuture<Unit>? = null
+    private val monitorScanner = MonitorWifiScanner(
+        terminals = terminalManager,
+        onHoppingFailed = { error ->
+            val generation = modeGeneration
+            execute {
+                if (isCurrentMode(generation, WifiMode.MONITOR)) {
+                    failMonitorReception("自动跳频", error)
+                }
             }
-        }
-    }
+        },
+        onChannelChanged = {
+            val generation = modeGeneration
+            execute("monitorChannelChanged") {
+                if (isCurrentMode(generation, WifiMode.MONITOR) && !modeOperationInProgress) {
+                    publishModeState(modeState.copy(monitorStatistics = monitorModeController.statisticsHeader()))
+                }
+            }
+        },
+    )
     private var monitorScanActive = false
     @Volatile private var computerControlActive = false
     private val diagnosticSubmitted = AtomicLong()
@@ -196,7 +208,8 @@ internal class WifiListController(
         execute("usbMonitorAcquire") {
             try {
                 check(isUsbMonitorTaskReady()) { "电脑控制需要处于监听模式" }
-                check(!monitorScanActive && !monitorCaptureChangeActive && !modeState.clearingCapture) {
+                check(!monitorScanActive && !monitorCaptureChangeActive &&
+                    monitorFrequencyChange?.isDone != false && !modeState.clearingCapture) {
                     "请等待扫描或网卡操作或清理完成"
                 }
                 computerControlActive = true
@@ -277,11 +290,14 @@ internal class WifiListController(
         try {
             monitorCapturePlan = MonitorCapturePlan.Stopped
             monitorCaptureChangeActive = false
+            monitorFrequencyChange = null
             monitorModeController.start()
             monitorScanner.initialize().get(SCAN_START_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             publishModeState(modeState.copy(
                 monitorStatistics = monitorModeController.statisticsHeader(),
                 availableChannels = monitorScanner.availableChannels(),
+                monitorFrequencyMhz = monitorScanner.currentChannel()?.frequencyMhz
+                    ?: monitorScanner.availableChannels().firstOrNull()?.frequencyMhz ?: 0,
                 capturing = false, hoppingCapture = false,
             ))
         } catch (error: Exception) {
@@ -315,14 +331,16 @@ internal class WifiListController(
             try {
                 check(modeState.mode == WifiMode.MONITOR && !modeOperationInProgress) { "网卡操作尚未完成" }
                 check(!computerControlActive) { "电脑控制正在使用网卡" }
-                check((!enabled || (!monitorScanActive && !monitorCaptureChangeActive)) &&
+                check((!enabled || (!monitorScanActive && !monitorCaptureChangeActive &&
+                    monitorFrequencyChange?.isDone != false && monitorRestoreCompletion?.isDone != false)) &&
                     !modeState.clearingCapture) { "请等待扫描或网卡操作或清理完成" }
                 if (enabled) {
-                    check(!monitorModeController.isCapturing()) { "抓取进程尚不能修改信道" }
-                    val channel = modeState.availableChannels.firstOrNull { hopping || it.frequencyMhz == frequencyMhz }
-                        ?: error("所选信道不可用")
-                    monitorCapturePlan = if (hopping) MonitorCapturePlan.Hopping
-                        else MonitorCapturePlan.Fixed(channel.frequencyMhz)
+                    check(!monitorModeController.isCapturing()) { "抓包已在运行" }
+                    val frequency = resolveMonitorFrequency(frequencyMhz)
+                    val automatic = hopping || modeState.autoHoppingEnabled
+                    publishModeState(modeState.copy(monitorFrequencyMhz = frequency, autoHoppingEnabled = automatic))
+                    monitorCapturePlan = if (automatic) MonitorCapturePlan.Hopping
+                        else MonitorCapturePlan.Fixed(frequency)
                 } else {
                     monitorCapturePlan = MonitorCapturePlan.Stopped
                 }
@@ -370,15 +388,26 @@ internal class WifiListController(
                     awaitCapture(ready, bounded = false) {
                         setInterfaceUp(true)
                         awaitCapture(restoreMonitorReception(generation)) {
-                            awaitCapture(monitorModeController.setCapture(true)) { finish() }
+                            awaitCapture(monitorModeController.setCapture(true)) {
+                                // 确认抓包已启动后，自动跳频计划才允许执行。
+                                if (monitorCapturePlan == MonitorCapturePlan.Hopping) {
+                                    awaitCapture(restoreMonitorReception(generation)) { finish() }
+                                } else finish()
+                            }
                         }
                     }
                 } else {
-                    // 收到 tcpdump 停止确认后，才恢复停止计划和关闭网卡接收。
-                    awaitCapture(monitorModeController.setCapture(false)) {
-                        if (monitorScanActive) finish()
-                        else awaitCapture(restoreMonitorReception(generation)) { finish() }
+                    fun stopCapture() {
+                        // 收到 tcpdump 停止确认后，才关闭网卡接收。
+                        awaitCapture(monitorModeController.setCapture(false)) {
+                            if (monitorScanActive) finish()
+                            else awaitCapture(restoreMonitorReception(generation)) { finish() }
+                        }
                     }
+                    // 先停止跳频，再停止抓包，避免未抓包时仍然跳频。
+                    if (modeState.autoHoppingEnabled && !monitorScanActive) {
+                        awaitCapture(restoreMonitorReception(generation)) { stopCapture() }
+                    } else stopCapture()
                 }
             } catch (error: Throwable) {
                 if (accepted) failMonitorReception("修改持续抓取状态", error)
@@ -387,15 +416,52 @@ internal class WifiListController(
         }
     }
 
-    /** 停止后的历史展示沿用已发布快照；网卡恢复始终只读取 monitorCapturePlan。 */
-    private fun monitorCaptureChannel(): MonitorChannel? = when (val plan = monitorCapturePlan) {
-        is MonitorCapturePlan.Fixed ->
-            modeState.availableChannels.firstOrNull { it.frequencyMhz == plan.frequencyMhz }
-        MonitorCapturePlan.Hopping -> null
-        MonitorCapturePlan.Stopped -> modeState.monitorStatistics?.takeIf { it.frequencyMhz > 0 }?.let {
-            MonitorChannel(it.channel, it.frequencyMhz)
+    private fun resolveMonitorFrequency(requested: Int = 0): Int {
+        val frequency = requested.takeIf { it > 0 } ?: modeState.monitorFrequencyMhz.takeIf { it > 0 }
+            ?: monitorScanner.currentChannel()?.frequencyMhz
+            ?: modeState.availableChannels.firstOrNull()?.frequencyMhz
+            ?: error("尚未获取到可用信道")
+        require(modeState.availableChannels.any { it.frequencyMhz == frequency }) { "所选信道不可用" }
+        return frequency
+    }
+
+    fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean) {
+        execute("setMonitorFrequency") {
+            val generation = modeGeneration
+            var accepted = false
+            try {
+                check(modeState.mode == WifiMode.MONITOR && !modeOperationInProgress) { "网卡操作尚未完成" }
+                check(!computerControlActive) { "电脑控制正在使用网卡" }
+                check(!monitorScanActive && !monitorCaptureChangeActive && !modeState.clearingCapture) {
+                    "请等待扫描或网卡操作或清理完成"
+                }
+                val frequency = resolveMonitorFrequency(frequencyMhz)
+                publishModeState(modeState.copy(monitorFrequencyMhz = frequency, autoHoppingEnabled = hopping))
+                monitorCapturePlan = if (!monitorModeController.isCapturing()) MonitorCapturePlan.Stopped
+                    else if (hopping) MonitorCapturePlan.Hopping else MonitorCapturePlan.Fixed(frequency)
+                accepted = true
+                // 合并拖动图表时的连续选择，执行器每次确认后再核对最新设置。
+                val request = restoreMonitorReception(generation)
+                monitorFrequencyChange = request
+                request.whenComplete { _, error ->
+                    if (error != null) execute {
+                        if (isCurrentMode(generation, WifiMode.MONITOR) && monitorFrequencyChange === request) {
+                            failMonitorReception("设置监听频率", unwrapCompletionFailure(error))
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                if (accepted) failMonitorReception("设置监听频率", error)
+                else reportError("设置监听频率", error)
+            }
         }
     }
+
+    /** 只发布执行器实际确认的信道；停止后的历史展示沿用最后一次确认。 */
+    private fun monitorCaptureChannel(): MonitorChannel? = monitorScanner.currentChannel()
+        ?: modeState.monitorStatistics?.takeIf { it.frequencyMhz > 0 }?.let {
+            MonitorChannel(it.channel, it.frequencyMhz)
+        }
 
     /** 扫描操作在采集结束后调用；在串行调度线程上读取此刻的录制计划。 */
     private fun restoreMonitorReception(
@@ -451,20 +517,30 @@ internal class WifiListController(
             return
         }
         val plan = monitorCapturePlan
+        val frequency = modeState.monitorFrequencyMhz
+        val automatic = modeState.autoHoppingEnabled
+        val capturing = monitorModeController.isCapturing()
+        val effectivePlan = when {
+            plan == MonitorCapturePlan.Stopped && !automatic && frequency > 0 -> MonitorCapturePlan.Fixed(frequency)
+            plan == MonitorCapturePlan.Hopping && !capturing -> MonitorCapturePlan.Fixed(resolveMonitorFrequency())
+            else -> plan
+        }
         Log.d(TAG, "[MonitorDiagnostic] resumeBegin generation=$generation plan=$plan")
         val request = try {
-            monitorScanner.resume(plan, (wifiState as? WifiState.Monitor)?.scanResults.orEmpty())
+            if (effectivePlan != MonitorCapturePlan.Stopped) setInterfaceUp(true)
+            monitorScanner.resume(effectivePlan, (wifiState as? WifiState.Monitor)?.scanResults.orEmpty())
         } catch (error: Throwable) {
             completion.completeExceptionally(error)
             return
         }
         awaitMonitorCommand(generation, request, completion, "恢复") {
-            if (monitorCapturePlan != plan) {
+            if (monitorCapturePlan != plan || modeState.monitorFrequencyMhz != frequency ||
+                modeState.autoHoppingEnabled != automatic || monitorModeController.isCapturing() != capturing) {
                 // 等待 ACK 期间收到停止请求，旧确认不能结束本次恢复。
                 Log.d(TAG, "[MonitorDiagnostic] resumePlanChanged previous=$plan latest=$monitorCapturePlan")
                 applyMonitorCapturePlan(generation, completion, onRestored)
             } else {
-                if (plan == MonitorCapturePlan.Stopped) setInterfaceUp(false)
+                if (plan == MonitorCapturePlan.Stopped && !monitorModeController.isCapturing()) setInterfaceUp(false)
                 Log.d(TAG, "[MonitorDiagnostic] resumeEnd generation=$generation plan=$plan")
                 onRestored()
                 completion.complete(Unit)
@@ -507,6 +583,7 @@ internal class WifiListController(
     private fun failMonitorReception(operation: String, error: Throwable) {
         monitorCapturePlan = MonitorCapturePlan.Stopped
         monitorCaptureChangeActive = false
+        monitorFrequencyChange = null
         monitorCaptureOperationId++
         monitorModeController.abortProcess(error)
         monitorScanner.stop()
@@ -525,7 +602,7 @@ internal class WifiListController(
             runCatching {
                 check(!computerControlActive) { "电脑控制正在使用网卡" }
                 check(modeState.mode == WifiMode.MONITOR && !monitorScanActive &&
-                    !monitorCaptureChangeActive && !modeOperationInProgress)
+                    !monitorCaptureChangeActive && monitorFrequencyChange?.isDone != false && !modeOperationInProgress)
                 monitorModeController.clearCapture(handshakesOnly)
             }.onFailure { reportError("清理抓取数据", it) }
             Log.d(TAG, "[MonitorDiagnostic] clearRequestEnd handshakesOnly=$handshakesOnly")
@@ -629,7 +706,8 @@ internal class WifiListController(
             try {
                 check(isCurrentMode(requestedGeneration, WifiMode.MONITOR) && !modeOperationInProgress) { "monitor 模式已改变" }
                 check(!computerControlActive) { "电脑控制正在使用网卡" }
-                check(!monitorScanActive && !monitorCaptureChangeActive && !modeState.clearingCapture) { "monitor 操作正在进行" }
+                check(!monitorScanActive && !monitorCaptureChangeActive &&
+                    monitorFrequencyChange?.isDone != false && !modeState.clearingCapture) { "monitor 操作正在进行" }
                 check(environmentConfigured) { "容器环境尚未配置" }
                 val generation = modeGeneration
                 val scanId = ++scanGeneration
@@ -1014,7 +1092,9 @@ internal class WifiListController(
                 }
             }
         }
-        if (!computerControlActive && !monitorScanActive && !monitorCaptureChangeActive && !monitorModeController.isCapturing()) {
+        if (!computerControlActive && !monitorScanActive && !monitorCaptureChangeActive &&
+            monitorFrequencyChange?.isDone != false && monitorRestoreCompletion?.isDone != false &&
+            !monitorModeController.isCapturing()) {
             runCatching { setInterfaceUp(false) }.onFailure { reportError("暂停 monitor 接收", it) }
         }
         val channel = monitorCaptureChannel()

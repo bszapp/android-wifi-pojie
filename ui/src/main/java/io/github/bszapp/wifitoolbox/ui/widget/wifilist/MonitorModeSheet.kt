@@ -250,7 +250,7 @@ internal fun MonitorModeSheet(show: Boolean, onDismiss: () -> Unit, onExecute: (
                 }
                 item(key = "description") {
                     Text(
-                        text = "此操作只切换网卡模式，不会开始抓包。请先选择匹配的预设并核对命令，录制信道在开始抓取时再选。",
+                    text = "此操作只切换网卡模式，不会开始抓包。请先选择匹配的预设并核对命令，监听频率可通过频率设置面板调整。",
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         style = MiuixTheme.textStyles.body2,
                     )

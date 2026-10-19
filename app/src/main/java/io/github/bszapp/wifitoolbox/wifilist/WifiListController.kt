@@ -585,6 +585,9 @@ class WifiListController(
     override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) {
         callService(if (enabled) "开始持续抓取" else "停止持续抓取") { it.setMonitorCapture(enabled, frequencyMhz, hopping) }
     }
+    override fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean) {
+        callService("设置监听频率") { it.setMonitorFrequency(frequencyMhz, hopping) }
+    }
     override fun clearMonitorCapture(handshakesOnly: Boolean) {
         callService("清理抓取数据") { it.clearMonitorCapture(handshakesOnly) }
     }

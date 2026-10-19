@@ -130,6 +130,7 @@ def set_frequency(scanner, frequency, channel_state, capture=False):
     if capture:
         diagnostic("captureChannelAck", frequencyMhz=frequency, channelWidth=width,
                    centerFreq0=center0, centerFreq1=center1)
+        emit({"action": "channel_changed", "frequencyMhz": frequency})
 
 
 def try_hopping_frequency(scanner, frequency, channel_state):
@@ -250,9 +251,10 @@ if __name__ == "__main__":
             return 1
 
     if args.listen:
-        channels, _ = supported_channels(args.interface)
+        channels, original = supported_channels(args.interface)
+        channel_state.frequency_mhz = original
         frequencies = [channel["frequencyMhz"] for channel in channels]
-        emit({"action": "ready", "channels": channels})
+        emit({"action": "ready", "channels": channels, "frequencyMhz": original or 0})
         hopping = False
         hop_scanner = None
         hop_index = 0

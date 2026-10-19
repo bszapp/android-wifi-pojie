@@ -11,6 +11,7 @@ import org.json.JSONObject
 internal class MonitorWifiScanner(
     private val terminals: TerminalManager,
     private val onHoppingFailed: (Throwable) -> Unit,
+    private val onChannelChanged: () -> Unit,
 ) {
     private var terminalId: Long? = null
     private var ready: CompletableFuture<Unit>? = null
@@ -19,9 +20,13 @@ internal class MonitorWifiScanner(
     private var nextRequestId = 0L
     private var hopping = false
     private var channels: List<MonitorChannel> = emptyList()
+    private var currentFrequencyMhz = 0
 
     @Synchronized
     fun availableChannels(): List<MonitorChannel> = channels
+
+    @Synchronized
+    fun currentChannel(): MonitorChannel? = channels.firstOrNull { it.frequencyMhz == currentFrequencyMhz }
 
     @Synchronized
     fun initialize(): CompletableFuture<Unit> {
@@ -40,8 +45,14 @@ internal class MonitorWifiScanner(
                                 val item = list.getJSONObject(index)
                                 MonitorChannel(item.getInt("channel"), item.getInt("frequencyMhz"))
                             }
+                            currentFrequencyMhz = event.optInt("frequencyMhz")
                         }
                         boot.complete(Unit)
+                        return@forEach
+                    }
+                    if (event.optString("action") == "channel_changed") {
+                        synchronized(this) { currentFrequencyMhz = event.getInt("frequencyMhz") }
+                        onChannelChanged()
                         return@forEach
                     }
                     if (event.optString("action") == "resume_completed") {
@@ -95,6 +106,7 @@ internal class MonitorWifiScanner(
                     boot.completeExceptionally(IllegalStateException("monitor 扫描进程已退出，退出码 $code"))
                     val request = synchronized(this) {
                         channels = emptyList()
+                        currentFrequencyMhz = 0
                         resumeRequest.also { resumeRequest = null }
                     }
                     val error = IllegalStateException("monitor 扫描进程已退出，退出码 $code")
@@ -190,6 +202,7 @@ internal class MonitorWifiScanner(
                 pending = null
                 hopping = false
                 channels = emptyList()
+                currentFrequencyMhz = 0
             }
         }
         val error = IllegalStateException("monitor 扫描进程已停止")

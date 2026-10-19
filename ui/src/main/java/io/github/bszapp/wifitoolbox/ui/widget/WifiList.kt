@@ -41,7 +41,7 @@ fun WifiList(
     val modeState by vm.wifiList.modeState.collectAsStateWithLifecycle()
     val handshakeTest by vm.wifiList.monitorHandshakeTest.collectAsStateWithLifecycle()
     val currentTask by vm.currentTask.collectAsStateWithLifecycle()
-    val submode by vm.pskSecurityAudit.submode.collectAsStateWithLifecycle()
+    val submode by vm.wifiList.submode.collectAsStateWithLifecycle()
     val auditBatch by vm.pskSecurityAudit.batch.collectAsStateWithLifecycle()
     val auditTasks by vm.pskSecurityAudit.auditTasks.collectAsStateWithLifecycle()
     val auditHistory by vm.pskSecurityAudit.history.collectAsStateWithLifecycle()

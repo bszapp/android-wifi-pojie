@@ -53,33 +53,41 @@ fun WifiGroupCardActions(
     val supportsAutoJoin = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
     val menuGroups = buildList {
-        if (allowWpsPin && group.ssid.isNotBlank() && group.networks.any { it.supportsWps() }) {
-            add(MenuGroupConfig(title = "WPS", items = listOf(MenuItemConfig(
-                title = "使用PIN获取密码", icon = Icons.Outlined.Password,
-                onCheckedChange = { menuExpanded = false; onWpsPin() },
-            ))))
-        }
         add(
             MenuGroupConfig(
                 icon = null,
                 title = null,
                 items = buildList {
-                    add(MenuItemConfig(
-                        title = "详细信息",
-                        icon = Icons.Outlined.Info,
-                        onCheckedChange = {
-                            menuExpanded = false
-                            onOpenDetail()
-                        },
-                    ))
-                    if (isConnected) add(MenuItemConfig(
-                        title = "断开连接",
-                        icon = Icons.Outlined.LinkOff,
-                        onCheckedChange = {
-                            menuExpanded = false
-                            onDisconnect()
-                        },
-                    ))
+                    if (allowWpsPin && group.ssid.isNotBlank() && group.networks.any { it.supportsWps() }) add(
+                        MenuItemConfig(
+                            title = "使用PIN获取密码",
+                            icon = Icons.Outlined.Password,
+                            onCheckedChange = {
+                                menuExpanded = false
+                                onWpsPin()
+                            },
+                        )
+                    )
+                    add(
+                        MenuItemConfig(
+                            title = "详细信息",
+                            icon = Icons.Outlined.Info,
+                            onCheckedChange = {
+                                menuExpanded = false
+                                onOpenDetail()
+                            },
+                        )
+                    )
+                    if (isConnected) add(
+                        MenuItemConfig(
+                            title = "断开连接",
+                            icon = Icons.Outlined.LinkOff,
+                            onCheckedChange = {
+                                menuExpanded = false
+                                onDisconnect()
+                            },
+                        )
+                    )
                 }
             )
         )
@@ -144,11 +152,17 @@ fun WifiGroupCardActions(
         }
 
         if (auditMode && auditRunning && onAppendAudit != null) {
-            add(MenuGroupConfig(title = null, items = listOf(MenuItemConfig(
-                title = "追加任务",
-                icon = Icons.Outlined.PlayArrow,
-                onCheckedChange = { menuExpanded = false; onAppendAudit() },
-            ))))
+            add(
+                MenuGroupConfig(
+                    title = null, items = listOf(
+                        MenuItemConfig(
+                            title = "追加任务",
+                            icon = Icons.Outlined.PlayArrow,
+                            onCheckedChange = { menuExpanded = false; onAppendAudit() },
+                        )
+                    )
+                )
+            )
         }
     }
 

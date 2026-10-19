@@ -13,7 +13,7 @@ data class HashcatTaskMemory(
     val error: String? = null,
 )
 
-/** availableBytes 来自内核 MemAvailable（包含可回收内存），预算不等于实际分配。 */
+/** availableBytes 来自内核 MemAvailable（包含可回收内存），最大内存不等于实际分配。 */
 data class HashcatMemorySnapshot(
     val capturedAt: Long,
     val totalBytes: Long,
@@ -21,16 +21,6 @@ data class HashcatMemorySnapshot(
     val tasks: List<HashcatTaskMemory>,
     val error: String? = null,
 ) {
-    /** 其他任务已承诺但尚未体现在 PSS 中的预算仍需预留；自动预算的旧任务没有固定承诺值。 */
-    fun assignableBytes(taskId: String? = null): Long {
-        if (error != null || tasks.any { it.pssBytes == null }) return 0
-        val current = tasks.firstOrNull { it.taskId == taskId }?.pssBytes ?: 0
-        val reserved = tasks.filter { it.taskId != taskId }.sumOf {
-            ((it.budgetMiB?.toLong() ?: 0) * HASHCAT_MIB - (it.pssBytes ?: 0)).coerceAtLeast(0)
-        }
-        return (availableBytes + current - reserved).coerceIn(0, totalBytes)
-    }
-
     fun toJson() = JSONObject().apply {
         put("capturedAt", capturedAt); put("totalBytes", totalBytes); put("availableBytes", availableBytes)
         put("error", error)

@@ -151,15 +151,14 @@ class HashcatTaskController(
         // 历史属于 App；正常退出服务的任务已经由服务备份为 PAUSED 或结束态。
     }
 
-    override suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String = withContext(Dispatchers.IO) {
+    override suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>): String = withContext(Dispatchers.IO) {
         val active = requireBinding()
         val lines = handshake.lineSequence().filter { it.isNotBlank() }.toList()
         require(lines.isNotEmpty() && lines.all { it.startsWith("WPA*01*") || it.startsWith("WPA*02*") }) { "请输入有效的 hc22000 文本" }
         require(dictionary.isFile && dictionary.length() > 0) { "字典为空" }
         val id = UUID.randomUUID().toString()
-        require(memoryLimitMiB > 0) { "内存预算必须大于 0 MiB" }
         val snapshot = HashcatTaskSnapshot(id, System.currentTimeMillis(), dictionaryNames = dictionaryNames,
-            memoryLimitMiB = memoryLimitMiB, networks = HashcatNetwork.fromHandshake(handshake))
+            networks = HashcatNetwork.fromHandshake(handshake))
         synchronized(storeLock) {
             val dir = taskDirectory(id)
             AtomicFile(File(dir, "handshake.hc22000")).let { atomic ->
@@ -180,10 +179,9 @@ class HashcatTaskController(
         id
     }
 
-    override suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String = withContext(Dispatchers.IO) {
+    override suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>): String = withContext(Dispatchers.IO) {
         val active = requireBinding()
         require(dictionary.isFile && dictionary.length() > 0) { "字典为空" }
-        require(memoryLimitMiB > 0) { "内存预算必须大于0MiB" }
         synchronized(lock) {
             check(taskId in snapshots && taskId !in deletedTasks) { "任务不存在" }
             check(changingTasks.add(taskId)) { "任务正在修改" }
@@ -198,7 +196,7 @@ class HashcatTaskController(
             val before = synchronized(lock) { snapshots[taskId] } ?: error("任务不存在")
             val restarted = HashcatTaskSnapshot(
                 id = taskId, createdAt = before.createdAt, revision = maxOf(before.revision, stoppedRevision) + 1,
-                dictionaryNames = dictionaryNames, memoryLimitMiB = memoryLimitMiB,
+                dictionaryNames = dictionaryNames,
                 networks = HashcatNetwork.fromHandshake(handshake),
             )
             try {
@@ -280,24 +278,6 @@ class HashcatTaskController(
         fetch(active, taskId)
     }
 
-    override suspend fun setMemoryLimit(taskId: String, memoryLimitMiB: Int) = withContext(Dispatchers.IO) {
-        require(memoryLimitMiB > 0) { "内存预算必须大于 0 MiB" }
-        val active = requireBinding()
-        fetchMemory(active)
-        val measured = requireNotNull(memory.value) { "加载中" }
-        require(memoryLimitMiB.toLong() * HASHCAT_MIB <= measured.assignableBytes(taskId)) { "内存预算超过当前可分配内存" }
-        val before = synchronized(lock) { snapshots[taskId] } ?: error("任务不存在")
-        val continueRunning = before.state == HashcatTaskState.RUNNING
-        check(continueRunning || before.state == HashcatTaskState.PAUSED) { "当前任务不能调整内存预算" }
-        if (continueRunning) pause(taskId)
-        synchronized(storeLock) {
-            val paused = synchronized(lock) { snapshots[taskId] } ?: error("任务不存在")
-            check(paused.state == HashcatTaskState.PAUSED) { "任务已经结束，无需调整内存预算" }
-            save(paused.copy(memoryLimitMiB = memoryLimitMiB, revision = paused.revision + 1))
-        }
-        if (continueRunning) resume(taskId)
-    }
-
     suspend fun prepareServiceShutdown(service: IMainService) = withContext(Dispatchers.IO) {
         val active = requireBinding()
         check(active.service.asBinder() == service.asBinder())
@@ -317,7 +297,7 @@ class HashcatTaskController(
             .associateWith { File(dir, it) } + ("libhashcat.so" to File(context.applicationInfo.nativeLibraryDir, "libhashcat.so"))
         HashcatFiles.pipe { out -> HashcatFiles.pack(out, files) }.use { fd ->
             val snapshot = synchronized(storeLock) { readSnapshot(File(dir, "snapshot.json")) }
-            val request = HashcatLaunch(id, snapshot.createdAt, snapshot.revision, snapshot.memoryLimitMiB)
+            val request = HashcatLaunch(id, snapshot.createdAt, snapshot.revision)
             if (resume) active.service.resumeHashcat(request, fd) else active.service.startHashcat(request, fd)
         }
     }

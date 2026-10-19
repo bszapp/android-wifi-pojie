@@ -49,7 +49,7 @@ fun ListScreen(
     val displayedTask by viewModel.displayedTask.collectAsStateWithLifecycle()
     val taskState by viewModel.tasks.state.collectAsStateWithLifecycle()
     val wpsPinForm by viewModel.wpsPinForm.collectAsStateWithLifecycle()
-    val submode by viewModel.pskSecurityAudit.submode.collectAsStateWithLifecycle()
+    val submode by viewModel.wifiList.submode.collectAsStateWithLifecycle()
     val auditTasks by viewModel.pskSecurityAudit.auditTasks.collectAsStateWithLifecycle()
     val auditConfig by viewModel.pskSecurityAudit.config.collectAsStateWithLifecycle()
     val wpsAuditConfig by viewModel.pskSecurityAudit.wpsConfig.collectAsStateWithLifecycle()
@@ -118,12 +118,12 @@ fun ListScreen(
 
             override fun toggleSmartInterfaces() = viewModel.wifiList.toggleSmartInterfaces()
             override fun selectSubmode(submode: NormalWifiSubmode) =
-                viewModel.pskSecurityAudit.selectSubmode(submode)
+                viewModel.wifiList.selectSubmode(submode)
 
             override fun configureAudit() {
                 val displayMode = resolveWifiListDisplayMode(
                     viewModel.wifiList.modeState.value?.mode,
-                    viewModel.pskSecurityAudit.submode.value,
+                    viewModel.wifiList.submode.value,
                     viewModel.currentTask.value,
                 )
                 viewModel.pskSecurityAudit.configure(displayMode.submode)
@@ -137,6 +137,9 @@ fun ListScreen(
 
             override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) =
                 viewModel.wifiList.setMonitorCapture(enabled, frequencyMhz, hopping)
+
+            override fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean) =
+                viewModel.wifiList.setMonitorFrequency(frequencyMhz, hopping)
 
             override fun clearMonitorCapture(handshakesOnly: Boolean) =
                 viewModel.wifiList.clearMonitorCapture(handshakesOnly)

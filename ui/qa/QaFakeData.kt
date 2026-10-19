@@ -264,6 +264,7 @@ class QaListPageActions : ListPageActions {
     override fun stopUsbMonitorTask() = Unit
     override fun enterMonitorMode(command: String) = Unit
     override fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int, hopping: Boolean) = Unit
+    override fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean) = Unit
     override fun clearMonitorCapture(handshakesOnly: Boolean) = Unit
     override fun interruptModeSwitch(operationId: Long) = Unit
     override fun interruptMonitorClear(operationId: Long) = Unit

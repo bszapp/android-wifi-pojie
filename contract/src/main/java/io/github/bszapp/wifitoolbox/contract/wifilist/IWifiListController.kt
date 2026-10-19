@@ -30,11 +30,12 @@ interface IWifiListController {
     /** 服务先核对带标记的实际网卡，再决定新增或撤销。 */
     fun toggleSmartInterfaces()
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false)
+    fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean)
     fun clearMonitorCapture(handshakesOnly: Boolean)
     fun interruptModeSwitch(operationId: Long)
     fun interruptMonitorClear(operationId: Long)
 
-    /** 请求 Service 执行进入脚本；持续抓取时单独选择信道。 */
+    /** 请求 Service 执行进入脚本；频率由独立面板调整。 */
     fun enterMonitorMode(command: String)
 
     suspend fun monitorCommunicationWindow(query: MonitorCommunicationQuery, first: Int, last: Int): MonitorCommunicationWindow

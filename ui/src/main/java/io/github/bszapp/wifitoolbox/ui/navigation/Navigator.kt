@@ -19,6 +19,9 @@ sealed interface Route : NavKey, Parcelable {
     data object ColorPalette : Route
 
     @Parcelize
+    data object About : Route
+
+    @Parcelize
     data object Log : Route
 
     @Parcelize

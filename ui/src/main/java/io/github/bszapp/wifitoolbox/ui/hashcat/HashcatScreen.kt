@@ -5,7 +5,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
@@ -26,16 +25,10 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.PathEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskSnapshot
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatTaskState
-import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatMemorySnapshot
-import io.github.bszapp.wifitoolbox.contract.hashcat.HASHCAT_MIB
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelSnapshot
 import io.github.bszapp.wifitoolbox.contract.hashcat.HashcatKernelState
 import kotlinx.coroutines.delay
@@ -59,7 +52,6 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
     val connected by viewModel.connected.collectAsStateWithLifecycle()
     val sheet by viewModel.sheet.collectAsStateWithLifecycle()
     val dictionaries by viewModel.dictionaries.collectAsStateWithLifecycle()
-    val memory by viewModel.memory.collectAsStateWithLifecycle()
     val kernels by viewModel.kernels.collectAsStateWithLifecycle()
     LaunchedEffect(initialHandshake) { initialHandshake?.let(viewModel::openIncoming) }
     val navigator = LocalNavigator.current
@@ -119,7 +111,6 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!connected) item { Text("服务未连接，历史记录仍可查看", style = MiuixTheme.textStyles.body2) }
-                if (tasks.any { it.active }) item { MemoryPanel(memory) }
                 if (tasks.isEmpty()) item { Text("暂无 WPA 字典安全评估任务") }
                 items(tasks, key = { it.id }) { task ->
                     Card(Modifier
@@ -130,10 +121,7 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                             Text(formatDate(task.createdAt), style = MiuixTheme.textStyles.body2)
                             TaskNetworks(task)
                             Text(task.dictionaryNames.joinToString("、"), style = MiuixTheme.textStyles.body2)
-                            if (task.evaluationFinished()) Assessment(task) else {
-                                task.memoryLimitMiB?.let { Text("计算内存预算：$it MiB", style = MiuixTheme.textStyles.body2) }
-                                Progress(task)
-                            }
+                            if (task.evaluationFinished()) Assessment(task) else Progress(task)
                             if (task.state == HashcatTaskState.SUCCEEDED) {
                                 Text(
                                     "已成功发现密码，点击查看详情",
@@ -198,7 +186,6 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                         item { TextField(value = sheet.input, onValueChange = viewModel::input, label = "hc22000 文本", modifier = Modifier.fillMaxWidth(), maxLines = 8) }
                     }
                     HashcatSheetPage.DICTIONARIES -> {
-                        item { MemoryPanel(memory, taskId = sheet.taskId, selectedMiB = sheet.memoryLimitMiB, onSelect = viewModel::allocateMemory, enabled = connected && !sheet.busy) }
                         item { Text("选择字典（可多选，自动合并并去重，保留首次出现的顺序）", style = MiuixTheme.textStyles.body2) }
                         if (dictionaries.isEmpty()) item { Text("资源管理中暂无普通字典；脚本字典不可选。") }
                         items(dictionaries, key = { it.id }) { dictionary ->
@@ -217,14 +204,6 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
                             item { Text(task.state.label(), style = MiuixTheme.textStyles.subtitle) }
                             item { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { TaskNetworks(task) } }
                             item { if (task.evaluationFinished()) Assessment(task) else Progress(task) }
-                            if (!task.evaluationFinished()) item {
-                                val editable = task.state == HashcatTaskState.RUNNING || task.state == HashcatTaskState.PAUSED
-                                MemoryPanel(memory, taskId = task.id, selectedMiB = sheet.memoryLimitMiB ?: task.memoryLimitMiB,
-                                    onSelect = if (editable) viewModel::allocateMemory else null, enabled = connected && !sheet.busy)
-                                if (editable && sheet.memoryLimitMiB != null) TextButton("应用内存预算",
-                                    onClick = { viewModel.applyMemory(task.id) }, enabled = connected && !sheet.busy,
-                                    modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.textButtonColorsPrimary())
-                            }
                             if (task.devices.isNotBlank()) item { Text("计算设备：${task.devices}", style = MiuixTheme.textStyles.body2) }
                             if (task.candidates.isNotBlank()) item { Text("当前候选批次：${task.candidates}", style = MiuixTheme.textStyles.body2) }
                             items(task.findings) { finding ->
@@ -308,101 +287,6 @@ private fun Assessment(task: HashcatTaskSnapshot) {
     Text("计算耗时：${if (task.computeDurationMillis > 0) String.format(Locale.ROOT, "%.2f秒", task.computeDurationMillis / 1000.0) else "未记录"}", style = MiuixTheme.textStyles.body2)
     Text("平均校验速度：${if (task.computeDurationMillis > 0) "${task.averageSpeed} H/s" else "未记录"}", style = MiuixTheme.textStyles.body2)
     Text("已评估：${task.completed}/${task.total}", style = MiuixTheme.textStyles.body2)
-}
-
-/** 下方宽条显示实测 RAM；上方虚线显示预算预览，滑动不会改变实际占用数字。 */
-@Composable
-private fun MemoryPanel(
-    memory: HashcatMemorySnapshot?, taskId: String? = null, selectedMiB: Int? = null,
-    onSelect: ((Int) -> Unit)? = null, enabled: Boolean = true,
-) {
-    val colors = MiuixTheme.colorScheme
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("实时系统内存", style = MiuixTheme.textStyles.subtitle)
-            if (memory == null) {
-                Text("加载中", style = MiuixTheme.textStyles.body2)
-                return@Column
-            }
-            if (memory.error != null || memory.totalBytes <= 0) {
-                Text(memory.error ?: "无法读取内存", style = MiuixTheme.textStyles.body2)
-                return@Column
-            }
-            Text("总内存 ${memorySize(memory.totalBytes)} · 可用 ${memorySize(memory.availableBytes)}",
-                style = MiuixTheme.textStyles.body2)
-            Text("采样时间 ${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(memory.capturedAt))} · 每秒更新",
-                style = MiuixTheme.textStyles.footnote1)
-            val unreadable = memory.tasks.filter { it.pssBytes == null }
-            val current = memory.tasks.firstOrNull { it.taskId == taskId }?.pssBytes ?: 0
-            val others = memory.tasks.filter { it.taskId != taskId }.sumOf { it.pssBytes ?: 0 }
-            val used = memory.totalBytes - memory.availableBytes
-            val remainingUsed = (used - current - others).coerceAtLeast(0)
-            val maximum = (memory.assignableBytes(taskId) / HASHCAT_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-            val budget = selectedMiB ?: 0
-            val otherColor = colors.onSurfaceVariantSummary
-            val taskColor = colors.secondary
-            val currentColor = colors.primary
-            val freeColor = colors.surfaceVariant
-            if (unreadable.isEmpty() && current + others <= used) {
-                Canvas(Modifier
-                    .fillMaxWidth()
-                    .height(38.dp)) {
-                    fun position(bytes: Long) = (bytes.toDouble() / memory.totalBytes * size.width).toFloat().coerceIn(0f, size.width)
-                    val top = 14.dp.toPx()
-                    var left = 0f
-                    listOf(remainingUsed to otherColor, others to taskColor, current to currentColor, memory.availableBytes to freeColor).forEach { (bytes, color) ->
-                        val right = (left + position(bytes)).coerceAtMost(size.width)
-                        drawRect(color, Offset(left, top), Size((right - left).coerceAtLeast(0f), size.height - top))
-                        left = right
-                    }
-                    if (onSelect != null && maximum > 0 && budget > 0) {
-                        val start = position(remainingUsed + others)
-                        val width = position(budget.toLong() * HASHCAT_MIB).coerceAtMost(size.width - start)
-                        drawRect(currentColor, Offset(start, 2.dp.toPx()), Size(width, 8.dp.toPx()),
-                            style = Stroke(1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 3.dp.toPx()))))
-                    }
-                }
-                MemoryLegend("系统及其他应用", remainingUsed, otherColor)
-                MemoryLegend("其他运行任务（PSS）", others, taskColor)
-                if (taskId != null) MemoryLegend("本任务实际（PSS）", current, currentColor)
-                MemoryLegend("可用（含可回收内存）", memory.availableBytes, freeColor)
-            } else {
-                Text(if (unreadable.isNotEmpty()) "任务内存读取失败，暂无法绘制完整分类：${unreadable.joinToString { it.error.orEmpty() }}"
-                    else "本次 PSS 与可用内存统计存在重叠，等待下一次采样。", style = MiuixTheme.textStyles.body2)
-            }
-            val reserved = memory.tasks.filter { it.taskId != taskId }.sumOf { (it.budgetMiB?.toLong() ?: 0) * HASHCAT_MIB }
-            Text("其他运行任务预算 ${memorySize(reserved)} · 当前可分配 ${memorySize(memory.assignableBytes(taskId))}", style = MiuixTheme.textStyles.body2)
-            io.github.bszapp.wifitoolbox.ui.component.ImmediateVisibility(visible = onSelect != null) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (budget > 0) "本任务计算内存预算：$budget MiB（虚线为预览）" else "请使用滑块选择本任务的内存预算", style = MiuixTheme.textStyles.body2)
-                    if (maximum > 1) Slider(value = budget.coerceIn(1, maximum).toFloat(),
-                        onValueChange = { onSelect?.invoke(it.toInt().coerceIn(1, maximum)) },
-                        valueRange = 1f..maximum.toFloat(), enabled = enabled)
-                    else if (maximum == 1) TextButton("分配 1 MiB", onClick = { onSelect?.invoke(1) }, enabled = enabled)
-                    if (budget > maximum) Text("所选预算超过当前可分配额度，请调整后再运行。", style = MiuixTheme.textStyles.body2)
-                    Text("预算限制计算缓冲区；PSS 不包含驱动未映射的独立 GPU 内存。预算过小可能无法运行，运行中修改需保存恢复点后继续。",
-                        style = MiuixTheme.textStyles.footnote1)
-                }
-            }
-            io.github.bszapp.wifitoolbox.ui.component.ImmediateVisibility(visible = onSelect == null && selectedMiB != null) {
-                if (selectedMiB != null) Text("本任务计算内存预算：$selectedMiB MiB", style = MiuixTheme.textStyles.body2)
-            }
-            Text("GPU 驱动未映射到进程的内存计入系统部分，任务部分采用实测 PSS。", style = MiuixTheme.textStyles.footnote1)
-        }
-    }
-}
-
-@Composable
-private fun MemoryLegend(label: String, bytes: Long, color: androidx.compose.ui.graphics.Color) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Canvas(Modifier.size(10.dp)) { drawCircle(color) }
-        Text("$label：${memorySize(bytes)}", style = MiuixTheme.textStyles.footnote1)
-    }
-}
-private fun memorySize(bytes: Long): String {
-    val gib = 1024.0 * 1024 * 1024
-    return if (bytes >= gib) String.format(Locale.ROOT, "%.2f GiB", bytes / gib)
-    else String.format(Locale.ROOT, "%.1f MiB", bytes.toDouble() / HASHCAT_MIB)
 }
 
 @Composable

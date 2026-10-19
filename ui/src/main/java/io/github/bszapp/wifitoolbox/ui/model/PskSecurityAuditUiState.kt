@@ -26,7 +26,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
-enum class NormalWifiSubmode { SCAN, PSK_SECURITY_AUDIT, WPS_SECURITY_AUDIT }
 enum class PskSecurityAuditSheetPage { CONFIGURATION, DICTIONARIES, DETAIL, SAVED, RECOVERY, MANUAL }
 enum class WpsAuditSheetPage { TARGET, ACCESS_POINTS, CONFIGURATION, DETAIL, RECOVERY }
 
@@ -72,8 +71,6 @@ class PskSecurityAuditUiState(
     private val controller: IAppController,
     private val scope: CoroutineScope,
 ) {
-    private val _submode = MutableStateFlow(NormalWifiSubmode.SCAN)
-    val submode = _submode.asStateFlow()
     val config = controller.tasks.auditConfig
     val wpsConfig = controller.tasks.wpsAuditConfig
     val logPanelConfig = controller.tasks.logPanelConfig
@@ -116,10 +113,9 @@ class PskSecurityAuditUiState(
 
     val wpsForm = _wpsForm.asStateFlow()
 
-    fun selectSubmode(value: NormalWifiSubmode) { _submode.value = value }
     private fun currentConfig() = config.value
     private fun currentWpsConfig() = wpsConfig.value
-    fun configure(value: NormalWifiSubmode = submode.value) {
+    fun configure(value: NormalWifiSubmode) {
         if (value == NormalWifiSubmode.WPS_SECURITY_AUDIT) configureWps() else _sheet.value =
             PskSecurityAuditSheetState(show = true, config = currentConfig())
     }

@@ -115,7 +115,7 @@ private enum class BottomBarDestination(
     val icon: ImageVector,
 ) {
     Home("主页", Icons.Rounded.Cottage),
-    List("列表", Icons.Rounded.Podcasts),
+    List("网络", Icons.Rounded.Podcasts),//TODO:好像名字还没改？
     Tools("工具", Icons.Rounded.HomeRepairService),
     Setting("设置", Icons.Rounded.Settings),
 }

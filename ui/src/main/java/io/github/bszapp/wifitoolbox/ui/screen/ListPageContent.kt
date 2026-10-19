@@ -127,6 +127,7 @@ interface ListPageActions {
     fun stopUsbMonitorTask()
     fun enterMonitorMode(command: String)
     fun setMonitorCapture(enabled: Boolean, frequencyMhz: Int = 0, hopping: Boolean = false)
+    fun setMonitorFrequency(frequencyMhz: Int, hopping: Boolean)
     fun clearMonitorCapture(handshakesOnly: Boolean)
     fun interruptModeSwitch(operationId: Long)
     fun interruptMonitorClear(operationId: Long)
@@ -409,7 +410,7 @@ fun ListPageContent(
                         end = innerPadding.calculateEndPadding(layoutDirection) + 12.dp,
                         bottom = bottomInnerPadding + when {
                             auditMode -> 160.dp
-                            selectedSource == WifiMode.MONITOR -> 84.dp
+                            selectedSource == WifiMode.MONITOR -> 160.dp
                             else -> 8.dp
                         },
                     ),
@@ -426,7 +427,7 @@ fun ListPageContent(
                                 ListFloatingAction.CAPTURE -> FloatingActionButton(
                                     onClick = {
                                         if (modeState?.capturing == true) actions.setMonitorCapture(false)
-                                        else showCaptureChannels = true
+                                        else actions.setMonitorCapture(true)
                                     },
                                 ) {
                                     Icon(
@@ -434,6 +435,9 @@ fun ListPageContent(
                                         if (modeState?.capturing == true) "停止持续抓取" else "持续抓取",
                                         tint = colorScheme.onPrimary,
                                     )
+                                }
+                                ListFloatingAction.FREQUENCY -> FloatingActionButton(onClick = { showCaptureChannels = true }) {
+                                    Icon(Icons.Rounded.Tune, "设置监听频率", tint = colorScheme.onPrimary)
                                 }
                                 ListFloatingAction.CONFIGURE -> FloatingActionButton(onClick = actions::configureAudit) {
                                     Icon(Icons.Rounded.Tune, "编辑检测运行行为", tint = colorScheme.onPrimary)
@@ -467,11 +471,13 @@ fun ListPageContent(
         show = showCaptureChannels && selectedSource == WifiMode.MONITOR,
         channels = modeState?.availableChannels.orEmpty(),
         scanResults = wifiState.scanResults,
+        frequencyMhz = modeState?.monitorStatistics?.frequencyMhz ?: 0,
+        configuredFrequencyMhz = modeState?.monitorFrequencyMhz ?: 0,
+        hopping = modeState?.autoHoppingEnabled == true,
+        capturing = modeState?.capturing == true,
+        enabled = usbMonitorTask == null && !controlsBusy && modeState?.clearingCapture != true,
         onDismiss = { showCaptureChannels = false },
-        onStart = { frequency, hopping ->
-            showCaptureChannels = false
-            actions.setMonitorCapture(true, frequency, hopping)
-        },
+        onChange = actions::setMonitorFrequency,
     )
 
     WpsPbcInputSheet(show = showWpsPbcInput, isStarting = startingWpsPbc,

@@ -39,7 +39,7 @@ data class HashcatNetwork(val ssid: String, val mac: String) {
 
 /** 启动元数据尺寸固定；字典、握手及恢复文件均由 FD 提供。 */
 @Parcelize
-data class HashcatLaunch(val id: String, val createdAt: Long, val revision: Long, val memoryLimitMiB: Int? = null) : Parcelable
+data class HashcatLaunch(val id: String, val createdAt: Long, val revision: Long) : Parcelable
 
 data class HashcatTaskSnapshot(
     val id: String,
@@ -60,7 +60,7 @@ data class HashcatTaskSnapshot(
     val dictionaryNames: List<String> = emptyList(),
     val findings: List<HashcatFinding> = emptyList(),
     val error: String? = null,
-    /** 每个计算设备的预算上限，非进程实际占用；null 保留上游自动调优。 */
+    /** 本次启动时系统剩余内存换算出的设备最大内存；null 表示尚未采样或旧记录未保存。 */
     val memoryLimitMiB: Int? = null,
     val computeDurationMillis: Long = 0,
     val averageSpeed: Long = 0,
@@ -116,10 +116,9 @@ interface IHashcatController {
     val kernels: StateFlow<HashcatKernelSnapshot?>
     suspend fun refreshKernels()
     suspend fun compileKernels()
-    suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String
-    suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>, memoryLimitMiB: Int): String
+    suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>): String
+    suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>): String
     suspend fun delete(taskId: String)
     suspend fun pause(taskId: String)
     suspend fun resume(taskId: String)
-    suspend fun setMemoryLimit(taskId: String, memoryLimitMiB: Int)
 }

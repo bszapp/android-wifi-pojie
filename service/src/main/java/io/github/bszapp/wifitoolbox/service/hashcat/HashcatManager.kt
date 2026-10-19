@@ -94,7 +94,7 @@ internal class HashcatManager(
     }
     fun unregister(cb: IHashcatCallback) { if (callback?.asBinder() == cb.asBinder()) callback = null }
 
-    fun start(id: String, input: ParcelFileDescriptor, resume: Boolean, initialRevision: Long = 0, createdAt: Long = System.currentTimeMillis(), memoryLimitMiB: Int? = null) {
+    fun start(id: String, input: ParcelFileDescriptor, resume: Boolean, initialRevision: Long = 0, createdAt: Long = System.currentTimeMillis()) {
         require(UUID.fromString(id).toString() == id) { "Hashcat 任务 ID 无效" }
         synchronized(lock) { check(!exiting && id !in deletingIds) { "服务正在退出或任务正在删除" } }
         val existing = synchronized(lock) { records[id] }
@@ -103,17 +103,11 @@ internal class HashcatManager(
         val record = Record((existing?.snapshot ?: HashcatTaskSnapshot(id, createdAt)).copy(
             state = HashcatTaskState.RUNNING, step = "接收运行文件", error = null,
             revision = maxOf(existing?.snapshot?.revision ?: 0, initialRevision) + 1,
-            memoryLimitMiB = memoryLimitMiB,
+            memoryLimitMiB = null,
         ), directory)
         val ownedInput = ParcelFileDescriptor.dup(input.fileDescriptor)
         try { synchronized(lock) {
             check(!exiting && id !in deletingIds && records[id] === existing) { "Hashcat 任务启动状态已改变" }
-            memoryLimitMiB?.let { budget ->
-                require(budget > 0) { "内存预算必须大于 0 MiB" }
-                val measured = readMemory()
-                check(measured.error == null && measured.tasks.all { it.pssBytes != null }) { "无法读取实时内存，暂不能分配预算" }
-                require(budget.toLong() * HASHCAT_MIB <= measured.assignableBytes(id)) { "内存预算超过当前可分配内存" }
-            }
             records[id] = record
         } } catch (error: Throwable) { ownedInput.close(); throw error }
         notify(record, true)
@@ -206,11 +200,16 @@ internal class HashcatManager(
                 computeDurationMillis = saved.computeDurationMillis, averageSpeed = saved.averageSpeed,
                 revision = maxOf(revision, saved.revision)) }
             val previousDuration = saved.computeDurationMillis
+            val measured = HashcatMemoryReader.read(emptyList())
+            check(measured.error == null) { measured.error ?: "无法读取设备剩余内存" }
+            val maximumMemoryMiB = (measured.availableBytes / HASHCAT_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            check(maximumMemoryMiB > 0) { "设备剩余内存不足1MiB" }
+            change(record) { copy(memoryLimitMiB = maximumMemoryMiB) }
             val result = record.controller.run(HashcatRequest(
                 executable = File(incoming, "libhashcat.so"), handshakeFile = File(incoming, "handshake.hc22000"),
                 dictionaryFile = File(incoming, "dictionary.txt"), runtimeDirectory = dir,
                 restore = resume && File(dir, "session.restore").isFile,
-                deviceMemoryLimitMiB = record.snapshot.memoryLimitMiB,
+                deviceMemoryLimitMiB = maximumMemoryMiB,
             )) { event ->
                 when (event) {
                     is HashcatEvent.Output -> File(dir, "run.log").appendText(event.text)

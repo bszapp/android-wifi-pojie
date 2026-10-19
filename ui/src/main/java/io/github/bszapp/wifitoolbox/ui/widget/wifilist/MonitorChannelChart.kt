@@ -94,6 +94,7 @@ internal fun MonitorChannelChart(
     scanResults: List<ScanResult>,
     selectedFrequency: Int?,
     onSelect: (Int) -> Unit,
+    enabled: Boolean = true,
 ) {
     val supported = remember(channels, band) {
         channels.filter { it.frequencyMhz in band.frequencies }.distinctBy { it.frequencyMhz }
@@ -179,7 +180,8 @@ internal fun MonitorChannelChart(
                 Canvas(
                     modifier = Modifier.fillMaxWidth().height(chartHeight)
                         .semantics { contentDescription = "${band.title} 信道与信号图，${visible.size} 个接入点" }
-                        .pointerInput(supported, axis, left, right, bottom) {
+                        .pointerInput(enabled, supported, axis, left, right, bottom) {
+                            if (!enabled) return@pointerInput
                             fun selectAt(position: Float) {
                                 if (right <= left) return
                                 val frequency = axis.frequency(position, left, right)
