@@ -149,12 +149,28 @@ class HashcatViewModel(application: Application) : AndroidViewModel(application)
         }
     }
     fun toggleTask(id: String) {
+        val form = _sheet.value
+        if (form.busy || !connected.value) return
+        val task = history.value.firstOrNull { it.id == id } ?: return
+        if (task.state != HashcatTaskState.RUNNING && task.state != HashcatTaskState.PAUSED) return
+        _sheet.value = form.copy(busy = true, message = null)
         viewModelScope.launch {
-            _sheet.value = _sheet.value.copy(busy = true, message = null)
             try {
-                val task = history.value.first { it.id == id }
                 if (task.state == HashcatTaskState.PAUSED) controller.resume(id) else controller.pause(id)
                 _sheet.value = _sheet.value.copy(busy = false)
+            } catch (error: Throwable) { error(error) }
+        }
+    }
+
+    /** 创建服务端合成的速度测试任务并关闭流程弹层；成功后直接打开任务详情。 */
+    fun speedTest() {
+        val form = _sheet.value
+        if (form.busy) return
+        viewModelScope.launch {
+            _sheet.value = form.copy(busy = true, message = null)
+            try {
+                val id = controller.startSpeedTest()
+                _sheet.value = HashcatSheetState(show = true, page = HashcatSheetPage.DETAIL, taskId = id)
             } catch (error: Throwable) { error(error) }
         }
     }

@@ -39,6 +39,7 @@ fun HashcatScreen(snackbarHostState: SnackbarHostState, viewModel: HashcatViewMo
             override fun deleteTask(id: String) = viewModel.deleteTask(id)
             override fun toggleTask(id: String) = viewModel.toggleTask(id)
             override fun pickFile() = pickFile.launch(arrayOf("*/*"))
+            override fun speedTest() = viewModel.speedTest()
         },
     )
 }

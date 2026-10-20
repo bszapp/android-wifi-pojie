@@ -1,7 +1,12 @@
 // UI QA 无头渲染器（qbsg 方式）。
 // 用法（经 :ui:uiQaRender 任务）:
 //   gradle :ui:uiQaRender -PqaArgs="<场景> [宽] [高] [light|dark|monet-light|monet-dark]"
-//   gradle :ui:uiQaRender -PqaArgs="matrix [场景1,场景2,…]"   // 全矩阵：场景 × 8 变体
+//   gradle :ui:uiQaRender -PqaArgs="matrix [场景范围] [变体范围]"   // 全矩阵：场景 × 8 变体
+// 矩阵范围语法（均以空格分隔）:
+//   场景范围：逗号分隔；精确名、通配（*、?）、!排除（仅排除时为全集减去）。
+//     例：page-hashcat / sheet-hashcat-* / !sheet-* / page-a,page-b
+//   变体范围：逗号分隔；主题名（light、dark、monet-light、monet-dark）或尺寸（412x915、360x740、watch、834x1112）。
+//     例：light,dark / 360x740 / light,dark,watch
 // 矩阵变体：每场景 4 主题 @412x915 + light @360x740 + light @834x1112 + 方形手表 light @200x200。
 package qa
 
@@ -114,6 +119,7 @@ private val qaScenes = listOf(
     "sheet-hashcat-detail-running",
     "sheet-hashcat-detail-paused",
     "sheet-hashcat-detail-succeeded",
+    "sheet-hashcat-detail-exhausted",
 )
 
 private data class QaVariant(val mode: String, val width: Int, val height: Int, val suffix: String? = null)
@@ -278,8 +284,10 @@ private fun qaSceneContent(name: String) {
         "sheet-hashcat-input" -> PreviewSheetHost {
             QaHashcatScreen(
                 page = HashcatSheetPage.INPUT,
-                input = "WPA*01*4913d600*28*2eb4fdc3a4*aa:bb:cc:dd:ee:ff*66:3b:97:af:9e:01*ChinaNet-Home*\n"
-                    .repeat(2),
+                input = listOf(
+                    "WPA*01*4913d600f2c8ac9eb5f6a2c4d1e3b7a9*aabbccddeeff*2eb4fdc3a4ff6601*486f6d65*663b97af9e01*2eb4fdc3a4b3fa4d01*8",
+                    "WPA*02**aabbccddeeff*2eb4fdc3a4ff6601*6f6666696365*663b97af9e01*2eb4fdc3a4b3fa4d01*2",
+                ).joinToString("\n"),
             )
         }
         "sheet-hashcat-dictionaries" -> PreviewSheetHost {
@@ -310,6 +318,10 @@ private fun qaSceneContent(name: String) {
         "sheet-hashcat-detail-succeeded" -> PreviewSheetHost {
             val tasks = qaHashcatTasks()
             QaHashcatScreen(page = HashcatSheetPage.DETAIL, taskId = "hashcat-2", tasks = listOf(tasks[1]))
+        }
+        "sheet-hashcat-detail-exhausted" -> PreviewSheetHost {
+            val tasks = qaHashcatTasks()
+            QaHashcatScreen(page = HashcatSheetPage.DETAIL, taskId = "hashcat-4", tasks = listOf(tasks[3]))
         }
         else -> Box(modifier = Modifier.fillMaxSize()) {
             Text(text = "场景 $name 尚未接线")
@@ -355,6 +367,7 @@ private object QaHashcatScreenActions : HashcatScreenActions {
     override fun deleteTask(id: String) = Unit
     override fun toggleTask(id: String) = Unit
     override fun pickFile() = Unit
+    override fun speedTest() = Unit
 }
 
 private fun qaColorMode(mode: String): ColorMode = when (mode) {
@@ -431,11 +444,16 @@ fun main(args: Array<String>) = runBlocking(Dispatchers.Swing) {
     // 输出目录由 uiQaRender 任务注入（qa.outDir），脱离任务直接跑时默认 qa-out/。
     val outputRoot = System.getProperty("qa.outDir")?.let { File(it) } ?: File("qa-out")
     if (name == "matrix") {
-        val scenes = if (args.size > 1) args[1].split(',') else qaScenes
+        val scenes = selectScenes(if (args.size > 1) args[1].split(',') else emptyList())
+        val variants = selectVariants(args.getOrNull(2))
+        if (scenes.isEmpty() || variants.isEmpty()) {
+            println("Matrix skipped: scenes=${scenes.size} variants=${variants.size}")
+            return@runBlocking
+        }
         var ok = 0
         val failed = mutableListOf<String>()
         for (scene in scenes) {
-            for (variant in qaVariants) {
+            for (variant in variants) {
                 try {
                     renderOnce(scene, variant, outputRoot)
                     ok++
@@ -445,12 +463,58 @@ fun main(args: Array<String>) = runBlocking(Dispatchers.Swing) {
                 }
             }
         }
-        println("Matrix done: ok=$ok failed=${failed.size}")
+        println("Matrix done: ok=$ok failed=${failed.size} scenes=${scenes.size} variants=${variants.size}")
         failed.forEach { println("FAILED $it") }
     } else {
         val width = args.getOrElse(1) { "412" }.toInt()
         val height = args.getOrElse(2) { "915" }.toInt()
         val mode = args.getOrElse(3) { "light" }
         renderOnce(name, QaVariant(mode, width, height), outputRoot)
+    }
+}
+
+/** 精确名或通配（*、?）匹配。 */
+private fun matchGlob(pattern: String, text: String): Boolean {
+    if ('*' !in pattern && '?' !in pattern) return pattern == text
+    val regex = buildString {
+        for (char in pattern) {
+            when (char) {
+                '*' -> append(".*")
+                '?' -> append(".")
+                else -> append(Regex.escape(char.toString()))
+            }
+        }
+    }
+    return Regex(regex).matches(text)
+}
+
+/** 解析场景范围：精确与通配联合选择，!前缀排除（仅排除时取全集）。 */
+private fun selectScenes(specs: List<String>): List<String> {
+    val tokens = specs.map { it.trim() }.filter { it.isNotEmpty() }
+    if (tokens.isEmpty()) return qaScenes
+    val includes = tokens.filter { !it.startsWith("!") }
+    val excludes = tokens.filter { it.startsWith("!") }.map { it.removePrefix("!") }
+    if (includes.isNotEmpty()) {
+        val unmatched = includes.filter { pattern -> qaScenes.none { matchGlob(pattern, it) } }
+        unmatched.forEach { println("Matrix warn: no scene matches '$it'") }
+    }
+    val pool = if (includes.isEmpty()) qaScenes else qaScenes.filter { scene -> includes.any { matchGlob(it, scene) } }
+    return pool.filter { scene -> excludes.none { matchGlob(it, scene) } }
+}
+
+/** 解析变体范围：主题名（light、dark、monet-light、monet-dark）只匹配基础尺寸变体；尺寸或后缀名（412x915、360x740、watch、834x1112）匹配对应变体。 */
+private fun selectVariants(spec: String?): List<QaVariant> {
+    val tokens = spec?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: return qaVariants
+    val sizePattern = Regex("\\d+x\\d+")
+    val isSizeToken: (String) -> Boolean = { token ->
+        sizePattern.matches(token) || token == "watch"
+    }
+    return qaVariants.filter { variant ->
+        tokens.any { token ->
+            when {
+                isSizeToken(token) -> token == variant.suffix || token == "${variant.width}x${variant.height}"
+                else -> token == variant.mode && variant.suffix == null
+            }
+        }
     }
 }

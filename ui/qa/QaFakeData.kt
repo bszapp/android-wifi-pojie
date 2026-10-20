@@ -372,7 +372,7 @@ fun qaHashcatTasks(): List<HashcatTaskSnapshot> = listOf(
         progressUnit = "BYTES",
         stepCompleted = 640,
         stepTotal = 2048,
-        stepUnit = "BYTES",
+        stepUnit = "PBKDF2",
         remainingSeconds = 42,
         speed = 183_200,
         devices = "Intel Iris Xe (CPU), 8 GiB",
@@ -412,6 +412,19 @@ fun qaHashcatTasks(): List<HashcatTaskSnapshot> = listOf(
         error = "设备内存不足，无法为本批候选分配缓冲区",
         networks = listOf(HashcatNetwork("CMCC-Office", "66:3b:97:af:9e:01")),
     ),
+    HashcatTaskSnapshot(
+        id = "hashcat-4",
+        createdAt = 1_759_970_000_000,
+        state = HashcatTaskState.EXHAUSTED,
+        completed = 10_000,
+        total = 10_000,
+        progressUnit = "BYTES",
+        devices = "Intel Iris Xe (CPU), 8 GiB",
+        dictionaryNames = listOf("手机号字典"),
+        computeDurationMillis = 88_000,
+        averageSpeed = 96_500,
+        networks = listOf(HashcatNetwork("TP-LINK_A302", "1c:7c:59:a3:02:11")),
+    ),
 )
 
 fun qaHashcatDictionaries(): List<DictionaryResource> = listOf(
@@ -446,10 +459,12 @@ fun qaHashcatDictionaries(): List<DictionaryResource> = listOf(
 
 fun qaHashcatKernelsCompiling(): HashcatKernelSnapshot = HashcatKernelSnapshot(
     state = HashcatKernelState.COMPILING,
-    stage = "正在编译PBKDF2内核（第2步, 共4步）",
+    stage = "正在编译PBKDF2内核（第2步）",
     steps = listOf(
         HashcatKernelStep("step-1", "解压内核源码", 1_000L, 6_000L),
         HashcatKernelStep("step-2", "编译PBKDF2内核", 6_000L, null),
+        HashcatKernelStep("step-3", "编译WPA校验内核", 0L, null),
+        HashcatKernelStep("step-4", "打包缓存", 0L, null),
     ),
     revision = 1L,
 )

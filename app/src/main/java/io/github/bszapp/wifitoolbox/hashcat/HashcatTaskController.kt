@@ -256,6 +256,20 @@ class HashcatTaskController(
         }
     }
 
+    override suspend fun startSpeedTest(): String = withContext(Dispatchers.IO) {
+        val active = requireBinding()
+        val id = ParcelFileDescriptor.open(program, ParcelFileDescriptor.MODE_READ_ONLY).use { fd ->
+            active.service.startHashcatSpeedTest(fd)
+        }
+        // 本地只落一条元数据占位；握手与字典由服务合成，完成后会经备份通道归档到 App。
+        synchronized(storeLock) {
+            save(HashcatTaskSnapshot(id, System.currentTimeMillis(), revision = 1,
+                state = HashcatTaskState.RUNNING, step = "接收运行文件", dictionaryNames = listOf("SpeedTest")))
+        }
+        fetch(active, id)
+        id
+    }
+
     override suspend fun refreshKernels() = withContext(Dispatchers.IO) { fetchKernels(requireBinding()) }
     override suspend fun compileKernels() = withContext(Dispatchers.IO) {
         val active = requireBinding()

@@ -51,7 +51,7 @@ data class ContainerProgress(
     val fraction: Float,
 ) : Parcelable
 
-/** 服务查询系统安装记录后生成的内部环境；所有容器文件操作在服务执行。 */
+/** 容器文件操作环境；Root 服务负责时由系统安装记录生成，App 负责时使用自身数据目录。 */
 @Parcelize
 data class ContainerEnvironment(
     val appDataPath: String,

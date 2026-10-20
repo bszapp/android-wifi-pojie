@@ -93,6 +93,7 @@ interface IMainService {
     void unregisterTaskManagerCallback(ITaskManagerCallback cb);
 
     void startHashcat(in HashcatLaunch request, in ParcelFileDescriptor inputs);
+    String startHashcatSpeedTest(in ParcelFileDescriptor program);
     boolean pauseHashcat(String taskId);
     void resumeHashcat(in HashcatLaunch request, in ParcelFileDescriptor inputs);
     ParcelFileDescriptor getHashcatTask(String taskId);

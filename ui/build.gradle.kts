@@ -279,6 +279,7 @@ val uiQaRender = tasks.register("uiQaRender", org.gradle.api.tasks.JavaExec::cla
     args = providers.gradleProperty("qaArgs").orElse("skeleton")
         .map { spec -> spec.split(' ').filter { it.isNotBlank() } }.get()
     // 默认骨架渲染：qa.PrintMatrix -- / :ui:uiQaRender -PqaArgs="matrix"
+    // 范围渲染：-PqaArgs="matrix sheet-hashcat-* light,dark"；场景支持通配与!排除，变体为主题名或尺寸，逗号分隔。
     doFirst {
         classpath = files(
             qaDir.resolve("classes"),

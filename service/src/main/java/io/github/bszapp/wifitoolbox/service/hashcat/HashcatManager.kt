@@ -114,6 +114,46 @@ internal class HashcatManager(
         workers.execute { execute(record, resume, ownedInput) }
     }
 
+    /** App 提供程序，服务端生成速度测试素材并按普通任务启动。 */
+    fun startSpeedTest(program: ParcelFileDescriptor): String {
+        synchronized(lock) { check(!exiting) { "服务正在退出" } }
+        val fixture = HashcatSpeedTest.generate()
+        val staging = File(HashcatController.runtimeBaseDirectory(), "speedtest-${fixture.id}")
+        var packingStarted = false
+        fun cleanupStaging() {
+            staging.walkBottomUp().forEach { runCatching { it.delete() } }
+        }
+        try {
+            check(staging.isDirectory || staging.mkdirs()) { "无法创建速度测试临时目录" }
+            val executable = File(staging, "libhashcat.so")
+            ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(program.fileDescriptor)).use { source ->
+                executable.outputStream().use { source.copyTo(it, 64 * 1024) }
+            }
+            File(staging, "handshake.hc22000").writeText(fixture.handshake)
+            File(staging, "dictionary.txt").writeText(fixture.dictionary)
+            File(staging, "snapshot.json").writeText(
+                HashcatTaskSnapshot(fixture.id, fixture.createdAt, revision = 1,
+                    dictionaryNames = listOf("SpeedTest")).toJson().toString())
+            val inputs = HashcatFiles.pipe { out ->
+                try {
+                    HashcatFiles.pack(out, mapOf(
+                        "snapshot.json" to File(staging, "snapshot.json"),
+                        "handshake.hc22000" to File(staging, "handshake.hc22000"),
+                        "dictionary.txt" to File(staging, "dictionary.txt"),
+                        "libhashcat.so" to executable,
+                    ))
+                } finally {
+                    cleanupStaging()
+                }
+            }
+            packingStarted = true
+            inputs.use { fd -> start(fixture.id, fd, resume = false) }
+            return fixture.id
+        } finally {
+            if (!packingStarted) cleanupStaging()
+        }
+    }
+
     fun pause(id: String): Boolean {
         val record = synchronized(lock) { requireRecord(id) }
         synchronized(record.operationLock) {

@@ -21,15 +21,28 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
-/** 容器状态与操作的唯一管理者；操作生命周期属于服务，与 App 回调的注册周期无关。 */
-internal class ContainerSystemManager(
+/** 在所属进程管理容器状态与操作，操作生命周期与状态回调的注册周期无关。 */
+class ContainerSystemManager internal constructor(
     private val trustedUid: () -> Int,
     private val terminalBinaryProvider: () -> File,
-    private val mounts: ContainerMountManager,
+    private val mounts: ContainerMountManager?,
     private val beforeDelete: () -> Unit,
     private val onError: (operation: String, error: Throwable) -> Unit,
     private val afterOperation: () -> Unit = {},
 ) {
+    /** App 进程执行文件操作时无需创建或管理 Root 挂载。 */
+    constructor(
+        appUid: Int,
+        terminalBinaryProvider: () -> File,
+        onError: (operation: String, error: Throwable) -> Unit,
+    ) : this(
+        trustedUid = { appUid },
+        terminalBinaryProvider = terminalBinaryProvider,
+        mounts = null,
+        beforeDelete = {},
+        onError = onError,
+    )
+
     private val lock = Any()
     private val callbacks = RemoteCallbackList<IContainerSystemCallback>()
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "container-system-worker") }
@@ -65,16 +78,17 @@ internal class ContainerSystemManager(
         require(data.isAbsolute && data.absolutePath != "/") {
             "容器数据目录必须为明确的绝对目录"
         }
-        // 环境来自系统安装记录。非 Root 服务不访问私有目录进行挂载校验。
+        // Root 服务的环境来自系统安装记录，校验目录归属；非 Root 进程不进行挂载校验。
         if (android.os.Process.myUid() == 0) {
             require(data.canonicalPath == data.absolutePath) { "容器数据目录必须为规范路径" }
             require(Os.stat(data.absolutePath).st_uid == trustedUid()) { "容器数据目录不属于可信 App" }
         }
         synchronized(lock) {
             check(!closed) { "容器管理器已关闭" }
-            if (environment == next) return
+            // App 实例空闲重连时重新读取安装状态，进行中的操作保留原状态。
+            if (environment == next && (mounts != null || running)) return
             check(!running) { "容器操作期间不能修改环境" }
-            mounts.refresh(next)
+            mounts?.refresh(next)
             environment = next
             val installed = isContainerSystemInstalled(rootfs(next))
             publishLocked(ContainerState(systemStatus = installedStatus(installed), installed = installed))
@@ -154,20 +168,20 @@ internal class ContainerSystemManager(
             when (request.operation) {
                 ContainerOperation.INSTALL -> {
                     beforeDelete()
-                    mounts.unmount()
+                    mounts?.unmount()
                     deletePaths(env, request.operation, listOf(rootfs(env)))
                     extract(env, request, requireNotNull(archive))
                 }
                 ContainerOperation.UPDATE -> extract(env, request, requireNotNull(archive))
                 ContainerOperation.RESET -> {
                     beforeDelete()
-                    mounts.unmount()
+                    mounts?.unmount()
                     deletePaths(env, request.operation, listOf(rootfs(env), runtime(env)))
                     extract(env, request, requireNotNull(archive))
                 }
                 ContainerOperation.UNINSTALL -> {
                     beforeDelete()
-                    mounts.unmount()
+                    mounts?.unmount()
                     deletePaths(env, request.operation, listOf(rootfs(env), runtime(env)))
                 }
             }
@@ -177,7 +191,7 @@ internal class ContainerSystemManager(
             runCatching { archive?.close() }
             // 包括失败、中断后的残留容器：是否挂载始终以最终存在的容器为准。
             Thread.interrupted()
-            try { mounts.refresh(env) }
+            try { mounts?.refresh(env) }
             catch (error: Throwable) {
                 if (failure == null || failure is InterruptedIOException) failure = error
                 else failure?.addSuppressed(error)
@@ -303,7 +317,7 @@ internal class ContainerSystemManager(
                 try { if (worker.awaitTermination(1, TimeUnit.SECONDS)) break }
                 catch (_: InterruptedException) { interrupted = true }
             }
-            mounts.close()
+            mounts?.close()
         } finally {
             delivery.shutdown()
             if (interrupted) Thread.currentThread().interrupt()

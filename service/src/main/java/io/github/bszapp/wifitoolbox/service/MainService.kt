@@ -756,6 +756,9 @@ open class MainService(
     override fun startHashcat(request: io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch, inputs: ParcelFileDescriptor) = communication.callFromApp {
         inputs.use { hashcatManager.start(request.id, it, false, request.revision, request.createdAt) }
     }
+    override fun startHashcatSpeedTest(program: ParcelFileDescriptor): String = communication.callFromApp {
+        program.use { hashcatManager.startSpeedTest(it) }
+    }
     override fun resumeHashcat(request: io.github.bszapp.wifitoolbox.contract.hashcat.HashcatLaunch, inputs: ParcelFileDescriptor) = communication.callFromApp {
         inputs.use { hashcatManager.start(request.id, it, true, request.revision, request.createdAt) }
     }

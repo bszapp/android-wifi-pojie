@@ -117,6 +117,8 @@ interface IHashcatController {
     suspend fun refreshKernels()
     suspend fun compileKernels()
     suspend fun start(handshake: String, dictionary: File, dictionaryNames: List<String>): String
+    /** 服务端原地合成随机 SpeedTest 任务（握手与字典均由服务生成），返回任务 ID。 */
+    suspend fun startSpeedTest(): String
     suspend fun rerun(taskId: String, dictionary: File, dictionaryNames: List<String>): String
     suspend fun delete(taskId: String)
     suspend fun pause(taskId: String)

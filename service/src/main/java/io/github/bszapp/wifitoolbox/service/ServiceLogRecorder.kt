@@ -14,6 +14,7 @@ import java.io.OutputStream
 import java.io.PrintStream
 import java.text.SimpleDateFormat
 import io.github.bszapp.wifitoolbox.contract.log.sliceLogRange
+import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 
@@ -35,13 +36,36 @@ class LogcatRecorder(
     private var nextId = 0L
     private var logcatProcess: java.lang.Process? = null
     private var stopping = false
+    private var captureGeneration = 0L
+    private var restartPending = false
+    private var automaticRestartDisabled = false
+    private val restartTimes = ArrayDeque<Long>()
     private var onVisibleRangeChanged: ((oldestAvailableId: Long, latestId: Long) -> Unit)? = null
 
-    fun start() {
-        val process = synchronized(lock) {
-            if (logcatProcess != null) return
+    fun start() = startCapture()
 
-            stopping = false
+    private fun startCapture(expectedGeneration: Long? = null) {
+        val capture = synchronized(lock) {
+            if (expectedGeneration == null) {
+                if (logcatProcess != null || restartPending || automaticRestartDisabled) return
+                stopping = false
+                captureGeneration++
+            } else {
+                if (stopping || captureGeneration != expectedGeneration ||
+                    !restartPending || automaticRestartDisabled) return
+                restartPending = false
+                val now = SystemClock.elapsedRealtime()
+                while (restartTimes.isNotEmpty() && now - restartTimes.peekFirst() >= AUTO_RESTART_WINDOW_MILLIS) {
+                    restartTimes.removeFirst()
+                }
+                if (restartTimes.size >= MAX_AUTO_RESTARTS) {
+                    automaticRestartDisabled = true
+                    appendLocked("[$recorderName] 一分钟内已自动重启${MAX_AUTO_RESTARTS}次，已永久停止自动重启")
+                    return@synchronized null
+                }
+                restartTimes.addLast(now)
+                appendLocked("[$recorderName] 正在自动重启logcat，一分钟内第${restartTimes.size}次")
+            }
             val captureStartedAtMillis = System.currentTimeMillis()
             val captureBoundary = CaptureBoundary(
                 tag = boundaryTag,
@@ -76,32 +100,42 @@ class LogcatRecorder(
                     "[$recorderName] 无法启动 logcat：" +
                         (error.message ?: error.javaClass.name),
                 )
-                return
+                null
             }
 
             logcatProcess = created
-            created to captureBoundary
+            restartPending = created == null
+            CaptureStart(created, captureBoundary, captureGeneration)
         }
 
         notifyCurrentVisibleRange()
-        startLogcatReader(process.first.inputStream, process.second)
+        if (capture == null) return
+        val process = capture.process
+        if (process == null) {
+            restartCapture(capture.generation)
+            return
+        }
+        startLogcatReader(process, capture.boundary, capture.generation)
         startErrorReader(
             name = "$threadName-error",
-            stream = process.first.errorStream,
+            stream = process.errorStream,
             prefix = "[logcat stderr] ",
         )
         Thread(
             {
-                val exitCode = runCatching { process.first.waitFor() }.getOrNull()
-                val shouldRecord = synchronized(lock) {
-                    if (logcatProcess === process.first) logcatProcess = null
-                    !stopping
+                val exitCode = waitForExit(process)
+                val shouldRestart = synchronized(lock) {
+                    if (stopping || captureGeneration != capture.generation || logcatProcess !== process) {
+                        false
+                    } else {
+                        logcatProcess = null
+                        restartPending = true
+                        true
+                    }
                 }
-                if (shouldRecord) {
-                    append(
-                        "[$recorderName] logcat 已退出" +
-                            (exitCode?.let { "，exitCode=$it" } ?: ""),
-                    )
+                if (shouldRestart) {
+                    append("[$recorderName] logcat 已退出，exitCode=$exitCode")
+                    restartCapture(capture.generation)
                 }
             },
             "$threadName-waiter",
@@ -110,6 +144,32 @@ class LogcatRecorder(
             start()
         }
     }
+
+    private fun restartCapture(generation: Long) {
+        Thread({ startCapture(generation) }, "$threadName-restart").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun waitForExit(process: java.lang.Process): Int {
+        var interrupted = false
+        try {
+            while (true) {
+                try { return process.waitFor() }
+                catch (_: InterruptedException) { interrupted = true }
+            }
+        } finally {
+            runCatching { process.outputStream.close() }
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private data class CaptureStart(
+        val process: java.lang.Process?,
+        val boundary: CaptureBoundary,
+        val generation: Long,
+    )
 
     fun setOnVisibleRangeChanged(
         listener: ((oldestAvailableId: Long, latestId: Long) -> Unit)?,
@@ -168,6 +228,8 @@ class LogcatRecorder(
     fun stop() {
         val process = synchronized(lock) {
             stopping = true
+            captureGeneration++
+            restartPending = false
             onVisibleRangeChanged = null
             entryListeners.clear()
             capturedEntryListeners.clear()
@@ -181,19 +243,24 @@ class LogcatRecorder(
     }
 
     private fun startLogcatReader(
-        stream: InputStream,
+        process: java.lang.Process,
         startAfter: CaptureBoundary,
+        generation: Long,
     ) {
         Thread(
             {
                 runCatching {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-                        readProtobufLogcat(stream, startAfter)
-                    } else {
-                        readTextLogcat(stream, startAfter)
+                    process.inputStream.use { stream ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                            readProtobufLogcat(stream, startAfter)
+                        } else {
+                            readTextLogcat(stream, startAfter)
+                        }
                     }
                 }.onFailure { error ->
-                    val shouldRecord = synchronized(lock) { !stopping }
+                    val shouldRecord = synchronized(lock) {
+                        !stopping && captureGeneration == generation && logcatProcess === process
+                    }
                     if (shouldRecord) {
                         append(
                             "[$recorderName] 读取 $threadName-output 失败：" +
@@ -201,6 +268,11 @@ class LogcatRecorder(
                         )
                     }
                 }
+                // 输出流结束或解析失败时终止该子进程，由退出线程统一处理重启。
+                val shouldStopProcess = synchronized(lock) {
+                    !stopping && captureGeneration == generation && logcatProcess === process
+                }
+                if (shouldStopProcess) runCatching { process.destroy() }
             },
             "$threadName-output",
         ).apply {
@@ -840,6 +912,8 @@ class LogcatRecorder(
         const val MAX_LOGCAT_MESSAGE_CHARACTERS = 3_000
         const val STACK_TRACE_SPACES_PER_INDENT = 4
         const val LOGCAT_BOUNDARY_LOOKBACK_MILLIS = 1_000L
+        const val AUTO_RESTART_WINDOW_MILLIS = 60_000L
+        const val MAX_AUTO_RESTARTS = 5
         const val LOGCAT_BUFFER_MARKER_PREFIX = "--------- beginning of"
         const val PROTOBUF_SIZE_BYTES = 8
         const val MAX_PROTOBUF_RECORD_BYTES = 1024 * 1024
