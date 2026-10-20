@@ -291,6 +291,7 @@ internal fun StartupMode?.displayName(): String = when (this) {
     StartupMode.SHIZUKU -> "Shizuku"
     StartupMode.SHIZUKU_TERMINAL -> "Terminal"
     StartupMode.ROOT -> "Root"
+    StartupMode.OTHER -> "Other"
     null -> "未知"
 }
 

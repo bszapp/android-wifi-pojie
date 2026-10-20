@@ -20,6 +20,7 @@ import io.github.bszapp.wifitoolbox.contract.startup.StartupMode
 import io.github.bszapp.wifitoolbox.contract.wifilist.IWifiListController
 import io.github.bszapp.wifitoolbox.contract.wifilist.MonitorMapFilterState
 import io.github.bszapp.wifitoolbox.launcher.ProcessLauncher
+import io.github.bszapp.wifitoolbox.launcher.ShellStartupScript
 import io.github.bszapp.wifitoolbox.launcher.RuntimeUpdateController
 import io.github.bszapp.wifitoolbox.logs.ServiceLogController
 import io.github.bszapp.wifitoolbox.logs.AppLogController
@@ -56,6 +57,7 @@ class ToolboxApp : Application(), IAppController {
         get() = normalStartupStarted
 
     private lateinit var processLauncher: ProcessLauncher
+    private var shellStartupScript: ShellStartupScript? = null
     private lateinit var wifiListController: WifiListController
     private lateinit var serviceLogController: ServiceLogController
     private lateinit var appLogController: AppLogController
@@ -94,6 +96,9 @@ class ToolboxApp : Application(), IAppController {
     override val startup = object : IStartupController {
         override val state get() = processLauncher.state
         override fun launch(mode: StartupMode) = processLauncher.launch(mode)
+        override fun buildShellStartupCommand(): String =
+            requireNotNull(shellStartupScript) { "启动脚本尚未准备好" }.command
+        override fun prepareForManualStartup() = processLauncher.prepareForManualStartup()
         override fun cancel() = processLauncher.cancel()
         override suspend fun stop(exit: Boolean) {
             // 服务断连会清理界面会话；停止服务任务由 App 持有，不随调用方 ViewModel 取消。
@@ -143,6 +148,17 @@ class ToolboxApp : Application(), IAppController {
         super.onCreate()
         errorReports = ErrorReportManager(this)
         if (isMainAppProcess()) {
+            appScope.launch(Dispatchers.IO) {
+                runCatching {
+                    ShellStartupScript(this@ToolboxApp).also { it.recreate() }
+                }.onSuccess { script ->
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        shellStartupScript = script
+                    }
+                }.onFailure { error ->
+                    Log.e(TAG, "准备服务启动脚本失败", error)
+                }
+            }
             errorReports.install(
                 captureLogs = { file ->
                     if (::appLogController.isInitialized) appLogController.saveCapturedLogs(file)

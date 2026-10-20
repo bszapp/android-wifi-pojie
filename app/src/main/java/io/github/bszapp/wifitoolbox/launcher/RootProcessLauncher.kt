@@ -118,7 +118,11 @@ internal class RootProcessLauncher(
         }
     })
 
-    private fun buildDetachedCommand(className: String): String {
+    internal fun buildDetachedCommand(
+        className: String,
+        mode: StartupMode = StartupMode.ROOT,
+        startupLogFile: File? = null,
+    ): String {
         val classPath = buildClassPath()
         val niceName = ServiceConfig.serviceProcessName(context)
 
@@ -127,19 +131,26 @@ internal class RootProcessLauncher(
         val niceNameQuoted = shellQuote(niceName)
         val classNameQuoted = shellQuote(className)
         val startupInfo = StartupInfo.forAppLaunch(
-            mode = StartupMode.ROOT,
+            mode = mode,
             uid = Process.myUid(),
             versionName = BuildConfig.VERSION_NAME,
             versionCode = BuildConfig.VERSION_CODE.toLong(),
             serviceCrashReportPath = File(context.cacheDir, "service-crash-report").absolutePath,
         )
         val startupInfoQuoted = shellQuote(StartupInfoParcelCodec.encode(startupInfo))
+        val output = startupLogFile?.let { shellQuote(it.absolutePath) } ?: "/dev/null"
+        val progress = if (startupLogFile != null) """
+            printf 'apk classpath is %s\n' "${'$'}CLASSPATH"
+            printf 'starting server...\n'
+        """.trimIndent() else ""
+        val closeLogReader = if (startupLogFile != null) "3<&-" else ""
 
         return """
             CLASSPATH=$classPathQuoted
             export CLASSPATH
             command -v nohup >/dev/null 2>&1 || { echo "nohup 不存在，无法启动独立服务"; exit 127; }
-            nohup $appProcess /system/bin --nice-name=$niceNameQuoted $classNameQuoted $startupInfoQuoted >/dev/null 2>&1 < /dev/null &
+            $progress
+            nohup $appProcess /system/bin --nice-name=$niceNameQuoted $classNameQuoted $startupInfoQuoted >$output 2>&1 < /dev/null $closeLogReader &
         """.trimIndent()
     }
 

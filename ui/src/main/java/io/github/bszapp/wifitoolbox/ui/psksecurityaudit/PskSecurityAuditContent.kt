@@ -327,7 +327,7 @@ private fun AuditConfiguration(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("连接方式", style = MiuixTheme.textStyles.subtitle)
         LegacyTabRow(
-            tabs = listOf("测试连通性", "测试连通性（网卡）"),
+            tabs = listOf("系统API", "网卡直连"),
             selectedTabIndex = config.connectionMethod.ordinal,
             onTabSelected = {
                 val method = PskSecurityAuditConnectionMethod.entries[it]

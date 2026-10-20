@@ -1,5 +1,7 @@
 package io.github.bszapp.wifitoolbox.ui.startup
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +45,9 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    LaunchedEffect(state.status) {
+        if (state.status == IDLE) viewModel.prepareForManualStartup()
+    }
     val serviceCrash = state.errorException as? ServiceCrashException
     val exportCrashArchive = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
@@ -72,6 +77,18 @@ fun StartupScreen(viewModel: StartupViewModel = viewModel()) {
         onExportCrashArchive = {
             exportCrashArchive.launch("service_crash_${System.currentTimeMillis()}.zip")
         },
+        onCopyStartupCommand = {
+            runCatching {
+                val clipboard = requireNotNull(context.getSystemService(ClipboardManager::class.java))
+                clipboard.setPrimaryClip(
+                    ClipData.newPlainText("服务启动命令", viewModel.buildShellStartupCommand()),
+                )
+            }.onSuccess {
+                Toast.makeText(context, "启动命令已复制", Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                Toast.makeText(context, "复制启动命令失败：${error.message}", Toast.LENGTH_LONG).show()
+            }
+        },
     )
 }
 
@@ -82,6 +99,7 @@ private fun StartupScreenContent(
     onLaunch: (StartupMode) -> Unit,
     onCancel: () -> Unit,
     onExportCrashArchive: () -> Unit,
+    onCopyStartupCommand: () -> Unit,
 ) {
     val serviceCrash = state.errorException as? ServiceCrashException
     val allModes = listOf(StartupMode.SHIZUKU, StartupMode.SHIZUKU_TERMINAL, StartupMode.ROOT)
@@ -279,16 +297,19 @@ private fun StartupScreenContent(
                         StartupMode.SHIZUKU -> "Shizuku"
                         StartupMode.SHIZUKU_TERMINAL -> "Shizuku Terminal"
                         StartupMode.ROOT -> "Root"
+                        StartupMode.OTHER -> "Other"
                     },
                     description = when (mode) {
                         StartupMode.SHIZUKU -> "绑定Shizuku用户服务，需要额外安装并启动Shizuku，有无root均支持"
                         StartupMode.SHIZUKU_TERMINAL -> "利用Shizuku完成服务启动，上一种方式无法启动可尝试此方法"
                         StartupMode.ROOT -> "适合已root的设备，不需要额外安装应用"
+                        StartupMode.OTHER -> "在已有Shell中执行启动脚本"
                     },
                     icon = when (mode) {
                         StartupMode.SHIZUKU -> Icons.TwoTone.Bolt
                         StartupMode.SHIZUKU_TERMINAL -> Icons.TwoTone.Terminal
                         StartupMode.ROOT -> Icons.TwoTone.Shield
+                        StartupMode.OTHER -> Icons.TwoTone.Terminal
                     },
                     showArrow = state.status == IDLE,
                     isFirst = index == 0,
@@ -296,6 +317,28 @@ private fun StartupScreenContent(
                     onClick = { if (state.status == IDLE) onLaunch(mode) },
                     modifier = Modifier.animateItem()
                 )
+            }
+
+            if (state.status == IDLE) {
+                item {
+                    Text(
+                        text = buildAnnotatedString {
+                            withStyle(
+                                SpanStyle(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    textDecoration = TextDecoration.Underline,
+                                ),
+                            ) {
+                                append("复制启动命令")
+                            }
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .animateItem()
+                            .padding(top = 4.dp)
+                            .clickable(onClick = onCopyStartupCommand),
+                    )
+                }
             }
 
             // 操作按钮
@@ -330,7 +373,7 @@ private fun StartupScreenContent(
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
-                            if (state.status == ERROR) {
+                            if (state.status == ERROR && state.selectedMode != StartupMode.OTHER) {
                                 Button(
                                     onClick = { state.selectedMode?.let(onLaunch) },
                                     shape = RoundedCornerShape(16.dp),
@@ -365,6 +408,7 @@ private fun StartupScreenPreviewContent(state: StartupState) {
             onLaunch = {},
             onCancel = {},
             onExportCrashArchive = {},
+            onCopyStartupCommand = {},
         )
     }
 }

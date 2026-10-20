@@ -258,6 +258,14 @@ class ProcessLauncher(
 
     fun launch(mode: StartupMode) = launch(mode, serviceUid = null)
 
+    /** 进入启动方式选择页时，等待手动启动的服务投递 Binder。 */
+    fun prepareForManualStartup() {
+        if (_state.value.status != StartupStatus.IDLE) return
+        expectedServiceUid = null
+        autoReconnectEnabled = true
+        ensureBrokerWatcher()
+    }
+
     private fun launch(mode: StartupMode, serviceUid: Int?, replacedServicePid: Int? = null) {
         expectedServiceUid = serviceUid
         val modeName = mode.displayName()
@@ -353,7 +361,7 @@ class ProcessLauncher(
                         StartupMode.ROOT -> RootProcessLauncher(context).forceStopService()
                         StartupMode.SHIZUKU, StartupMode.SHIZUKU_TERMINAL ->
                             ShizukuProcessLauncher(context).forceStopService(mode)
-                        null -> Unit
+                        StartupMode.OTHER, null -> Unit
                     }
                 }
             }
@@ -394,6 +402,7 @@ class ProcessLauncher(
     suspend fun restart(force: Boolean = false) = withContext(Dispatchers.Main) {
         val info = requireNotNull(_state.value.serviceInfo) { "缺少原服务启动信息" }
         val mode = requireNotNull(info.startupMode.toStartupMode()) { "未知服务启动方式" }
+        check(mode != StartupMode.OTHER) { "Other方式启动的服务请在原Shell中手动重新启动" }
         if (force) disconnect() else stop()
         launch(mode, info.serviceUid, info.servicePid)
     }
@@ -417,6 +426,7 @@ class ProcessLauncher(
             StartupMode.SHIZUKU -> launchViaShizukuDirect(serviceUid)
             StartupMode.SHIZUKU_TERMINAL -> launchViaShizukuTerminal(serviceUid)
             StartupMode.ROOT -> launchViaRoot(serviceUid)
+            StartupMode.OTHER -> error("请在已有Shell中执行启动命令")
         }
 
     private suspend fun launchViaShizukuDirect(serviceUid: Int?): Pair<AutoCloseable, IBinder> {
@@ -461,6 +471,7 @@ internal fun StartupMode?.displayName(): String = when (this) {
     StartupMode.SHIZUKU -> "Shizuku"
     StartupMode.SHIZUKU_TERMINAL -> "Shizuku Terminal"
     StartupMode.ROOT -> "Root"
+    StartupMode.OTHER -> "Other"
     null -> "未知"
 }
 
@@ -468,6 +479,7 @@ internal fun String?.toStartupMode(): StartupMode? = when (this) {
     "SHIZUKU" -> StartupMode.SHIZUKU
     "SHIZUKU_TERMINAL" -> StartupMode.SHIZUKU_TERMINAL
     "ROOT" -> StartupMode.ROOT
+    "OTHER" -> StartupMode.OTHER
     else -> null
 }
 

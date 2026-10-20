@@ -27,7 +27,8 @@ data class StartupInfo(
         require(trustedUid > 0) { "缺少可信 App UID 启动参数" }
         require(startupMode == StartupMode.ROOT.name ||
                 startupMode == StartupMode.SHIZUKU.name ||
-                startupMode == StartupMode.SHIZUKU_TERMINAL.name
+                startupMode == StartupMode.SHIZUKU_TERMINAL.name ||
+                startupMode == StartupMode.OTHER.name
         ) { "未知启动模式：$startupMode" }
         require(versionName.isNotBlank()) { "缺少版本名称启动参数" }
         require(versionCode >= 0) { "缺少版本编号启动参数" }
