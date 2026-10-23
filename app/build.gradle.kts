@@ -23,8 +23,8 @@ android {
         applicationId = "io.github.bszapp.wifitoolbox"
         minSdk = 24
         targetSdk = 37
-        versionCode = 2
-        versionName = "3.1.0-Alpha.8"
+        versionCode = 3
+        versionName = "3.1.0-Alpha.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {

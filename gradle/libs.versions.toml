@@ -1,6 +1,7 @@
 [versions]
 agp = "9.4.1"
 api = "13.1.5"
+core = "3.5.4"
 coreKtx = "1.19.0"
 hiddenapibypass = "6.1"
 junit = "4.13.2"
@@ -26,6 +27,7 @@ xz = "1.12"
 coroutines = "1.11.0"
 
 [libraries]
+core = { module = "com.google.zxing:core", version.ref = "core" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "composeMultiplatform" }
 androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }

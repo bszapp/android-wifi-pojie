@@ -37,7 +37,7 @@ android {
 dependencies {
     implementation(project(":contract"))
     implementation(project(":scripta"))
-    implementation("com.google.zxing:core:3.5.4")
+    implementation(libs.core)
 
     implementation(platform(libs.androidx.compose.bom))
 
@@ -45,8 +45,7 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.compose.runtime)
-    // materialkolor 的 rememberDynamicColorScheme 返回 androidx.compose.material3.ColorScheme，
-    // 仅供配色预览取色；ui-default 源码已不再使用任何 material3 组件或 MaterialTheme token。
+
     implementation(libs.androidx.compose.material3)
     implementation(libs.material.kolor)
     implementation(libs.miuix.preference)
